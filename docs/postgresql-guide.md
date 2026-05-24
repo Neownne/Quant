@@ -1,4 +1,4 @@
-# PostgreSQL 常用命令速查
+# PostgreSQL 使用指南
 
 > 适用环境：macOS + Homebrew 安装的 PostgreSQL
 

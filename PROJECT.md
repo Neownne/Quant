@@ -1,6 +1,7 @@
 # Quant — A 股量化交易项目
 
-> 最后更新：2026-05-24
+> 最后更新：2026-05-24  
+> GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
 
@@ -256,6 +257,7 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
+| 2026-05-24 | ETF/基金全页面支持：data_loader 按资产类型自动路由（stock_daily/etf_daily/fund_nav），基金净值曲线图，类型标签显示；Git 初始化 + GitHub 私有仓库推送；.gitignore 排除 .env 和 .claude/ |
 | 2026-05-24 | Web 策略编辑器（在线编写/保存/编译测试，自动注册到回测页面）；策略文档（strategies/README.md，含逻辑/参数/风险提示）；自选股非交易时段回退最近交易日数据；K线图代码直输+自选分组快捷切换；回测默认参数更新（20万本金、佣金万0.85） |
 | 2026-05-24 | Streamlit Web 界面：实时报价、K线图+技术指标（MA/MACD/RSI/Bollinger）、策略回测、模拟盘、每日自动同步调度；新增 paper_account/paper_orders/paper_positions 3张模拟盘表；backtrader 回测引擎封装 |
 | 2026-05-23 | 全面弃用东方财富，数据源迁移至腾讯/新浪/交易所；后复权统一；sync v2（tqdm + ProcessPoolExecutor + 跳过已完成 + 60s 超时）；db.py 临时表加 UUID；新增 stock_tick/stock_minute 表 + recorder.py |
