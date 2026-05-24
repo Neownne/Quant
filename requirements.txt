@@ -1,0 +1,22 @@
+# ===== 数据获取 =====
+akshare>=1.14.0
+
+# ===== 数据库 =====
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.30
+
+# ===== 数据处理 & 回测 =====
+pandas>=2.2.0
+numpy>=1.26.0
+backtrader>=1.9.78.123
+
+# ===== 可视化 =====
+matplotlib>=3.8.0
+mplfinance>=0.12.10b0
+
+# ===== 任务调度 =====
+schedule>=1.2.0
+
+# ===== 工具 =====
+python-dotenv>=1.0.0
+loguru>=0.7.0
