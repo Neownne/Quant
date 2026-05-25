@@ -9,6 +9,7 @@ from functools import wraps
 from typing import Callable
 
 import akshare as ak
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -324,16 +325,79 @@ def fetch_fund_nav(code: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     raw = raw.reset_index(drop=True)
+    # AKShare 仅返回：净值日期、单位净值、日增长率 —— 无累计净值
     df = pd.DataFrame({
         "code": code,
         "nav_date": pd.to_datetime(raw["净值日期"].values, errors="coerce").date,
         "unit_nav": pd.to_numeric(raw["单位净值"].values, errors="coerce"),
-        "accumulated_nav": pd.to_numeric(raw["累计净值"].values, errors="coerce"),
+        "accumulated_nav": np.nan,
         "daily_return": pd.to_numeric(raw.get("日增长率", pd.Series([0])).values, errors="coerce"),
     })
 
     df = df.dropna(subset=["unit_nav"])
     return df
+
+
+# ============================================================
+#  基本面/估值数据
+# ============================================================
+
+@retry_on_network_error()
+def fetch_stock_lg_indicator(symbol: str) -> pd.DataFrame:
+    """获取单只股票的估值指标（市值/PB）。
+    数据源：百度财经（通过 AKShare）。
+    返回 columns: code, trade_date, market_cap, float_market_cap, pe, pb, total_share, float_share"""
+    frames = []
+    for indicator, col_map in [
+        ("总市值", {"value": "market_cap"}),
+        ("市净率", {"value": "pb"}),
+    ]:
+        try:
+            raw = ak.stock_zh_valuation_baidu(symbol=symbol, indicator=indicator)
+            if raw is None or raw.empty:
+                continue
+            raw = raw.rename(columns=col_map)
+            frames.append(raw[["date", *col_map.values()]])
+        except Exception:
+            pass
+
+    if not frames:
+        return pd.DataFrame()
+
+    # Merge all indicators on date
+    from functools import reduce
+    df = reduce(lambda left, right: pd.merge(left, right, on="date", how="outer"), frames)
+    df = df.rename(columns={"date": "trade_date"})
+    df["code"] = symbol
+    df["trade_date"] = pd.to_datetime(df["trade_date"].values, errors="coerce").date
+    df["float_market_cap"] = np.nan
+    df["pe"] = np.nan
+    df["total_share"] = np.nan
+    df["float_share"] = np.nan
+    return df.dropna(subset=["trade_date"])
+
+
+@retry_on_network_error()
+def fetch_shareholder_count(symbol: str) -> pd.DataFrame:
+    """获取单只股票的股东户数变化历史。
+    数据源：东方财富。
+    返回 columns: code, end_date, shareholder_count, avg_holding_value, avg_holding_amount, total_market_cap"""
+    try:
+        raw = ak.stock_zh_a_gdhs_detail_em(symbol=symbol)
+    except Exception:
+        return pd.DataFrame()
+    if raw.empty:
+        return pd.DataFrame()
+    raw = raw.reset_index(drop=True)
+    df = pd.DataFrame({
+        "code": symbol,
+        "end_date": pd.to_datetime(raw["股东户数统计截止日"].values, errors="coerce").date,
+        "shareholder_count": pd.to_numeric(raw.get("股东户数-本次", 0), errors="coerce"),
+        "avg_holding_value": pd.to_numeric(raw.get("户均持股市值", 0), errors="coerce"),
+        "avg_holding_amount": pd.to_numeric(raw.get("户均持股数量", 0), errors="coerce"),
+        "total_market_cap": pd.to_numeric(raw.get("总市值", 0), errors="coerce"),
+    })
+    return df.dropna(subset=["end_date"])
 
 
 # ============================================================

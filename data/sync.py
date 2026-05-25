@@ -18,6 +18,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 from loguru import logger
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from tqdm import tqdm
 
@@ -27,6 +28,8 @@ from data.fetcher import (
     enrich_stock_basic,
     fetch_stock_daily,
     fetch_index_daily,
+    fetch_stock_lg_indicator,
+    fetch_shareholder_count,
     fetch_etf_list,
     fetch_etf_daily,
     fetch_fund_list,
@@ -127,6 +130,80 @@ def sync_index_daily(engine: Engine, start_date: str) -> None:
         time.sleep(DataConfig.REQUEST_INTERVAL)
 
     logger.success("指数日线同步完成")
+
+
+def sync_daily_extra(engine: Engine, start_date: str, workers: int = 4) -> None:
+    """同步估值指标（市值/PE/PB/股本）到 stock_daily_extra。"""
+    logger.info("=" * 50)
+    logger.info(f"开始同步估值指标，起始日期: {start_date} ...")
+
+    codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
+    cutoff = _latest_trading_day().strftime("%Y%m%d")
+
+    to_fetch = []
+    for code in codes:
+        existing = get_existing_dates("stock_daily_extra", code, engine)
+        latest = max(existing).strftime("%Y%m%d") if existing else start_date
+        if latest < cutoff:
+            to_fetch.append((code, latest))
+
+    logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
+
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_do_fetch_daily_extra, t) for t in to_fetch]
+        for f in tqdm(as_completed(futures), total=len(to_fetch), desc="估值指标"):
+            pass
+
+    logger.success("估值指标同步完成")
+
+
+def _do_fetch_daily_extra(args: tuple[str, str]) -> tuple[str, int]:
+    """模块级 worker，供 ProcessPoolExecutor 使用。"""
+    code, latest = args
+    try:
+        df = fetch_stock_lg_indicator(code)
+        if df.empty:
+            return code, 0
+        df = df[df["trade_date"] >= pd.to_datetime(latest).date()]
+        return code, upsert_df(df, "stock_daily_extra", engine=None)
+    except Exception as e:
+        logger.warning(f"{code} 估值指标同步失败: {e}")
+        return code, 0
+
+
+def sync_shareholder(engine: Engine, workers: int = 2) -> None:
+    """同步股东户数数据到 stock_shareholder。数据量小，低并发。"""
+    logger.info("=" * 50)
+    logger.info("开始同步股东户数 ...")
+
+    codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
+
+    # 股东户数是季度数据，跳过已有记录的股票
+    existing_codes = set()
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT DISTINCT code FROM stock_shareholder")).fetchall()
+        existing_codes = {x[0] for x in r}
+    to_fetch = [c for c in codes if c not in existing_codes]
+    logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
+
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_do_fetch_shareholder, c) for c in to_fetch]
+        for f in tqdm(as_completed(futures), total=len(to_fetch), desc="股东户数"):
+            pass
+
+    logger.success("股东户数同步完成")
+
+
+def _do_fetch_shareholder(code: str) -> tuple[str, int]:
+    """模块级 worker，供 ProcessPoolExecutor 使用。"""
+    try:
+        df = fetch_shareholder_count(code)
+        if df.empty:
+            return code, 0
+        return code, upsert_df(df, "stock_shareholder", engine=None)
+    except Exception as e:
+        logger.warning(f"{code} 股东户数同步失败: {e}")
+        return code, 0
 
 
 # ============================================================
@@ -257,14 +334,15 @@ def main():
         choices=[
             "all", "stock", "stock-daily", "index",
             "etf", "etf-daily", "fund", "fund-nav",
+            "daily-extra", "shareholder",
         ],
         default="all",
         help="同步模式",
     )
     parser.add_argument(
         "--start",
-        default="20200101",
-        help="起始日期 YYYYMMDD（默认 20200101）",
+        default="20150101",
+        help="起始日期 YYYYMMDD（默认 20150101，10年历史）",
     )
     parser.add_argument(
         "--workers",
@@ -301,6 +379,12 @@ def main():
 
         if mode in ("all", "fund-nav"):
             sync_fund_nav(engine, args.start, args.workers)
+
+        if mode in ("all", "daily-extra"):
+            sync_daily_extra(engine, args.start, args.workers)
+
+        if mode in ("all", "shareholder"):
+            sync_shareholder(engine, args.workers)
 
     finally:
         engine.dispose()

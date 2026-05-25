@@ -128,6 +128,34 @@ CREATE TABLE IF NOT EXISTS stock_minute (
 );
 """
 
+# DDL —— 估值指标（市值、PE、PB）
+DDL_STOCK_DAILY_EXTRA = """
+CREATE TABLE IF NOT EXISTS stock_daily_extra (
+    code             VARCHAR(10),
+    trade_date       DATE,
+    market_cap       DOUBLE PRECISION,   -- 总市值（亿元）
+    float_market_cap DOUBLE PRECISION,   -- 流通市值（亿元）
+    pe               DOUBLE PRECISION,   -- 市盈率
+    pb               DOUBLE PRECISION,   -- 市净率
+    total_share      DOUBLE PRECISION,   -- 总股本（亿股）
+    float_share      DOUBLE PRECISION,   -- 流通股本（亿股）
+    PRIMARY KEY (code, trade_date)
+);
+"""
+
+# DDL —— 股东户数（散户代理变量）
+DDL_STOCK_SHAREHOLDER = """
+CREATE TABLE IF NOT EXISTS stock_shareholder (
+    code               VARCHAR(10),
+    end_date           DATE,              -- 报告期（季度末）
+    shareholder_count  BIGINT,            -- 股东户数
+    avg_holding_value  DOUBLE PRECISION,  -- 户均持股市值（万元）
+    avg_holding_amount DOUBLE PRECISION,  -- 户均持股数量（股）
+    total_market_cap   DOUBLE PRECISION,  -- 报告期总市值
+    PRIMARY KEY (code, end_date)
+);
+"""
+
 # DDL —— 模拟盘账户
 DDL_PAPER_ACCOUNT = """
 CREATE TABLE IF NOT EXISTS paper_account (
@@ -187,16 +215,19 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_BASIC))
         conn.execute(text(DDL_STOCK_DAILY))
         conn.execute(text(DDL_INDEX_DAILY))
-        conn.execute(text(DDL_ETF_BASIC))
-        conn.execute(text(DDL_ETF_DAILY))
-        conn.execute(text(DDL_FUND_BASIC))
-        conn.execute(text(DDL_FUND_NAV))
+        # -- ETF/基金表暂时禁用 --
+        # conn.execute(text(DDL_ETF_BASIC))
+        # conn.execute(text(DDL_ETF_DAILY))
+        # conn.execute(text(DDL_FUND_BASIC))
+        # conn.execute(text(DDL_FUND_NAV))
         conn.execute(text(DDL_STOCK_TICK))
         conn.execute(text(DDL_STOCK_MINUTE))
+        conn.execute(text(DDL_STOCK_DAILY_EXTRA))
+        conn.execute(text(DDL_STOCK_SHAREHOLDER))
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
         conn.execute(text(DDL_PAPER_POSITIONS))
-    logger.info("数据库表初始化完成（12张表）")
+    logger.info("数据库表初始化完成（10张表）")  # 8+2张新增（估值+股东）
     engine.dispose()
 
 
@@ -236,6 +267,8 @@ def upsert_df(df: pd.DataFrame, table: str, engine: Engine | None = None) -> int
             pk = "code, trade_time, period"
         elif "tick" in table:
             pk = "code, trade_time"
+        elif "shareholder" in table:
+            pk = "code, end_date"
         elif "fund_nav" in table:
             pk = "code, nav_date"
         else:
