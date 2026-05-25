@@ -156,6 +156,35 @@ CREATE TABLE IF NOT EXISTS stock_shareholder (
 );
 """
 
+# DDL —— 财务数据（同花顺财务摘要）
+DDL_STOCK_FINANCIAL = """
+CREATE TABLE IF NOT EXISTS stock_financial (
+    code               VARCHAR(10),
+    report_date        DATE,
+    revenue            DOUBLE PRECISION,
+    net_profit         DOUBLE PRECISION,
+    gross_margin       DOUBLE PRECISION,
+    net_margin         DOUBLE PRECISION,
+    roe                DOUBLE PRECISION,
+    total_assets       DOUBLE PRECISION,
+    total_liability    DOUBLE PRECISION,
+    bps                DOUBLE PRECISION,
+    eps                DOUBLE PRECISION,
+    cash_flow          DOUBLE PRECISION,
+    PRIMARY KEY (code, report_date)
+);
+"""
+
+# DDL —— 行业分类
+DDL_STOCK_INDUSTRY = """
+CREATE TABLE IF NOT EXISTS stock_industry (
+    code               VARCHAR(10) PRIMARY KEY,
+    industry_sw1       VARCHAR(50),
+    industry_sw2       VARCHAR(50),
+    market             VARCHAR(10)
+);
+"""
+
 # DDL —— 模拟盘账户
 DDL_PAPER_ACCOUNT = """
 CREATE TABLE IF NOT EXISTS paper_account (
@@ -224,10 +253,12 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_MINUTE))
         conn.execute(text(DDL_STOCK_DAILY_EXTRA))
         conn.execute(text(DDL_STOCK_SHAREHOLDER))
+        conn.execute(text(DDL_STOCK_FINANCIAL))
+        conn.execute(text(DDL_STOCK_INDUSTRY))
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
         conn.execute(text(DDL_PAPER_POSITIONS))
-    logger.info("数据库表初始化完成（10张表）")  # 8+2张新增（估值+股东）
+    logger.info("数据库表初始化完成（12张表）")  # 10+2张新增（财务+行业）
     engine.dispose()
 
 
@@ -269,6 +300,10 @@ def upsert_df(df: pd.DataFrame, table: str, engine: Engine | None = None) -> int
             pk = "code, trade_time"
         elif "shareholder" in table:
             pk = "code, end_date"
+        elif "financial" in table:
+            pk = "code, report_date"
+        elif "industry" in table:
+            pk = "code"
         elif "fund_nav" in table:
             pk = "code, nav_date"
         else:
