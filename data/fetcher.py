@@ -493,6 +493,57 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
 
 
 # ============================================================
+#  行业分类数据
+# ============================================================
+
+@retry_on_network_error()
+def fetch_industry_classification() -> pd.DataFrame:
+    """获取全市场股票行业分类。
+    主数据源: stock_basic 表的 industry/market 字段。
+    返回 columns: code, industry_sw1, industry_sw2, market
+    """
+    from data.db import get_engine
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                "SELECT code, industry, market FROM stock_basic WHERE industry IS NOT NULL AND industry != ''",
+                conn,
+            )
+    except Exception as e:
+        logger.warning(f"从 stock_basic 获取行业分类失败: {e}")
+        engine.dispose()
+        return pd.DataFrame(columns=["code", "industry_sw1", "industry_sw2", "market"])
+    finally:
+        engine.dispose()
+
+    if df.empty:
+        return pd.DataFrame(columns=["code", "industry_sw1", "industry_sw2", "market"])
+
+    df = df.rename(columns={"industry": "industry_sw1"})
+    df["industry_sw2"] = ""
+
+    # 从代码前缀推断市场板块分类
+    def _detect_market(code: str) -> str:
+        if code.startswith("688"):
+            return "科创板"
+        elif code.startswith("300") or code.startswith("301"):
+            return "创业板"
+        elif code.startswith("8") or code.startswith("4"):
+            return "北交所"
+        elif code.startswith("6"):
+            return "主板"
+        elif code.startswith("0") or code.startswith("2"):
+            return "主板"
+        return "未知"
+
+    df["market"] = df["code"].apply(_detect_market)
+
+    return df[["code", "industry_sw1", "industry_sw2", "market"]]
+
+
+# ============================================================
 #  实时/日内数据（逐笔 & 分钟K线）
 # ============================================================
 

@@ -40,3 +40,23 @@ def test_fetch_financial_data_invalid_code():
     assert isinstance(df, pd.DataFrame)
     for col in FINANCIAL_COLS:
         assert col in df.columns, f"Missing column: {col} (empty df should still have schema)"
+
+
+def test_fetch_industry_classification():
+    """行业分类应返回大量股票的 DataFrame。"""
+    from data.fetcher import fetch_industry_classification
+    df = fetch_industry_classification()
+
+    assert isinstance(df, pd.DataFrame)
+    assert not df.empty, "行业分类不应为空"
+    assert "code" in df.columns
+    assert "industry_sw1" in df.columns
+    assert "market" in df.columns
+    # 至少覆盖 2000 只股票
+    assert len(df) > 2000, f"行业表应有 >2000 条记录，实际: {len(df)}"
+    # code 不应有重复
+    assert df["code"].is_unique, "code 不应有重复"
+    # 检查 market 值
+    valid_markets = {"主板", "创业板", "科创板", "北交所", "未知"}
+    actual_markets = set(df["market"].unique())
+    assert actual_markets.issubset(valid_markets), f"无效 market 值: {actual_markets - valid_markets}"
