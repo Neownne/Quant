@@ -78,3 +78,45 @@ class TestAlpha191Intraday:
         df["low"] = df[["open", "close"]].min(axis=1) - 0.1
         result = upper_shadow(df)
         assert result.dropna().mean() > 0.5
+
+
+class TestAlpha191Flow:
+    def test_all_registered(self):
+        from factors import ALL_FACTORS
+        expected = [
+            "money_flow", "obv_roc", "force_index",
+            "cwt", "volume_climax", "vwap_momentum",
+        ]
+        for name in expected:
+            assert name in ALL_FACTORS, f"{name} 未注册"
+
+    def test_factor_output_valid(self):
+        from factors.engine import FactorEngine
+        df = _make_ohlcv(200)
+        engine = FactorEngine(factor_names=[
+            "money_flow", "obv_roc", "force_index",
+            "cwt", "volume_climax", "vwap_momentum",
+        ])
+        result = engine.compute(df)
+        for col in engine.factor_names:
+            valid_pct = result[col].notna().sum() / len(result)
+            assert valid_pct > 0.5, f"{col} 有效值仅 {valid_pct:.1%}"
+
+
+class TestAlpha191Gap:
+    def test_all_registered(self):
+        from factors import ALL_FACTORS
+        expected = ["overnight_ret", "overnight_ret_std", "open_auction_jump", "gap_ma_dev"]
+        for name in expected:
+            assert name in ALL_FACTORS, f"{name} 未注册"
+
+    def test_factor_output_valid(self):
+        from factors.engine import FactorEngine
+        df = _make_ohlcv(200)
+        engine = FactorEngine(factor_names=[
+            "overnight_ret", "overnight_ret_std", "open_auction_jump", "gap_ma_dev",
+        ])
+        result = engine.compute(df)
+        for col in engine.factor_names:
+            valid_pct = result[col].notna().sum() / len(result)
+            assert valid_pct > 0.5, f"{col} 有效值仅 {valid_pct:.1%}"
