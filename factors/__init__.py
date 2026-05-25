@@ -7,8 +7,8 @@
 """
 from factors.engine import FactorEngine
 from factors.alpha101 import ALPHA101_FUNCTIONS
+from factors.custom import CUSTOM_FACTORS
 
-# ALL_FACTORS 将在后续任务中加入 alpha191 和 custom
-ALL_FACTORS: dict = dict(ALPHA101_FUNCTIONS)
+ALL_FACTORS: dict = {**ALPHA101_FUNCTIONS, **CUSTOM_FACTORS}
 
 __all__ = ["FactorEngine", "ALL_FACTORS"]

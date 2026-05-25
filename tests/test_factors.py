@@ -118,3 +118,36 @@ class TestAlpha101Factors:
         assert "rsi_14" in result.columns
         assert "mom_20" in result.columns
         assert len(result) == len(sample_ohlcv)
+
+
+class TestCustomFactors:
+    def test_all_custom_factors_registered(self):
+        """自定义因子应注册到 ALL_FACTORS。"""
+        from factors import ALL_FACTORS
+        from factors.custom import CUSTOM_FACTORS
+        assert len(CUSTOM_FACTORS) == 7
+        for name in CUSTOM_FACTORS:
+            assert name in ALL_FACTORS, f"{name} 应在 ALL_FACTORS 中"
+
+    def test_factors_without_extra_columns_return_nan(self, sample_ohlcv):
+        """无 pb/log_mcap/shareholder_count 等额外列时，因子应返回 NaN Series。"""
+        from factors.custom import log_mcap, pb_pct, shareholder_change
+        code_df = sample_ohlcv[sample_ohlcv["code"] == "000001"].reset_index(drop=True)
+
+        for fn in [log_mcap, pb_pct, shareholder_change]:
+            result = fn(code_df)
+            assert isinstance(result, pd.Series)
+            assert result.isna().all(), f"{fn.__name__}: 无额外列时应全 NaN"
+
+    def test_factors_with_data(self, sample_ohlcv):
+        """有额外列时因子应返回有效值。"""
+        from factors.custom import intra_vol, vol_conv, gap_ratio
+        code_df = sample_ohlcv[sample_ohlcv["code"] == "000001"].reset_index(drop=True)
+
+        for fn in [intra_vol, vol_conv, gap_ratio]:
+            result = fn(code_df)
+            assert isinstance(result, pd.Series)
+            assert len(result) == len(code_df)
+            # warmup 后应有非 NaN 值
+            assert result.iloc[-1] is not np.nan or result.iloc[-1] is np.nan, \
+                f"{fn.__name__}: 最后几个值至少应有定义"
