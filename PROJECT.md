@@ -10,11 +10,11 @@
 ```
                     ┌─────────────────────────────────────────────────┐
                     │            Streamlit Web UI (app/)              │
-                    │  ┌──────┐ ┌──────┐ ┌───────┐ ┌──────┐ ┌─────┐ │
-                    │  │实时报价│ │K线图 │ │策略回测│ │模拟盘│ │股票池│ │
-                    │  └──┬───┘ └──┬───┘ └───┬───┘ └──┬───┘ └──┬──┘ │
-                    │     └────────┼──────────┼────────┼────────┘    │
-                    │   data_loader / backtest_runner / stock_pools  │
+                    │  ┌──────┐ ┌──────┐ ┌───────┐ ┌──────┐ ┌─────┐ ┌──────┐│
+                    │  │实时报价│ │K线图 │ │策略回测│ │模拟盘│ │股票池│ │ML监控││
+                    │  └──┬───┘ └──┬───┘ └───┬───┘ └──┬───┘ └──┬──┘ └──┬───┘│
+                    │     └────────┼──────────┼────────┼────────┘       │    │
+                    │   data_loader / backtest_runner / stock_pools / ML │    │
                     └──────────────┼─────────────────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
@@ -28,7 +28,7 @@
                                   │
                     ┌─────────────┴─────────────┐
                     │     PostgreSQL 数据库       │
-                    │  10 张表（行情 + 基本面 + 模拟盘）│
+                    │  13 张表（行情 + 基本面 + 模拟盘）│
                     └───────────────────────────┘
 ```
 
@@ -48,7 +48,7 @@ quant/
 │   └── settings.py           # 集中配置（数据库、数据参数）
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 12 张表 DDL + 连接池 + upsert
+│   ├── db.py                 # 13 张表 DDL + 连接池 + upsert
 │   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东）
 │   ├── sync.py               # 历史数据批量同步（多进程增量，6 种模式）
 │   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
@@ -84,9 +84,10 @@ quant/
 │
 ├── portfolio/                  # 组合优化层
 │   ├── __init__.py             # 模块导出
-│   ├── selector.py             # Top-N 选股 + ST/次新过滤
-│   ├── allocator.py            # 等权/波动率倒数仓位分配
-│   └── risk.py                 # 个股止损 + 组合回撤控制
+│   ├── selector.py             # 选股（Top-N + ST/停牌/涨跌停/次新过滤）
+│   ├── allocator.py            # 仓位分配（等权/波动率倒数 + 单只10%/行业30%上限）
+│   ├── risk.py                 # 风控（个股-8%止损/ATR止损/组合回撤减仓/最大回撤清仓）
+│   └── paper_engine.py         # PaperEngine 日频ML模拟盘引擎（信号→订单→DB写入）
 │
 ├── tests/                      # 测试（59 通过 + 1 跳过）
 │   ├── test_fetcher.py         # 数据获取测试
@@ -105,15 +106,19 @@ quant/
 │   │   ├── 3_🧪_Backtest.py      # 策略回测（单只 / 股票池批量）
 │   │   ├── 4_📋_Paper_Trade.py   # 模拟盘账户/持仓/委托
 │   │   ├── 5_📝_Strategy_Editor.py # 在线策略编辑器
-│   │   └── 6_📦_Stock_Pools.py   # 自定义股票池（代码编写筛选规则）
+│   │   ├── 6_📦_Stock_Pools.py   # 自定义股票池（代码编写筛选规则）
+│   │   ├── 7_🔴_Recorder.py      # 数据录制（分钟K线 + 逐笔交易）
+│   │   └── 8_📊_ML_Monitor.py    # ML策略监控（IC看板/模型表现/当日信号/模拟盘净值）
 │   └── utils/
 │       ├── data_loader.py    # DB查询 + 指标计算 + K线图构建 + 实时行情
 │       ├── backtest_runner.py # backtrader 回测封装 + A股费用 + 大盘过滤器
 │       └── stock_pools.py    # 股票池引擎（加载/编译/执行筛选规则）
 │
 ├── scripts/                  # 批量工具
-│   ├── batch_backtest.py     # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
-│   └── run_ml_backtest.py    # ML 选股端到端验证（因子→训练→预测→回测）
+│   ├── batch_backtest.py         # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
+│   ├── run_ml_backtest.py        # ML 选股端到端评估（因子→筛选→训练→汇总）
+│   ├── run_simulation.py         # ML 每日模拟回测（选股→分配→止损→P&L）
+│   └── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
 │
 ├── docs/                     # 文档 & 研究报告
 │   ├── quant-strategy-research.md  # 量化策略研究报告
@@ -212,6 +217,12 @@ app/main.py (入口)
         ├── Stock Pools ──> stock_pools 引擎
         │                    └── filter_stocks() 编译/测试/保存/预览
         │
+        ├── ML Monitor ──> portfolio/paper_engine + factors/monitor
+        │                  ├── IC 看板：因子 RankIC 柱状图 + 时序 + 衰减
+        │                  ├── 模型表现：Walk-forward 指标表 + 特征重要性
+        │                  ├── 当日信号：最新截面预测 Top-20 + 行业分布
+        │                  └── 模拟盘净值：权益曲线 + 回撤图 + 持仓明细
+        │
         └── Strategy Editor ──> ~/.quant_strategies/（保存 .py 文件）
                                 │
                                 └── strategies/__init__.py 动态加载
@@ -219,7 +230,7 @@ app/main.py (入口)
 
 ---
 
-## 数据库表结构（10 张表）
+## 数据库表结构（13 张表）
 
 ### 行情数据（5 张）
 
@@ -238,13 +249,14 @@ app/main.py (入口)
 | `stock_daily_extra` | (code, trade_date) | 估值指标（总市值、PB） | 百度财经 |
 | `stock_shareholder` | (code, end_date) | 股东户数（季度，含户均持股市值/持股数量） | 东方财富 |
 
-### 模拟盘（3 张）
+### 模拟盘（4 张）
 
 | 表 | 说明 |
 |---|---|
 | `paper_account` | 模拟账户（名称、初始资金、现金） |
 | `paper_orders` | 委托记录（代码、方向、价格、数量、状态） |
 | `paper_positions` | 当前持仓（代码、数量、均价） |
+| `paper_daily_pnl` | 每日净值（现金、持仓市值、总资产、日收益、回撤） |
 
 > ETF/基金相关 4 张表（etf_basic / etf_daily / fund_basic / fund_nav）DDL 保留但未启用。fetcher.py 和 sync.py 中对应函数代码完整保留但调用链已注释。
 
@@ -382,7 +394,7 @@ strategies/__init__.py
 - `fetch_shareholder_count()` — 股东户数（季度，数据源东方财富）
 
 ### data/db.py → 数据库层
-- `init_db()`：建表（幂等，10 张表），被 `app/main.py` 各页面调用
+- `init_db()`：建表（幂等，13 张表），被 `app/main.py` 各页面调用
 - `upsert_df()`：写入，被 `data/sync.py` 和 `data/recorder.py` 调用
 
 ### data/sync.py → 数据同步
@@ -438,6 +450,7 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
+| 2026-05-25 | **Phase 4 组合优化+风控+模拟盘**：选股增强（停牌/涨跌停过滤）；仓位上限（单只10%+行业30%迭代裁剪+再分配）；风控增强（ATR止损/组合-20%减仓50%/最大-25%清仓）；新建 `portfolio/paper_engine.py`（PaperEngine 日频ML模拟盘引擎，过滤→预测→分配→风控→订单→DB写入）；新增 `paper_daily_pnl` 表（第13张表）；新建 `app/pages/8_📊_ML_Monitor.py`（IC看板/模型表现/当日信号/模拟盘净值四Tab）；`scripts/run_simulation.py` 重构为使用 portfolio/risk 函数；`scripts/verify_paper_trading.py` 端到端验证（simulation vs PaperEngine 选股重合度100%收益相关性1.0）。59测试通过 |
 | 2026-05-25 | **Phase 3 因子扩展+集成优化**：新增 28 个 Alpha191 A 股因子（换手率5/日内形态4/资金流向6/波动率5/隔夜效应4/流动性4 共 6 类）；激活 extra_data（市值+PB+股东户数）激活 3 个估值因子；市场状态识别 `models/regime.py`（牛/熊/震荡三态）；正交筛选 `factors/screening.py`（Spearman 秩相关 < 0.7 门禁）；XGBoost+LightGBM 概率平均集成 `EnsemblePredictor`；`models/tuning.py` 阈值搜索+Optuna 调优。因子总数 37→65，经正交筛选 ≥ 50 活跃。E2E 集成回测 4 窗口 acc=54.2%, prec=52.1%, rec=26.9%。全量 59 测试通过 + 1 跳过 |
 | 2026-05-25 | **Phase 2 ML 选股管线**：新增 `models/` 模块（dataset 构造+walk-forward 切分、XGBoost/LightGBM 训练器、DailyPredictor 截面排序）；新增 `portfolio/` 模块（Top-N 选股+ST/次新过滤、等权/波动率倒数分配、个股止损+回撤风控）；新增 `scripts/run_ml_backtest.py` 端到端验证脚本；新增 16 个测试（models 9 + portfolio 7），全量 36 测试通过；Phase 1+2 合计 37 个因子 + IC 监控 + ML 训练预测 + 组合优化 |
 | 2026-05-25 | **股票池系统**：新增自定义股票池编辑器（`app/pages/6_📦_Stock_Pools.py`），支持 Python 代码定义筛选规则，集成回测批量模式；**回测升级**：支持单只/股票池双模式，池模式含汇总统计+排名表+分布直方图+CSV 导出；**基本面数据**：新增 `stock_daily_extra`（市值/PB）和 `stock_shareholder`（股东户数）2 张表及对应 fetcher/sync；**历史数据扩展**：stock_daily 起始日期 2020→2015，约 1,000 万行；**fetcher 修复**：`stock_a_indicator_lg` 不存在→改用 `stock_zh_valuation_baidu` |
