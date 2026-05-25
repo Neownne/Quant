@@ -410,13 +410,24 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
     数据源：同花顺（通过 AKShare）。
     返回 columns: code, report_date, revenue, net_profit, gross_margin,
                    net_margin, roe, total_assets, total_liability, bps, eps, cash_flow"""
+
+    # 12-column schema for consistent output (even on empty/error returns)
+    spec_cols = ["revenue", "net_profit", "gross_margin", "net_margin", "roe",
+                 "total_assets", "total_liability", "bps", "eps", "cash_flow"]
+
+    def _empty_result() -> pd.DataFrame:
+        """Return an empty DataFrame with all required columns."""
+        empty = pd.DataFrame(columns=["code", "report_date"] + spec_cols)
+        empty["report_date"] = pd.to_datetime(empty["report_date"])
+        return empty
+
     try:
         raw = ak.stock_financial_abstract_ths(symbol=symbol)
     except Exception:
-        return pd.DataFrame()
+        return _empty_result()
 
     if raw.empty:
-        return pd.DataFrame()
+        return _empty_result()
 
     raw = raw.reset_index(drop=True)
 
@@ -424,8 +435,11 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
         "报告期": "report_date",
         "营业总收入": "revenue",
         "净利润": "net_profit",
+        "毛利率": "gross_margin",
         "销售净利率": "net_margin",
         "净资产收益率": "roe",
+        "总资产": "total_assets",
+        "总负债": "total_liability",
         "每股净资产": "bps",
         "基本每股收益": "eps",
         "每股经营现金流": "cash_flow",
@@ -434,6 +448,11 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
     # Only keep columns that exist in the raw DataFrame
     existing = {k: v for k, v in col_map.items() if k in raw.columns}
     df = raw[list(existing.keys())].rename(columns=existing)
+
+    # Ensure all required columns exist (fill missing with NaN)
+    for col in spec_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
     # Add code column
     df["code"] = symbol
@@ -448,8 +467,6 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
         series = df[col].replace([False, True], np.nan)
         # Coerce to string, strip whitespace
         s = series.astype(str).str.strip()
-        # Strip percentage sign and convert
-        is_pct = s.str.endswith("%")
         # Strip common Chinese financial units
         s = s.str.replace("亿", "").str.replace("万", "").str.replace("%", "").str.replace(",", "")
         df[col] = pd.to_numeric(s, errors="coerce")
@@ -459,8 +476,8 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
         # For 万/亿, the raw format represents actual amounts in those units, so we
         # leave the magnitude as-is to match the raw data presentation
 
-    # Reorder: code + report_date + numeric columns
-    return df[["code", "report_date"] + numeric_cols]
+    # Reorder: code + report_date + all spec columns
+    return df[["code", "report_date"] + spec_cols]
 
 
 # ============================================================
