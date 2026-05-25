@@ -228,3 +228,52 @@ class TestPredictor:
 
         with pytest.raises(KeyError):
             predictor.predict(bad_data)
+
+
+class TestEnsemble:
+    def test_ensemble_better_than_single(self):
+        """集成准确率应不低于最差单模型。"""
+        from models.trainer import train_xgboost, train_lightgbm
+        import numpy as np
+        import pandas as pd
+
+        np.random.seed(42)
+        n = 600
+        X = pd.DataFrame({
+            "f1": np.random.randn(n),
+            "f2": np.random.randn(n),
+            "f3": np.random.randn(n),
+        })
+        y = ((X["f1"].abs() + X["f2"] * 0.5 + X["f3"] * 0.3) > 1.0).astype(int)
+
+        split = int(n * 0.7)
+        X_tr, X_val = X.iloc[:split], X.iloc[split:]
+        y_tr, y_val = y.iloc[:split], y.iloc[split:]
+
+        xgb_model, xgb_metrics = train_xgboost(X_tr, y_tr, X_val, y_val)
+        lgb_model, lgb_metrics = train_lightgbm(X_tr, y_tr, X_val, y_val)
+
+        xgb_prob = xgb_model.predict_proba(X_val)[:, 1]
+        lgb_prob = lgb_model.predict_proba(X_val)[:, 1]
+        ensemble_prob = (xgb_prob + lgb_prob) / 2
+        ensemble_pred = (ensemble_prob >= 0.5).astype(int)
+
+        from sklearn.metrics import accuracy_score
+        ensemble_acc = accuracy_score(y_val, ensemble_pred)
+        assert ensemble_acc >= min(xgb_metrics["accuracy"], lgb_metrics["accuracy"]) - 0.02
+
+
+class TestTuning:
+    def test_find_best_threshold(self):
+        """应找到最大化 F1 的阈值。"""
+        from models.tuning import find_best_threshold
+        import numpy as np
+
+        np.random.seed(42)
+        n = 200
+        y_true = np.random.randint(0, 2, n)
+        y_prob = np.clip(y_true * 0.6 + np.random.randn(n) * 0.15, 0.05, 0.95)
+
+        best_t, best_f1 = find_best_threshold(y_true, y_prob)
+        assert 0.3 < best_t < 0.7
+        assert 0 < best_f1 <= 1.0

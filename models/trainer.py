@@ -146,3 +146,96 @@ def walk_forward_train(
         })
 
     return results
+
+
+class EnsemblePredictor:
+    """XGBoost + LightGBM 概率平均集成预测器。"""
+
+    def __init__(self, xgb_model, lgb_model, factor_names: list[str], threshold: float = 0.5):
+        self.xgb_model = xgb_model
+        self.lgb_model = lgb_model
+        self.factor_names = factor_names
+        self.threshold = threshold
+
+    def predict(self, factor_df: pd.DataFrame) -> pd.DataFrame:
+        missing = set(self.factor_names) - set(factor_df.columns)
+        if missing:
+            raise KeyError(f"缺少因子列: {missing}")
+
+        X = factor_df[self.factor_names].copy()
+        X = X.fillna(X.mean())
+
+        xgb_prob = self.xgb_model.predict_proba(X)[:, 1]
+        lgb_prob = self.lgb_model.predict_proba(X)[:, 1]
+        prob = (xgb_prob + lgb_prob) / 2
+
+        result = factor_df[["code"]].copy()
+        result["score"] = prob
+        result["rank"] = result["score"].rank(ascending=False, method="first").astype(int)
+        result = result.sort_values("rank")
+        return result.reset_index(drop=True)
+
+
+def walk_forward_train_ensemble(
+    df: pd.DataFrame,
+    factor_cols: list[str],
+    train_years: int = 3,
+    val_years: int = 1,
+    threshold: float = 0.5,
+) -> list[dict]:
+    """Walk-forward 训练（XGBoost + LightGBM 集成）。
+
+    返回: [{ensemble, xgb_model, lgb_model, metrics, ...}, ...]
+    """
+    from models.dataset import walk_forward_split
+
+    results = []
+
+    for train_df, val_df in walk_forward_split(df, train_years, val_years):
+        active_cols = [c for c in factor_cols if train_df[c].notna().any()]
+        if not active_cols:
+            continue
+        cols_to_use = active_cols + ["label"]
+
+        train_clean = train_df[cols_to_use].dropna()
+        val_clean = val_df[cols_to_use].dropna()
+
+        if len(train_clean) < 100 or len(val_clean) < 50:
+            continue
+
+        X_tr = train_clean[active_cols]
+        y_tr = train_clean["label"]
+        X_v = val_clean[active_cols]
+        y_v = val_clean["label"]
+
+        xgb_model, xgb_metrics = train_xgboost(X_tr, y_tr, X_v, y_v)
+        lgb_model, lgb_metrics = train_lightgbm(X_tr, y_tr, X_v, y_v)
+
+        xgb_prob = xgb_model.predict_proba(X_v)[:, 1]
+        lgb_prob = lgb_model.predict_proba(X_v)[:, 1]
+        ensemble_prob = (xgb_prob + lgb_prob) / 2
+        ensemble_pred = (ensemble_prob >= threshold).astype(int)
+
+        from sklearn.metrics import accuracy_score, precision_score, recall_score
+        ensemble_metrics = {
+            "accuracy": float(accuracy_score(y_v, ensemble_pred)),
+            "precision": float(precision_score(y_v, ensemble_pred, zero_division=0)),
+            "recall": float(recall_score(y_v, ensemble_pred, zero_division=0)),
+        }
+        logger.info(
+            f"Ensemble: acc={ensemble_metrics['accuracy']:.3f}, "
+            f"prec={ensemble_metrics['precision']:.3f}, rec={ensemble_metrics['recall']:.3f}"
+        )
+
+        results.append({
+            "ensemble": EnsemblePredictor(xgb_model, lgb_model, active_cols, threshold),
+            "xgb_model": xgb_model,
+            "lgb_model": lgb_model,
+            "metrics": ensemble_metrics,
+            "active_cols": active_cols,
+            "train_end": train_df["trade_date"].max(),
+            "val_start": val_df["trade_date"].min(),
+            "val_end": val_df["trade_date"].max(),
+        })
+
+    return results
