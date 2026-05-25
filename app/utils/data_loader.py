@@ -9,10 +9,8 @@ from data.db import get_engine
 # ---------- 资产类型检测 ----------
 
 def detect_asset_type(code: str) -> str:
-    """
-    检测代码属于哪种资产类型。
-    返回 "stock" / "etf" / "fund" / "unknown"。
-    """
+    """检测代码属于哪种资产类型。返回 "stock" / "unknown"。
+    ETF/基金检测暂时禁用，需要恢复时取消下方注释即可。"""
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(
@@ -22,19 +20,20 @@ def detect_asset_type(code: str) -> str:
             engine.dispose()
             return "stock"
 
-        row = conn.execute(
-            text("SELECT 1 FROM etf_basic WHERE code = :c"), {"c": code}
-        ).first()
-        if row:
-            engine.dispose()
-            return "etf"
-
-        row = conn.execute(
-            text("SELECT 1 FROM fund_basic WHERE code = :c"), {"c": code}
-        ).first()
-        if row:
-            engine.dispose()
-            return "fund"
+        # -- ETF/基金检测（暂时禁用） --
+        # row = conn.execute(
+        #     text("SELECT 1 FROM etf_basic WHERE code = :c"), {"c": code}
+        # ).first()
+        # if row:
+        #     engine.dispose()
+        #     return "etf"
+        #
+        # row = conn.execute(
+        #     text("SELECT 1 FROM fund_basic WHERE code = :c"), {"c": code}
+        # ).first()
+        # if row:
+        #     engine.dispose()
+        #     return "fund"
 
     engine.dispose()
     return "unknown"
@@ -80,18 +79,17 @@ def get_fund_list() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def get_all_assets() -> pd.DataFrame:
-    """股票 + ETF + 基金 合并列表，含 type 列。"""
+    """股票合并列表，含 type 列。（ETF/基金合并暂时禁用）"""
     stocks = get_stock_list()
-    etfs = get_etf_list()
-    funds = get_fund_list()
-    result = pd.concat([stocks, etfs, funds], ignore_index=True)
-    return result
+    # etfs = get_etf_list()   # -- 暂时禁用 --
+    # funds = get_fund_list() # -- 暂时禁用 --
+    return stocks  # pd.concat([stocks, etfs, funds], ignore_index=True)
 
 
 def get_asset_name(code: str) -> str:
-    """根据代码查名称，股票/ETF/基金表都查。"""
+    """根据代码查名称（股票表）。ETF/基金查询暂时禁用。"""
     engine = get_engine()
-    for table in ["stock_basic", "etf_basic", "fund_basic"]:
+    for table in ["stock_basic"]:  # , "etf_basic", "fund_basic" -- 暂时禁用
         with engine.connect() as conn:
             row = conn.execute(
                 text(f"SELECT name FROM {table} WHERE code = :c"), {"c": code}
@@ -105,40 +103,22 @@ def get_asset_name(code: str) -> str:
 
 @st.cache_data(ttl=60)
 def load_ohlcv(code: str, start: str, end: str) -> pd.DataFrame:
-    """
-    加载 OHLCV 数据，自动识别股票/ETF/基金。
-    股票 → stock_daily，ETF → etf_daily，基金 → fund_nav（净值线图）。
-    """
+    """加载 OHLCV 数据（股票 → stock_daily）。ETF/基金路由暂时禁用。"""
     at = detect_asset_type(code)
     engine = get_engine()
 
-    if at == "etf":
-        sql = """
-            SELECT trade_date, open, high, low, close, volume, amount
-            FROM etf_daily
-            WHERE code = :code AND trade_date BETWEEN :start AND :end
-            ORDER BY trade_date
-        """
-    elif at == "fund":
-        sql = """
-            SELECT nav_date AS trade_date,
-                   unit_nav AS open,
-                   accumulated_nav AS high,
-                   unit_nav AS low,
-                   unit_nav AS close,
-                   NULL AS volume,
-                   0 AS amount
-            FROM fund_nav
-            WHERE code = :code AND nav_date BETWEEN :start AND :end
-            ORDER BY nav_date
-        """
-    else:
-        sql = """
-            SELECT trade_date, open, high, low, close, volume, amount, turnover
-            FROM stock_daily
-            WHERE code = :code AND trade_date BETWEEN :start AND :end
-            ORDER BY trade_date
-        """
+    # -- ETF/基金路由（暂时禁用） --
+    # if at == "etf":
+    #     sql = """SELECT trade_date, open, high, low, close, volume, amount FROM etf_daily ..."""
+    # elif at == "fund":
+    #     sql = """SELECT nav_date AS trade_date, ... FROM fund_nav ..."""
+    # else:
+    sql = """
+        SELECT trade_date, open, high, low, close, volume, amount, turnover
+        FROM stock_daily
+        WHERE code = :code AND trade_date BETWEEN :start AND :end
+        ORDER BY trade_date
+    """
 
     with engine.connect() as conn:
         df = pd.read_sql_query(
@@ -154,16 +134,14 @@ def load_ohlcv(code: str, start: str, end: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def get_latest_trade_date(code: str) -> str:
-    """获取某资产的最新数据日期（自动识别表）。"""
+    """获取某资产的最新数据日期（自动识别表，ETF/基金暂时禁用）。"""
     at = detect_asset_type(code)
     engine = get_engine()
 
-    if at == "etf":
-        table, col = "etf_daily", "trade_date"
-    elif at == "fund":
-        table, col = "fund_nav", "nav_date"
-    else:
-        table, col = "stock_daily", "trade_date"
+    # -- ETF/基金表路由（暂时禁用） --
+    # if at == "etf": table, col = "etf_daily", "trade_date"
+    # elif at == "fund": table, col = "fund_nav", "nav_date"
+    table, col = "stock_daily", "trade_date"
 
     with engine.connect() as conn:
         row = conn.execute(
@@ -178,22 +156,18 @@ def get_latest_trade_date(code: str) -> str:
 
 @st.cache_data(ttl=60)
 def get_latest_daily_batch(codes: list[str]) -> pd.DataFrame:
-    """
-    获取一批资产最近交易/净值日的数据。
-    自动分流：股票/ETF → stock_daily/etf_daily，基金 → fund_nav。
-    """
+    """获取一批资产最近交易/净值日的数据（自动分流，ETF/基金暂时禁用）。"""
     if not codes:
         return pd.DataFrame()
 
     engine = get_engine()
-    stock_codes, etf_codes, fund_codes = [], [], []
+    stock_codes = []  # etf_codes, fund_codes 暂时禁用
     for c in codes:
         at = detect_asset_type(c)
-        if at == "etf":
-            etf_codes.append(c)
-        elif at == "fund":
-            fund_codes.append(c)
-        else:
+        # -- ETF/基金分流（暂时禁用） --
+        # if at == "etf": etf_codes.append(c)
+        # elif at == "fund": fund_codes.append(c)
+        if at == "stock":
             stock_codes.append(c)
 
     parts = []
@@ -211,34 +185,11 @@ def get_latest_daily_batch(codes: list[str]) -> pd.DataFrame:
         with engine.connect() as conn:
             parts.append(pd.read_sql_query(text(sql), conn, params=params))
 
-    # ETF
-    if etf_codes:
-        ph = ",".join([f":e{i}" for i in range(len(etf_codes))])
-        sql = f"""
-            SELECT DISTINCT ON (code) code, trade_date, open, high, low, close, volume, amount
-            FROM etf_daily
-            WHERE code IN ({ph})
-            ORDER BY code, trade_date DESC
-        """
-        params = {f"e{i}": c for i, c in enumerate(etf_codes)}
-        with engine.connect() as conn:
-            parts.append(pd.read_sql_query(text(sql), conn, params=params))
-
-    # 基金（净值）
-    if fund_codes:
-        ph = ",".join([f":f{i}" for i in range(len(fund_codes))])
-        sql = f"""
-            SELECT DISTINCT ON (code) code, nav_date AS trade_date,
-                   unit_nav AS open, unit_nav AS close,
-                   accumulated_nav AS high, 0 AS low,
-                   NULL AS volume, 0 AS amount
-            FROM fund_nav
-            WHERE code IN ({ph})
-            ORDER BY code, nav_date DESC
-        """
-        params = {f"f{i}": c for i, c in enumerate(fund_codes)}
-        with engine.connect() as conn:
-            parts.append(pd.read_sql_query(text(sql), conn, params=params))
+    # -- ETF 和 基金 批量查询（暂时禁用） --
+    # if etf_codes:
+    #     ... (etf_daily query)
+    # if fund_codes:
+    #     ... (fund_nav query)
 
     engine.dispose()
     if parts:
@@ -250,23 +201,17 @@ def get_latest_daily_batch(codes: list[str]) -> pd.DataFrame:
 
 @st.cache_data(ttl=5)
 def get_realtime_quotes(codes: list[str]) -> pd.DataFrame:
-    """
-    批量获取实时行情。
-    股票用 stock_zh_a_spot_em()，ETF 基金用 fund_etf_spot_em()。
-    """
+    """批量获取实时行情。股票用 stock_zh_a_spot_em()。ETF 行情暂时禁用。"""
     if not codes:
         return pd.DataFrame()
 
     import akshare as ak
 
-    # 先分类
-    stock_codes, etf_codes = [], []
-    for c in codes:
-        at = detect_asset_type(c)
-        if at == "etf":
-            etf_codes.append(c)
-        else:
-            stock_codes.append(c)
+    # -- ETF 分类（暂时禁用） --
+    stock_codes = list(codes)  # , etf_codes = [], []
+    # for c in codes:
+    #     at = detect_asset_type(c)
+    #     if at == "etf": etf_codes.append(c)
 
     parts = []
 
@@ -292,27 +237,11 @@ def get_realtime_quotes(codes: list[str]) -> pd.DataFrame:
         except Exception:
             pass
 
-    # ETF 实时行情
-    if etf_codes:
-        try:
-            raw = ak.fund_etf_spot_em()
-            raw["代码"] = raw["代码"].astype(str)
-            result = raw[raw["代码"].isin(etf_codes)].copy()
-            if not result.empty:
-                out = pd.DataFrame()
-                out["code"] = result["代码"]
-                out["name"] = result["名称"]
-                out["price"] = pd.to_numeric(result["最新价"], errors="coerce")
-                out["change_pct"] = pd.to_numeric(result["涨跌幅"], errors="coerce")
-                out["volume"] = pd.to_numeric(result["成交量"], errors="coerce")
-                out["amount"] = pd.to_numeric(result["成交额"], errors="coerce")
-                out["high"] = pd.to_numeric(result["最高"], errors="coerce")
-                out["low"] = pd.to_numeric(result["最低"], errors="coerce")
-                out["open"] = pd.to_numeric(result["今开"], errors="coerce")
-                out["pre_close"] = pd.to_numeric(result["昨收"], errors="coerce")
-                parts.append(out)
-        except Exception:
-            pass
+    # -- ETF 实时行情（暂时禁用） --
+    # if etf_codes:
+    #     try:
+    #         raw = ak.fund_etf_spot_em()
+    #         ...
 
     if parts:
         return pd.concat(parts, ignore_index=True)
@@ -369,11 +298,8 @@ def calc_bollinger(df: pd.DataFrame, period: int = 20, std: int = 2) -> pd.DataF
 # ---------- K线图 ----------
 
 def build_kline_chart(df: pd.DataFrame, indicators: dict, is_fund: bool = False) -> "plotly.graph_objects.Figure":
-    """
-    构建多 pane 图表。
-    股票/ETF → K线（Candlestick），基金 → 净值折线。
-    indicators 可包含: ma_periods, ema_periods, macd, rsi, bollinger
-    """
+    """构建多 pane K线图表。is_fund 参数保留兼容性但暂未使用。
+    indicators 可包含: ma_periods, ema_periods, macd, rsi, bollinger"""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 

@@ -9,7 +9,8 @@ from app.utils.data_loader import (
     get_latest_daily_batch,
     get_realtime_quotes,
 )
-from data.db import init_db
+from app.utils.stock_pools import list_pools, load_and_execute_pool, get_pool_data
+from data.db import init_db, get_engine
 
 WATCHLIST_FILE = os.path.expanduser("~/.quant_watchlist.json")
 DEFAULT_WATCHLIST = ["000001", "510050", "159915", "000002", "600519", "300750"]
@@ -28,7 +29,7 @@ def save_watchlist(codes: list[str]) -> None:
 
 
 st.set_page_config(page_title="自选股实时报价", page_icon="📈", layout="wide")
-st.title("📈 自选股实时报价（股票 · ETF · 基金）")
+st.title("📈 自选股实时报价")  # ETF/基金暂时禁用
 
 init_db()
 
@@ -38,8 +39,8 @@ with st.sidebar:
 
     add_input = st.text_input(
         "添加代码（逗号分隔）",
-        placeholder="000001,510050,159915",
-        help="支持股票、ETF、基金代码",
+        placeholder="000001,000002,600519",
+        help="支持股票代码",  # ETF/基金暂时禁用
     )
     if st.button("添加", use_container_width=True):
         watchlist = load_watchlist()
@@ -60,6 +61,30 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    st.caption("从股票池导入")
+    pools = list_pools()
+    if pools:
+        selected_pool = st.selectbox("选择股票池", pools, key="watchlist_pool")
+        if st.button("📥 导入到自选", use_container_width=True):
+            engine = get_engine()
+            try:
+                basic, extra, shareholder = get_pool_data(engine)
+                pool_codes = load_and_execute_pool(selected_pool, basic, extra, shareholder)
+                watchlist = load_watchlist()
+                added = 0
+                for c in pool_codes:
+                    if c not in watchlist:
+                        watchlist.append(c)
+                        added += 1
+                save_watchlist(watchlist)
+                st.success(f"已导入 {added} 只新股（池中共 {len(pool_codes)} 只）")
+                st.rerun()
+            finally:
+                engine.dispose()
+    else:
+        st.caption("暂无股票池，请先在「股票池」页面创建")
+
+    st.divider()
     if st.button("🔄 手动刷新", use_container_width=True):
         get_realtime_quotes.clear()
         get_latest_daily_batch.clear()
@@ -72,7 +97,7 @@ is_realtime = not quotes.empty
 if not is_realtime and watchlist:
     quotes = get_latest_daily_batch(watchlist)
 
-# 构建名称映射（股票+ETF+基金）
+# 构建名称映射（股票，ETF/基金暂时禁用）
 all_assets = get_all_assets()
 name_map = {}
 type_map = {}
@@ -85,7 +110,7 @@ rows = []
 for code in watchlist:
     q = quotes[quotes["code"] == code] if not quotes.empty else pd.DataFrame()
     at = type_map.get(code, "")
-    type_label = {"stock": "股", "etf": "ETF", "fund": "基金"}.get(at, "")
+    type_label = {"stock": "股"}.get(at, "")  # ETF/基金暂时禁用
 
     if not q.empty:
         row = q.iloc[0]
@@ -130,6 +155,6 @@ st.dataframe(
 )
 
 if is_realtime:
-    st.caption("📡 实时行情（股票+ETF）| 点击侧边栏🔄按钮手动刷新")
+    st.caption("📡 实时行情 | 点击侧边栏🔄按钮手动刷新")
 else:
-    st.caption("📋 最近交易日数据（非交易时段，含股票/ETF/基金净值）| 点击侧边栏🔄按钮手动刷新")
+    st.caption("📋 最近交易日数据（非交易时段）| 点击侧边栏🔄按钮手动刷新")

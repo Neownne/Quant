@@ -11,6 +11,40 @@ def _mpl_to_datetime(mpl_float: float) -> pd.Timestamp:
     return pd.Timestamp(datetime(1, 1, 1) + timedelta(days=mpl_float))
 
 
+# 模块级缓存：每个 Worker 进程只加载一次上证指数数据
+_index_df_cache: pd.DataFrame | None = None
+
+
+def _cached_index_df(start: str = "20150101", end: str = "20300101") -> pd.DataFrame:
+    global _index_df_cache
+    if _index_df_cache is not None:
+        return _index_df_cache
+    _index_df_cache = load_index_data(start, end)
+    return _index_df_cache
+
+
+class AShareCommission(bt.CommInfoBase):
+    """A 股交易费用：佣金（买卖双向）+ 印花税（卖出单向 0.05%）。
+
+    买方费用 = 成交额 × 佣金费率
+    卖方费用 = 成交额 × 佣金费率 + 成交额 × 印花税率
+    """
+
+    params = (
+        ("commission", 0.00009),   # 佣金 万分之 0.9
+        ("stamp_duty", 0.0005),    # 印花税 万分之 5（仅卖出）
+        ("stocklike", True),
+        ("commtype", bt.CommInfoBase.COMM_PERC),
+    )
+
+    def _getcommission(self, size: float, price: float, pseudoexec: bool) -> float:
+        value = abs(size) * price
+        comm = value * self.p.commission
+        if size < 0:
+            comm += value * self.p.stamp_duty
+        return comm
+
+
 class PgDataFeed(bt.feeds.PandasData):
     """自定义数据源：映射 DB 查询结果的字段名到 backtrader。"""
 
@@ -23,6 +57,39 @@ class PgDataFeed(bt.feeds.PandasData):
         ("volume", "volume"),
         ("openinterest", -1),
     )
+
+
+class MarketAwareSizer(bt.Sizer):
+    """动态仓位管理：大盘在 200 日均线上方用全仓，下方自动降至防守仓位。
+
+    参数
+    ----
+    percents : 牛市仓位百分比（默认 95%）
+    bear_percent : 熊市仓位百分比（默认 40%）
+    ma_period : 均线周期（默认 200）
+    """
+
+    params = (
+        ("percents", 95),
+        ("bear_percent", 40),
+        ("ma_period", 200),
+    )
+
+    def _getsizing(self, comminfo, cash, data, isbuy):
+        pct = self.p.percents
+        strat = self.strategy
+
+        # 如果传入了指数数据（data1），用年线判断牛熊
+        if strat and hasattr(strat, "datas") and len(strat.datas) > 1:
+            idx = strat.datas[1]
+            period = self.p.ma_period
+            if len(idx) >= period:
+                sma = sum(idx.close[-i] for i in range(period)) / period
+                if idx.close[0] < sma:
+                    pct = self.p.bear_percent
+
+        size = cash * (pct / 100) / data.close[0]
+        return size
 
 
 class TradeRecorder(bt.Analyzer):
@@ -69,13 +136,36 @@ class TradeRecorder(bt.Analyzer):
         return self.trades
 
 
+def load_index_data(start: str = "20150101", end: str = "20300101") -> pd.DataFrame:
+    """加载上证指数（000001）日线数据，用于大盘过滤器。"""
+    from sqlalchemy import text
+    from data.db import get_engine
+    engine = get_engine()
+    sql = """
+        SELECT trade_date, open, high, low, close, volume
+        FROM index_daily
+        WHERE code = '000001'
+          AND trade_date BETWEEN :start AND :end
+        ORDER BY trade_date
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql_query(text(sql), conn, params={"start": start, "end": end})
+    engine.dispose()
+    if not df.empty:
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+    return df
+
+
 def run_backtest(
     strategy_class: type,
     df: pd.DataFrame,
     strategy_params: dict[str, Any] | None = None,
-    initial_cash: float = 100000,
-    commission: float = 0.0003,
+    initial_cash: float = 1_000_000,
+    commission: float = 0.00009,
+    stamp_duty: float = 0.0005,
     slippage: float = 0.01,
+    index_df: pd.DataFrame | None = None,
+    batch_mode: bool = False,
 ) -> dict:
     """
     运行回测，返回 {metrics, equity_curve, trades}。
@@ -85,9 +175,12 @@ def run_backtest(
     strategy_class : backtrader.Strategy 子类
     df : 需包含 trade_date, open, high, low, close, volume
     strategy_params : 策略参数字典
-    initial_cash : 初始资金
-    commission : 佣金费率
+    initial_cash : 初始资金（默认 100 万）
+    commission : 佣金费率（默认万 0.9，买卖双向）
+    stamp_duty : 印花税率（默认万 5，仅卖出）
     slippage : 固定滑点（元）
+    index_df : 大盘指数 OHLCV（可选，用于动态仓位管理）
+    batch_mode : 跳过权益曲线和 CSV 输出，加快批量回测
     """
     cerebro = bt.Cerebro()
 
@@ -97,30 +190,40 @@ def run_backtest(
     data = PgDataFeed(dataname=df)
     cerebro.adddata(data)
 
+    # 大盘指数数据（data1），用于 MarketAwareSizer 判断牛熊
+    if index_df is not None and not index_df.empty:
+        idx = index_df.copy()
+        idx["trade_date"] = pd.to_datetime(idx["trade_date"])
+        cerebro.adddata(PgDataFeed(dataname=idx))
+
     # 策略
     if strategy_params:
         cerebro.addstrategy(strategy_class, **strategy_params)
     else:
         cerebro.addstrategy(strategy_class)
 
-    # 仓位管理：每次买入用 95% 可用资金
-    cerebro.addsizer(bt.sizers.PercentSizer, percents=95)
+    # 动态仓位管理：牛市 95%，熊市自动降至 40%
+    cerebro.addsizer(MarketAwareSizer, percents=95, bear_percent=40)
 
-    # 资金 & 费用
+    # 资金 & A 股费用（佣金 + 印花税）
     cerebro.broker.setcash(initial_cash)
-    cerebro.broker.setcommission(commission=commission)
+    comm_info = AShareCommission(commission=commission, stamp_duty=stamp_duty)
+    cerebro.broker.addcommissioninfo(comm_info)
     cerebro.broker.set_slippage_fixed(slippage)
 
     # 分析器
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", riskfreerate=0.02)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
-    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
     cerebro.addanalyzer(TradeRecorder, _name="traderecorder")
 
-    # 权益记录
-    cerebro.addwriter(bt.WriterFile, csv=True, out=io.StringIO())
+    if batch_mode:
+        # 批量模式：跳过 TradeAnalyzer（重）、TimeReturn（重）、CSV 写入
+        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    else:
+        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+        cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
+        cerebro.addwriter(bt.WriterFile, csv=True, out=io.StringIO())
 
     results = cerebro.run()
     strat = results[0]
@@ -139,22 +242,33 @@ def run_backtest(
     # 年化收益
     rtn_dict = returns or {}
     years = (df["trade_date"].max() - df["trade_date"].min()).days / 365.25
-    if years > 0 and rtn_dict.get("rtot"):
-        metrics["annual_return"] = (1 + rtn_dict["rtot"]) ** (1 / years) - 1
+    total_ret = rtn_dict.get("rtot", 0) or 0
+    if years > 0 and total_ret > -1:
+        metrics["annual_return"] = (1 + total_ret) ** (1 / years) - 1
     else:
         metrics["annual_return"] = 0
 
-    ta = strat.analyzers.trades.get_analysis()
-    total = ta.get("total", {}) or {}
-    won = ta.get("won", {}) or {}
-    lost = ta.get("lost", {}) or {}
-    metrics["total_trades"] = total.get("total", 0) or total.get("closed", 0)
-    metrics["won_trades"] = won.get("total", 0)
-    metrics["lost_trades"] = lost.get("total", 0)
-    if metrics["total_trades"] > 0:
-        metrics["win_rate"] = metrics["won_trades"] / metrics["total_trades"]
+    # 从 TradeRecorder 计算胜率（避免依赖 TradeAnalyzer 的慢速统计）
+    raw_trades = strat.analyzers.traderecorder.get_analysis() or []
+    metrics["total_trades"] = len(raw_trades)
+    if raw_trades:
+        won = sum(1 for t in raw_trades if t["pnl"] > 0)
+        metrics["won_trades"] = won
+        metrics["lost_trades"] = len(raw_trades) - won
+        metrics["win_rate"] = won / len(raw_trades)
+    else:
+        metrics["won_trades"] = 0
+        metrics["lost_trades"] = 0
+        metrics["win_rate"] = 0.0
 
     metrics["final_value"] = cerebro.broker.getvalue()
+
+    if batch_mode:
+        return {
+            "metrics": metrics,
+            "equity_curve": pd.DataFrame(),
+            "trades": pd.DataFrame(raw_trades),
+        }
 
     # ---- 权益曲线 ----
     eq_dict = strat.analyzers.timereturn.get_analysis()
@@ -166,7 +280,6 @@ def run_backtest(
         equity_curve["equity"] = initial_cash * (1 + equity_curve["return"]).cumprod()
 
     # ---- 交易明细 ----
-    raw_trades = strat.analyzers.traderecorder.get_analysis() or []
     trades_df = pd.DataFrame(raw_trades)
 
     return {

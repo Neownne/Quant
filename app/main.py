@@ -16,11 +16,12 @@ st.set_page_config(page_title="Quant 量化交易系统", page_icon="📊", layo
 
 # ---- 每日同步线程 ----
 def _run_sync():
-    """在子进程中运行 sync.py --mode stock-daily"""
-    subprocess.run(
-        [sys.executable, "-m", "data.sync", "--mode", "stock-daily"],
-        cwd=_PROJECT_ROOT,
-    )
+    """在子进程中运行股票日线同步（ETF/基金同步暂时禁用）"""
+    for mode in ["stock-daily"]:  # etf-daily, fund-nav disabled for now
+        subprocess.run(
+            [sys.executable, "-m", "data.sync", "--mode", mode],
+            cwd=_PROJECT_ROOT,
+        )
 
 
 def _scheduler_loop():
@@ -42,6 +43,8 @@ pages = [
     st.Page("pages/3_🧪_Backtest.py", title="策略回测", icon="🧪"),
     st.Page("pages/4_📋_Paper_Trade.py", title="模拟盘", icon="📋"),
     st.Page("pages/5_📝_Strategy_Editor.py", title="策略编辑器", icon="📝"),
+    st.Page("pages/6_📦_Stock_Pools.py", title="股票池", icon="📦"),
+    st.Page("pages/7_🔴_Recorder.py", title="数据录制", icon="🔴"),
 ]
 
 pg = st.navigation(pages)

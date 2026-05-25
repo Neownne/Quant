@@ -11,14 +11,15 @@ from app.utils.data_loader import (
     get_latest_trade_date,
     load_ohlcv,
 )
-from data.db import init_db
+from app.utils.stock_pools import list_pools, load_and_execute_pool, get_pool_data
+from data.db import init_db, get_engine
 
 FAVORITES_FILE = os.path.expanduser("~/.quant_chart_favorites.json")
 DEFAULT_FAVORITES = {
     "大盘蓝筹": ["000001", "000002", "000858", "600036", "600519", "601318"],
     "科技成长": ["002415", "300750", "688981", "002230"],
-    "ETF": ["510050", "510300", "159915", "588000"],
-    "基金": ["000001", "000002"],
+    # "ETF": ["510050", "510300", "159915", "588000"],  # 暂时禁用
+    # "基金": ["000001", "000002"],  # 暂时禁用
 }
 
 
@@ -35,7 +36,7 @@ def save_favorites(fav: dict) -> None:
 
 
 st.set_page_config(page_title="K线图", page_icon="📊", layout="wide")
-st.title("📊 K线图 & 技术指标（股票 · ETF · 基金）")
+st.title("📊 K线图 & 技术指标")  # ETF/基金暂时禁用
 
 init_db()
 
@@ -53,22 +54,22 @@ with st.sidebar:
 
     # 代码直输
     code_input = st.text_input(
-        "输入代码", placeholder="000001 / 510050 / 159915",
-        help="支持股票、ETF、基金代码，回车确认",
+        "输入代码", placeholder="000001 / 000002 / 600519",
+        help="支持股票代码，回车确认",
     )
     code_from_input = code_input.strip() if code_input else ""
 
     # 下拉搜索（全部资产）
     asset_options = []
     for _, r in assets.iterrows():
-        at_label = {"stock": "股", "etf": "ETF", "fund": "基"}.get(r.get("type", ""), "")
+        at_label = {"stock": "股"}.get(r.get("type", ""), "")  # ETF/基金暂时禁用
         asset_options.append(f"{r['code']} [{at_label}] {r['name']}")
     selected = st.selectbox("或从列表搜索", asset_options, index=0)
     code_from_select = selected.split()[0] if selected else "000001"
 
     code = code_from_input if code_from_input else code_from_select
     at = detect_asset_type(code)
-    at_label_full = {"stock": "股票", "etf": "ETF", "fund": "基金"}.get(at, "")
+    at_label_full = {"stock": "股票"}.get(at, "")  # ETF/基金暂时禁用
 
     # ---- 自选分组 ----
     st.divider()
@@ -116,6 +117,46 @@ with st.sidebar:
 
     st.divider()
 
+    # ---- 股票池分组 ----
+    st.caption("股票池")
+    pools = list_pools()
+    if pools:
+        for pool_name in pools:
+            pool_key = f"pool_data_{pool_name}"
+            with st.expander(f"📦 {pool_name}"):
+                if st.button("刷新", key=f"refresh_{pool_name}"):
+                    st.session_state.pop(pool_key, None)
+                    st.rerun()
+
+                if pool_key not in st.session_state:
+                    engine = get_engine()
+                    try:
+                        basic, extra, shareholder = get_pool_data(engine)
+                        codes = load_and_execute_pool(pool_name, basic, extra, shareholder)
+                        st.session_state[pool_key] = codes
+                    finally:
+                        engine.dispose()
+
+                pool_codes = st.session_state.get(pool_key, [])
+                if not pool_codes:
+                    st.caption("筛选结果为空")
+                else:
+                    st.caption(f"{len(pool_codes)} 只")
+                    cols = st.columns(4)
+                    for i, c in enumerate(pool_codes):
+                        n = name_map.get(c, "?")
+                        display = f"{c}\n{n[:6]}"
+                        if cols[i % 4].button(
+                            display, key=f"pool_{pool_name}_{c}",
+                            use_container_width=True,
+                        ):
+                            code = c
+                            st.rerun()
+    else:
+        st.caption("暂无股票池")
+
+    st.divider()
+
     # ---- 日期 & 指标 ----
     col1, col2 = st.columns(2)
     with col1:
@@ -157,18 +198,13 @@ indicators = {
     "bollinger": show_bollinger,
 }
 
-is_fund = (at == "fund")
-fig = build_kline_chart(df, indicators, is_fund=is_fund)
+# is_fund = (at == "fund")  # 暂时禁用
+fig = build_kline_chart(df, indicators)
 st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("数据概览"):
-    display_cols = ["trade_date"]
-    if is_fund:
-        display_cols += ["close", "high"]
-        display_labels = {"close": "单位净值", "high": "累计净值"}
-    else:
-        display_cols += ["open", "high", "low", "close", "volume"]
-        display_labels = {}
+    display_cols = ["trade_date", "open", "high", "low", "close", "volume"]
+    display_labels: dict = {}
     avail_cols = [c for c in display_cols if c in df.columns]
     show_df = df[avail_cols].sort_values("trade_date", ascending=False)
     if display_labels:
