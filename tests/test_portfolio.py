@@ -40,6 +40,25 @@ class TestSelector:
         assert "000002" not in filtered["code"].values
 
 
+class TestRisk:
+    def test_stop_loss_triggers(self):
+        """跌幅超过阈值应触发止损。"""
+        from portfolio.risk import apply_stop_loss
+        positions = pd.DataFrame({"code": ["000001", "000002"]})
+        prices = {"000001": 92.0, "000002": 105.0}
+        cost_basis = {"000001": 100.0, "000002": 100.0}  # 000001 -8%
+
+        result = apply_stop_loss(positions, prices, cost_basis, stop_pct=0.08)
+        assert "000001" in result["code"].values
+        assert "000002" not in result["code"].values
+
+    def test_drawdown_limit(self):
+        """回撤超限应触发预警。"""
+        from portfolio.risk import check_drawdown_limit
+        assert check_drawdown_limit(75.0, 100.0, 0.25)  # 25% drawdown → True
+        assert not check_drawdown_limit(80.0, 100.0, 0.25)  # 20% → False
+
+
 class TestAllocator:
     def test_equal_weight(self):
         """等权分配：N 只股票每只 1/N。"""
