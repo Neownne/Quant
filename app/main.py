@@ -45,6 +45,7 @@ pages = [
     st.Page("pages/5_📝_Strategy_Editor.py", title="策略编辑器", icon="📝"),
     st.Page("pages/6_📦_Stock_Pools.py", title="股票池", icon="📦"),
     st.Page("pages/7_🔴_Recorder.py", title="数据录制", icon="🔴"),
+    st.Page("pages/8_📊_ML_Monitor.py", title="ML策略监控", icon="📊"),
 ]
 
 pg = st.navigation(pages)

@@ -25,7 +25,7 @@ from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from models.regime import detect_regime
 from portfolio.selector import select_top_n
 from portfolio.allocator import equal_weight
-from portfolio.risk import apply_stop_loss, check_drawdown_limit
+from portfolio.risk import apply_stop_loss, check_drawdown_limit, apply_atr_stop_loss, compute_atr
 
 
 def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000_000):
@@ -114,15 +114,30 @@ def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000
 
         # 次日：计算持仓收益
         tomorrow_value = cash
-        for code, pos in list(positions.items()):
+        # 构建持仓 DataFrame 供风控函数使用
+        pos_list = [
+            {"code": c, "shares": p["shares"], "cost_basis": p["cost_basis"]}
+            for c, p in positions.items()
+        ]
+        pos_df = pd.DataFrame(pos_list) if pos_list else pd.DataFrame(columns=["code", "shares", "cost_basis"])
+
+        # 个股止损
+        tomorrow_prices: dict[str, float] = {}
+        for code, pos in positions.items():
             p_tom = _get_price(price_map, code, tomorrow)
             if p_tom and p_tom > 0:
-                # 止损检查
-                loss = (p_tom - pos["cost_basis"]) / pos["cost_basis"]
-                if loss <= -0.08:
-                    cash += pos["shares"] * p_tom
-                    del positions[code]
-                    continue
+                tomorrow_prices[code] = p_tom
+
+        if not pos_df.empty and tomorrow_prices:
+            cost_basis_map = {c: p["cost_basis"] for c, p in positions.items()}
+            stopped = apply_stop_loss(pos_df, tomorrow_prices, cost_basis_map, stop_pct=0.08)
+            for code in stopped["code"].tolist():
+                cash += positions[code]["shares"] * tomorrow_prices[code]
+                del positions[code]
+
+        for code, pos in list(positions.items()):
+            p_tom = tomorrow_prices.get(code)
+            if p_tom and p_tom > 0:
                 tomorrow_value += pos["shares"] * p_tom
             else:
                 # 停牌，按昨日价估值
@@ -188,6 +203,7 @@ def main():
     parser.add_argument("--regime", action="store_true", help="启用分市场状态训练")
     parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
     parser.add_argument("--init-cash", type=float, default=1_000_000)
+    parser.add_argument("--save-results", default="", help="保存每日交易记录到 JSON 文件")
     args = parser.parse_args()
 
     if args.factors == "all":
@@ -337,6 +353,18 @@ def main():
         print(f"平均最大回撤: {summary['max_drawdown'].mean():.1%}")
         print(f"平均日胜率:   {summary['win_rate'].mean():.1%}")
         print(f"累计终值(均): {summary['final_value'].mean():,.0f}")
+
+        if args.save_results:
+            import json
+            out = summary.to_dict(orient="records")
+            # convert numpy types
+            for rec in out:
+                for k, v in rec.items():
+                    if hasattr(v, "item"):
+                        rec[k] = v.item()
+            with open(args.save_results, "w") as f:
+                json.dump(out, f, indent=2, default=str)
+            print(f"\n结果已保存至: {args.save_results}")
 
 
 if __name__ == "__main__":

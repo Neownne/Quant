@@ -223,6 +223,21 @@ CREATE TABLE IF NOT EXISTS paper_positions (
 );
 """
 
+# DDL —— 模拟盘每日净值
+DDL_PAPER_DAILY_PNL = """
+CREATE TABLE IF NOT EXISTS paper_daily_pnl (
+    id              SERIAL PRIMARY KEY,
+    account_id      INT NOT NULL,
+    trade_date      DATE NOT NULL,
+    cash            DOUBLE PRECISION,
+    position_value  DOUBLE PRECISION,
+    total_value     DOUBLE PRECISION,
+    daily_return    DOUBLE PRECISION,
+    drawdown        DOUBLE PRECISION,
+    UNIQUE (account_id, trade_date)
+);
+"""
+
 
 def get_engine() -> Engine:
     """创建数据库引擎（每次调用返回同一个连接池）。"""
@@ -258,7 +273,8 @@ def init_db() -> None:
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
         conn.execute(text(DDL_PAPER_POSITIONS))
-    logger.info("数据库表初始化完成（12张表）")  # 10+2张新增（财务+行业）
+        conn.execute(text(DDL_PAPER_DAILY_PNL))
+    logger.info("数据库表初始化完成（13张表）")
     engine.dispose()
 
 
