@@ -51,6 +51,7 @@ def test_fetch_industry_classification():
     assert not df.empty, "行业分类不应为空"
     assert "code" in df.columns
     assert "industry_sw1" in df.columns
+    assert "industry_sw2" in df.columns
     assert "market" in df.columns
     # 至少覆盖 2000 只股票
     assert len(df) > 2000, f"行业表应有 >2000 条记录，实际: {len(df)}"

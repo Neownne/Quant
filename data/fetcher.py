@@ -513,7 +513,6 @@ def fetch_industry_classification() -> pd.DataFrame:
             )
     except Exception as e:
         logger.warning(f"从 stock_basic 获取行业分类失败: {e}")
-        engine.dispose()
         return pd.DataFrame(columns=["code", "industry_sw1", "industry_sw2", "market"])
     finally:
         engine.dispose()
