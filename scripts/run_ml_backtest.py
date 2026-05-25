@@ -51,7 +51,7 @@ def main():
     # OHLCV
     code_list = ",".join([f"'{c}'" for c in codes])
     sql = f"""
-        SELECT code, trade_date, open, high, low, close, volume, turnover
+        SELECT code, trade_date, open, high, low, close, volume, amount, turnover
         FROM stock_daily
         WHERE code IN ({code_list})
           AND trade_date BETWEEN '{args.start}' AND '{args.end}'

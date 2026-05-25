@@ -57,6 +57,7 @@ def walk_forward_split(
     (train_df, val_df)
     """
     df = df.sort_values(date_col).copy()
+    df[date_col] = pd.to_datetime(df[date_col])
     all_dates = sorted(df[date_col].unique())
     if not all_dates:
         return

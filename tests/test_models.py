@@ -52,6 +52,15 @@ class TestDataset:
         # train 和 val 的时间不应重叠
         assert train["trade_date"].max() < val["trade_date"].min()
 
+    def test_walk_forward_split_with_date_objects(self):
+        """walk_forward_split 应兼容 datetime.date 对象（模拟 DB 返回）。"""
+        import datetime as dt
+        dates = [dt.date(2018, 1, 1) + dt.timedelta(days=i) for i in range(0, 2500, 3)]
+        df = pd.DataFrame({"trade_date": dates, "value": range(len(dates))})
+
+        splits = list(walk_forward_split(df, train_years=3, val_years=1))
+        assert len(splits) >= 2
+
     def test_build_factor_dataset_smoke(self):
         """端到端冒烟测试：从少量股票的 OHLCV 构建因子数据集。"""
         # 构造 20 只股票 × 200 个交易日的模拟数据
@@ -141,6 +150,42 @@ class TestTrainer:
         model, metrics = train_lightgbm(X, y, X, y)
         assert model is not None
         assert "accuracy" in metrics
+
+    def test_walk_forward_train_skips_all_nan_factors(self):
+        """全 NaN 因子列应被跳过，不影响训练。"""
+        from models.trainer import walk_forward_train
+        import numpy as np
+        import pandas as pd
+
+        np.random.seed(42)
+        n = 1200
+        dates = pd.date_range("2018-01-02", periods=n, freq="B")
+        rows = []
+        for i, d in enumerate(dates):
+            rows.append({
+                "code": "000001",
+                "trade_date": d,
+                "good_factor": np.random.randn(),
+                "bad_factor": np.nan,  # 全 NaN —— 需要额外数据的因子
+                "label": 1 if np.random.random() > 0.5 else 0,
+            })
+            rows.append({
+                "code": "000002",
+                "trade_date": d,
+                "good_factor": np.random.randn(),
+                "bad_factor": np.nan,
+                "label": 1 if np.random.random() > 0.5 else 0,
+            })
+        df = pd.DataFrame(rows)
+
+        results = walk_forward_train(
+            df, factor_cols=["good_factor", "bad_factor"],
+            model_type="xgboost", train_years=2, val_years=1,
+        )
+        assert len(results) >= 1
+        # good_factor 应出现在特征重要性中
+        fi = results[0]["metrics"]["feature_importance"]
+        assert "good_factor" in fi.index
 
 
 class TestPredictor:

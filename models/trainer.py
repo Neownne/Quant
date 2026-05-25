@@ -119,15 +119,21 @@ def walk_forward_train(
     results = []
 
     for train_df, val_df in walk_forward_split(df, train_years, val_years):
-        train_clean = train_df[factor_cols + ["label"]].dropna()
-        val_clean = val_df[factor_cols + ["label"]].dropna()
+        # 过滤全 NaN 因子列（例如需要 extra_data 才能计算的因子）
+        active_cols = [c for c in factor_cols if train_df[c].notna().any()]
+        if not active_cols:
+            continue
+        cols_to_use = active_cols + ["label"]
+
+        train_clean = train_df[cols_to_use].dropna()
+        val_clean = val_df[cols_to_use].dropna()
 
         if len(train_clean) < 100 or len(val_clean) < 50:
             continue
 
-        X_tr = train_clean[factor_cols]
+        X_tr = train_clean[active_cols]
         y_tr = train_clean["label"]
-        X_v = val_clean[factor_cols]
+        X_v = val_clean[active_cols]
         y_v = val_clean["label"]
 
         model, metrics = train_fn(X_tr, y_tr, X_v, y_v)
