@@ -2,7 +2,39 @@
 import pytest
 import pandas as pd
 import numpy as np
-from factors.screening import compute_factor_correlation, select_orthogonal_factors
+from factors.screening import compute_factor_correlation, select_orthogonal_factors, filter_factors_by_ic
+
+
+class TestICGate:
+    def test_filter_by_ic_removes_noise_factor(self):
+        """强信号因子通过 IC 门禁，噪声因子被淘汰。"""
+        np.random.seed(42)
+        n_dates = 300
+        n_stocks = 100
+        dates = pd.date_range("2020-01-02", periods=n_dates, freq="B")
+        rows = []
+        for i in range(n_stocks):
+            # 每只股票的基准值不同，产生截面区分度
+            base = np.random.randn()
+            for j, d in enumerate(dates):
+                rows.append({
+                    "trade_date": d,
+                    "good_factor": base + np.random.randn() * 0.01,
+                    "noise_factor": np.random.randn(),
+                    "ret_1d": base * 0.8 + np.random.randn() * 0.01,
+                })
+        df = pd.DataFrame(rows)
+        passed = filter_factors_by_ic(
+            df, ["good_factor", "noise_factor"],
+            ret_col="ret_1d", ic_threshold=0.05, t_threshold=2.0,
+        )
+        assert "good_factor" in passed
+        assert "noise_factor" not in passed
+
+    def test_filter_empty_factor_list(self):
+        """空列表应返回空列表。"""
+        result = filter_factors_by_ic(pd.DataFrame(), [])
+        assert result == []
 
 
 class TestScreening:

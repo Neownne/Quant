@@ -2,9 +2,9 @@
 """ML 选股端到端回测验证。
 
 用法:
-    python scripts/run_ml_backtest.py                        # 集成模式
-    python scripts/run_ml_backtest.py --model xgboost        # 单模型
-    python scripts/run_ml_backtest.py --no-ensemble          # 禁用集成
+    python scripts/run_ml_backtest.py                              # 集成模式+IC门禁
+    python scripts/run_ml_backtest.py --regime --optuna            # 分状态+超参优化
+    python scripts/run_ml_backtest.py --model xgboost              # 单模型
 """
 import argparse
 import sys
@@ -17,43 +17,47 @@ from loguru import logger
 
 from data.db import get_engine
 from models.dataset import build_factor_dataset
-from models.trainer import walk_forward_train, walk_forward_train_ensemble
-from models.tuning import find_best_threshold
+from models.trainer import walk_forward_train, walk_forward_train_ensemble, walk_forward_train_by_regime
 from factors import ALL_FACTORS
-from factors.screening import select_orthogonal_factors
+from factors.screening import filter_factors_by_ic, select_orthogonal_factors
+from models.regime import detect_regime
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="xgboost", choices=["xgboost", "lightgbm"])
-    parser.add_argument("--factors", default="all", help="因子列表，逗号分隔或 'all'")
+    parser.add_argument("--factors", default="all")
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--val-years", type=int, default=1)
     parser.add_argument("--start", default="20180101")
     parser.add_argument("--end", default="20260101")
-    parser.add_argument("--codes", default="", help="测试股票代码，逗号分隔，留空=全量")
-    parser.add_argument("--no-ensemble", action="store_true", help="禁用集成，仅使用单模型")
-    parser.add_argument("--no-orthogonal", action="store_true", help="禁用正交筛选")
+    parser.add_argument("--codes", default="")
+    parser.add_argument("--no-ensemble", action="store_true")
+    parser.add_argument("--no-orthogonal", action="store_true")
+    parser.add_argument("--no-ic-gate", action="store_true", help="跳过 IC 门禁")
+    parser.add_argument("--regime", action="store_true", help="启用分市场状态训练")
+    parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
+    parser.add_argument("--optuna-trials", type=int, default=30, help="Optuna 搜索轮数")
     args = parser.parse_args()
 
-    # 选择因子
     if args.factors == "all":
         factor_names = list(ALL_FACTORS.keys())
     else:
         factor_names = [f.strip() for f in args.factors.split(",")]
 
-    logger.info(f"使用 {len(factor_names)} 个因子: {factor_names[:5]}...")
+    logger.info(f"{len(factor_names)} 个因子, IC门禁={'ON' if not args.no_ic_gate else 'OFF'}, "
+                f"regime={'ON' if args.regime else 'OFF'}, optuna={'ON' if args.optuna else 'OFF'}")
 
-    # 加载数据
     engine = get_engine()
     codes = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
     if codes is None:
         codes = pd.read_sql("SELECT code FROM stock_basic LIMIT 200", engine)["code"].tolist()
         logger.info(f"测试范围: {len(codes)} 只股票")
 
-    # OHLCV
     code_list = ",".join([f"'{c}'" for c in codes])
+
+    # OHLCV
     sql = f"""
         SELECT code, trade_date, open, high, low, close, volume, amount, turnover
         FROM stock_daily
@@ -64,8 +68,24 @@ def main():
     ohlcv = pd.read_sql(sql, engine)
     logger.info(f"OHLCV: {len(ohlcv)} 行")
 
-    # 加载 extra_data（估值+股东）
-    logger.info("加载 extra_data ...")
+    # 加载指数数据（regime 模式需要）
+    regime_df = None
+    if args.regime:
+        try:
+            idx_sql = f"""
+                SELECT trade_date, close FROM index_daily
+                WHERE code = '000001' AND trade_date BETWEEN '{args.start}' AND '{args.end}'
+                ORDER BY trade_date
+            """
+            index_df = pd.read_sql(idx_sql, engine)
+            if not index_df.empty:
+                regime_df = detect_regime(index_df)
+                logger.info(f"指数数据: {len(index_df)} 行, regime={regime_df['regime'].value_counts().to_dict()}")
+        except Exception as e:
+            logger.warning(f"指数数据加载失败: {e}, 回退到非 regime 模式")
+            args.regime = False
+
+    # extra_data
     extra_data = {}
     try:
         extra_sql = f"""
@@ -99,26 +119,37 @@ def main():
 
     engine.dispose()
 
-    # 构建因子数据集
+    # 构建因子数据集（含 ret_1d 供 IC 计算）
     dataset = build_factor_dataset(
         ohlcv, factor_names, label_mode="binary",
         extra_data=extra_data if extra_data else None,
     )
 
-    # 正交筛选
+    # 1. IC 门禁
+    if not args.no_ic_gate:
+        factor_names = filter_factors_by_ic(dataset, factor_names, ret_col="ret_1d")
+
+    # 2. 正交筛选
     if not args.no_orthogonal:
         factor_cols = select_orthogonal_factors(dataset, factor_names, threshold=0.7)
     else:
         factor_cols = factor_names
 
-    # Walk-forward 训练
+    # 3. Walk-forward 训练
     use_ensemble = not args.no_ensemble
 
-    if use_ensemble:
+    if args.regime and use_ensemble and regime_df is not None:
+        logger.info("使用分市场状态集成训练")
+        results = walk_forward_train_by_regime(
+            dataset, factor_cols, regime_df,
+            train_years=args.train_years, val_years=args.val_years,
+        )
+    elif use_ensemble:
         logger.info("使用 XGBoost + LightGBM 集成模式")
         results = walk_forward_train_ensemble(
             dataset, factor_cols,
             train_years=args.train_years, val_years=args.val_years,
+            use_optuna=args.optuna, optuna_trials=args.optuna_trials,
         )
     else:
         logger.info(f"使用单模型: {args.model}")
@@ -133,14 +164,18 @@ def main():
     all_metrics = []
     for i, r in enumerate(results):
         m = r["metrics"]
+        best_t = r.get("best_threshold", 0.5)
+        regime_info = f", regimes={r.get('regimes_trained', [])}" if "regimes_trained" in r else ""
         logger.info(
             f"窗口 {i+1}: val={r['val_start'].date()}~{r['val_end'].date()}, "
-            f"acc={m['accuracy']:.3f}, prec={m['precision']:.3f}, rec={m['recall']:.3f}"
+            f"t={best_t:.2f}, acc={m['accuracy']:.3f}, prec={m['precision']:.3f}, rec={m['recall']:.3f}"
+            f"{regime_info}"
         )
         all_metrics.append({
             "window": i + 1,
             "val_start": r["val_start"],
             "val_end": r["val_end"],
+            "best_t": best_t,
             "accuracy": m["accuracy"],
             "precision": m["precision"],
             "recall": m["recall"],
@@ -148,24 +183,25 @@ def main():
 
     summary = pd.DataFrame(all_metrics)
     print("\n=== Walk-Forward 汇总 ===")
+    if summary.empty:
+        print("无有效窗口，请检查数据范围（train_years + val_years 需小于数据跨度）")
+        return
     print(summary.to_string(index=False))
     print(f"\n平均准确率: {summary['accuracy'].mean():.3f}")
     print(f"平均精确率: {summary['precision'].mean():.3f}")
     print(f"平均召回率: {summary['recall'].mean():.3f}")
 
-    # 特征重要性（单模型模式）
     if not use_ensemble and results:
         fi = results[-1]["metrics"].get("feature_importance", pd.Series(dtype=float))
         if not fi.empty:
             print("\n=== Top-10 因子 ===")
             print(fi.head(10).to_string())
 
-    # 最优阈值（集成模式）
     if use_ensemble and results:
-        print("\n=== 集成模式活跃因子 ===")
+        print(f"\n=== 筛选管线 ===")
         active = results[-1].get("active_cols", [])
-        print(f"正交筛选后: {len(active)} 个因子")
-        print(f"因子列表: {active[:10]}..." if len(active) > 10 else f"因子列表: {active}")
+        print(f"最终活跃因子: {len(active)} 个")
+        print(f"因子列表: {active[:15]}..." if len(active) > 15 else f"因子列表: {active}")
 
 
 if __name__ == "__main__":

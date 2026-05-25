@@ -10,9 +10,9 @@ from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_sc
 def find_best_threshold(
     y_true: np.ndarray,
     y_prob: np.ndarray,
-    metric: str = "f1",
+    metric: str = "accuracy",
 ) -> tuple[float, float]:
-    """搜索最优分类阈值。"""
+    """搜索最优分类阈值（默认最大化准确率，避免类不平衡时 F1 偏向全预测为正）。"""
     thresholds = np.arange(0.30, 0.65, 0.01)
     best_t = 0.5
     best_score = 0.0

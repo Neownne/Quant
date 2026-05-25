@@ -182,8 +182,15 @@ def walk_forward_train_ensemble(
     train_years: int = 3,
     val_years: int = 1,
     threshold: float = 0.5,
+    use_optuna: bool = False,
+    optuna_trials: int = 30,
 ) -> list[dict]:
     """Walk-forward 训练（XGBoost + LightGBM 集成）。
+
+    参数
+    ----
+    use_optuna : 是否使用 Optuna 优化 XGBoost 超参
+    optuna_trials : Optuna 搜索轮数
 
     返回: [{ensemble, xgb_model, lgb_model, metrics, ...}, ...]
     """
@@ -208,9 +215,18 @@ def walk_forward_train_ensemble(
         X_v = val_clean[active_cols]
         y_v = val_clean["label"]
 
-        xgb_model, xgb_metrics = train_xgboost(X_tr, y_tr, X_v, y_v)
-        lgb_model, lgb_metrics = train_lightgbm(X_tr, y_tr, X_v, y_v)
+        # Optuna 超参优化
+        xgb_params = None
+        if use_optuna:
+            from models.tuning import optimize_xgboost_optuna
+            xgb_params = optimize_xgboost_optuna(X_tr, y_tr, X_v, y_v, n_trials=optuna_trials)
+            if xgb_params:
+                logger.info(f"窗口 Optuna 优化: {xgb_params}")
 
+        xgb_model, xgb_metrics = train_xgboost(
+            X_tr, y_tr, X_v, y_v, params=xgb_params if xgb_params else None,
+        )
+        lgb_model, lgb_metrics = train_lightgbm(X_tr, y_tr, X_v, y_v)
         xgb_prob = xgb_model.predict_proba(X_v)[:, 1]
         lgb_prob = lgb_model.predict_proba(X_v)[:, 1]
         ensemble_prob = (xgb_prob + lgb_prob) / 2
@@ -223,16 +239,168 @@ def walk_forward_train_ensemble(
             "recall": float(recall_score(y_v, ensemble_pred, zero_division=0)),
         }
         logger.info(
-            f"Ensemble: acc={ensemble_metrics['accuracy']:.3f}, "
+            f"Ensemble (t={threshold:.2f}): acc={ensemble_metrics['accuracy']:.3f}, "
             f"prec={ensemble_metrics['precision']:.3f}, rec={ensemble_metrics['recall']:.3f}"
         )
 
+        # 阈值优化
+        from models.tuning import find_best_threshold
+        best_t, best_f1 = find_best_threshold(y_v.values if hasattr(y_v, "values") else y_v, ensemble_prob)
+        best_pred = (ensemble_prob >= best_t).astype(int)
+        best_metrics = {
+            "accuracy": float(accuracy_score(y_v, best_pred)),
+            "precision": float(precision_score(y_v, best_pred, zero_division=0)),
+            "recall": float(recall_score(y_v, best_pred, zero_division=0)),
+        }
+        logger.info(
+            f"Ensemble (t={best_t:.2f}): acc={best_metrics['accuracy']:.3f}, "
+            f"prec={best_metrics['precision']:.3f}, rec={best_metrics['recall']:.3f}"
+        )
+
+        # 使用优化后的阈值构建预测器
+        opt_ensemble = EnsemblePredictor(xgb_model, lgb_model, active_cols, best_t)
+
         results.append({
-            "ensemble": EnsemblePredictor(xgb_model, lgb_model, active_cols, threshold),
+            "ensemble": opt_ensemble,
             "xgb_model": xgb_model,
             "lgb_model": lgb_model,
-            "metrics": ensemble_metrics,
+            "metrics": best_metrics,
+            "metrics_default": ensemble_metrics,
+            "best_threshold": best_t,
             "active_cols": active_cols,
+            "train_end": train_df["trade_date"].max(),
+            "val_start": val_df["trade_date"].min(),
+            "val_end": val_df["trade_date"].max(),
+        })
+
+    return results
+
+
+class RegimeAwareEnsemble:
+    """分市场状态的集成预测器。"""
+
+    def __init__(self, ensembles: dict[str, object], factor_names: list[str], default_regime: str = "sideways"):
+        self.ensembles = ensembles
+        self.factor_names = factor_names
+        self.default_regime = default_regime
+
+    def predict(self, factor_df: pd.DataFrame, regime: str | None = None) -> pd.DataFrame:
+        if regime is None and "regime" in factor_df.columns:
+            regime = factor_df["regime"].iloc[0] if len(factor_df) > 0 else self.default_regime
+        model = self.ensembles.get(regime, self.ensembles.get(self.default_regime))
+        if model is None:
+            model = next(iter(self.ensembles.values()))
+        return model.predict(factor_df)
+
+
+def walk_forward_train_by_regime(
+    df: pd.DataFrame,
+    factor_cols: list[str],
+    regime_df: pd.DataFrame,
+    train_years: int = 3,
+    val_years: int = 1,
+) -> list[dict]:
+    """Walk-forward 分市场状态训练：牛/熊/震荡各训一个集成模型。"""
+    from models.dataset import walk_forward_split
+
+    if "regime" not in df.columns:
+        regime_df = regime_df.copy()
+        regime_df["trade_date"] = pd.to_datetime(regime_df["trade_date"])
+        df = df.copy()
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df = df.merge(regime_df, on="trade_date", how="left")
+        df["regime"] = df["regime"].fillna("sideways")
+
+    results = []
+
+    for train_df, val_df in walk_forward_split(df, train_years, val_years):
+        active_cols = [c for c in factor_cols if train_df[c].notna().any()]
+        if not active_cols:
+            continue
+
+        regimes = ["bull", "bear", "sideways"]
+        ensembles = {}
+        all_val_probs = []
+        all_val_y = []
+
+        for reg in regimes:
+            train_reg = train_df[train_df["regime"] == reg]
+            if len(train_reg) < 100:
+                continue
+
+            cols_to_use = active_cols + ["label"]
+            train_clean = train_reg[cols_to_use].dropna()
+            if len(train_clean) < 100:
+                continue
+
+            X_tr = train_clean[active_cols]
+            y_tr = train_clean["label"]
+
+            val_reg = val_df[val_df["regime"] == reg]
+            val_clean = val_reg[cols_to_use].dropna() if len(val_reg) > 10 else train_clean.tail(100)
+            X_v = val_clean[active_cols] if len(val_clean) > 10 else X_tr
+            y_v = val_clean["label"] if len(val_clean) > 10 else y_tr
+
+            xgb_model, _ = train_xgboost(X_tr, y_tr, X_v, y_v)
+            lgb_model, _ = train_lightgbm(X_tr, y_tr, X_v, y_v)
+
+            xgb_p = xgb_model.predict_proba(X_v)[:, 1]
+            lgb_p = lgb_model.predict_proba(X_v)[:, 1]
+            prob = (xgb_p + lgb_p) / 2
+
+            from models.tuning import find_best_threshold
+            best_t, _ = find_best_threshold(
+                y_v.values if hasattr(y_v, "values") else y_v, prob,
+            )
+            ensembles[reg] = EnsemblePredictor(xgb_model, lgb_model, active_cols, best_t)
+
+        if len(ensembles) < 1:
+            continue
+
+        # 全验证集评估
+        val_all = val_df[active_cols + ["label", "regime", "code"]].dropna()
+        if len(val_all) < 50:
+            continue
+
+        reg_ensemble = RegimeAwareEnsemble(ensembles, active_cols)
+
+        for reg in regimes:
+            val_reg = val_all[val_all["regime"] == reg]
+            if len(val_reg) < 10 or reg not in ensembles:
+                continue
+            try:
+                pred = ensembles[reg].predict(val_reg)
+                all_val_probs.append(pred["score"].values)
+                all_val_y.append(val_reg["label"].values)
+            except Exception:
+                continue
+
+        if not all_val_probs:
+            continue
+
+        all_prob = np.concatenate(all_val_probs)
+        all_y = np.concatenate(all_val_y)
+
+        from sklearn.metrics import accuracy_score, precision_score, recall_score
+        from models.tuning import find_best_threshold
+        best_t, _ = find_best_threshold(all_y, all_prob)
+        best_pred = (all_prob >= best_t).astype(int)
+        best_metrics = {
+            "accuracy": float(accuracy_score(all_y, best_pred)),
+            "precision": float(precision_score(all_y, best_pred, zero_division=0)),
+            "recall": float(recall_score(all_y, best_pred, zero_division=0)),
+        }
+        logger.info(
+            f"RegimeEnsemble: acc={best_metrics['accuracy']:.3f}, "
+            f"prec={best_metrics['precision']:.3f}, rec={best_metrics['recall']:.3f}"
+        )
+
+        results.append({
+            "ensemble": reg_ensemble,
+            "metrics": best_metrics,
+            "best_threshold": best_t,
+            "active_cols": active_cols,
+            "regimes_trained": list(ensembles.keys()),
             "train_end": train_df["trade_date"].max(),
             "val_start": val_df["trade_date"].min(),
             "val_end": val_df["trade_date"].max(),

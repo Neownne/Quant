@@ -126,6 +126,13 @@ def build_factor_dataset(
         labelled_parts.append(make_labels(group, forward_days, label_mode))
 
     result = pd.concat(labelled_parts, ignore_index=True)
+    # 计算 T+1 连续收益率（供 IC 计算用）
+    ret_parts = []
+    for code, group in result.groupby("code"):
+        group = group.sort_values("trade_date")
+        group["ret_1d"] = group["close"].pct_change().shift(-1)
+        ret_parts.append(group)
+    result = pd.concat(ret_parts, ignore_index=True)
     # drop the close column since it was only needed for label computation
     result = result.drop(columns=["close"])
     logger.info(f"数据集: {len(result)} 行, {len(result.dropna())} 有效")
