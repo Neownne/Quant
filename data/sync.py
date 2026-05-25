@@ -30,6 +30,8 @@ from data.fetcher import (
     fetch_index_daily,
     fetch_stock_lg_indicator,
     fetch_shareholder_count,
+    fetch_financial_data,
+    fetch_industry_classification,
     fetch_etf_list,
     fetch_etf_daily,
     fetch_fund_list,
@@ -207,6 +209,65 @@ def _do_fetch_shareholder(code: str) -> tuple[str, int]:
 
 
 # ============================================================
+#  财务数据
+# ============================================================
+
+def _do_fetch_financial(code: str) -> tuple[str, int]:
+    """模块级 worker，供 ProcessPoolExecutor 使用。返回 (code, rows_written)。"""
+    try:
+        df = fetch_financial_data(code)
+        if df.empty:
+            return code, 0
+        return code, upsert_df(df, "stock_financial", engine=None)
+    except Exception as e:
+        logger.warning(f"{code} 财务数据同步失败: {e}")
+        return code, 0
+
+
+def sync_financial(engine: Engine, workers: int = 4) -> None:
+    """同步财务数据到 stock_financial。跳过已有记录的股票。"""
+    logger.info("=" * 50)
+    logger.info("开始同步财务数据 ...")
+
+    codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
+
+    # 跳过已有记录
+    existing_codes = set()
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT DISTINCT code FROM stock_financial")).fetchall()
+        existing_codes = {x[0] for x in r}
+    to_fetch = [c for c in codes if c not in existing_codes]
+    logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
+
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_do_fetch_financial, c) for c in to_fetch]
+        for f in tqdm(as_completed(futures), total=len(to_fetch), desc="财务数据"):
+            code, n = f.result()
+            if n > 0:
+                logger.debug(f"{code} +{n}条")
+
+    logger.success("财务数据同步完成")
+
+
+# ============================================================
+#  行业分类
+# ============================================================
+
+def sync_industry(engine: Engine) -> None:
+    """同步行业分类到 stock_industry。全量 upsert。"""
+    logger.info("=" * 50)
+    logger.info("开始同步行业分类 ...")
+
+    df = fetch_industry_classification()
+    if df.empty:
+        logger.error("行业分类数据为空，跳过")
+        return
+
+    n = upsert_df(df, "stock_industry", engine)
+    logger.success(f"行业分类同步完成，写入/更新 {n} 行")
+
+
+# ============================================================
 #  ETF
 # ============================================================
 
@@ -334,7 +395,7 @@ def main():
         choices=[
             "all", "stock", "stock-daily", "index",
             "etf", "etf-daily", "fund", "fund-nav",
-            "daily-extra", "shareholder",
+            "daily-extra", "shareholder", "financial", "industry",
         ],
         default="all",
         help="同步模式",
@@ -385,6 +446,12 @@ def main():
 
         if mode in ("all", "shareholder"):
             sync_shareholder(engine, args.workers)
+
+        if mode in ("all", "financial"):
+            sync_financial(engine, workers=args.workers)
+
+        if mode in ("all", "industry"):
+            sync_industry(engine)
 
     finally:
         engine.dispose()
