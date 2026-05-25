@@ -12,6 +12,8 @@ from factors.alpha191_turnover import ALPHA191_TURNOVER
 from factors.alpha191_intraday import ALPHA191_INTRADAY
 from factors.alpha191_flow import ALPHA191_FLOW
 from factors.alpha191_gap import ALPHA191_GAP
+from factors.alpha191_vol import ALPHA191_VOL
+from factors.alpha191_liquidity import ALPHA191_LIQUIDITY
 
 ALL_FACTORS: dict = {
     **ALPHA101_FUNCTIONS,
@@ -20,6 +22,8 @@ ALL_FACTORS: dict = {
     **ALPHA191_INTRADAY,
     **ALPHA191_FLOW,
     **ALPHA191_GAP,
+    **ALPHA191_VOL,
+    **ALPHA191_LIQUIDITY,
 }
 
 __all__ = ["FactorEngine", "ALL_FACTORS"]

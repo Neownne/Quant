@@ -120,3 +120,47 @@ class TestAlpha191Gap:
         for col in engine.factor_names:
             valid_pct = result[col].notna().sum() / len(result)
             assert valid_pct > 0.5, f"{col} 有效值仅 {valid_pct:.1%}"
+
+
+class TestAlpha191Vol:
+    def test_all_registered(self):
+        from factors import ALL_FACTORS
+        expected = [
+            "vol_of_vol", "down_vol_ratio", "tail_risk",
+            "beta_20", "ret_asymmetry",
+        ]
+        for name in expected:
+            assert name in ALL_FACTORS, f"{name} 未注册"
+
+    def test_factor_output_valid(self):
+        from factors.engine import FactorEngine
+        df = _make_ohlcv(200)
+        engine = FactorEngine(factor_names=[
+            "vol_of_vol", "down_vol_ratio", "tail_risk",
+            "beta_20", "ret_asymmetry",
+        ])
+        result = engine.compute(df)
+        for col in engine.factor_names:
+            valid_pct = result[col].notna().sum() / len(result)
+            assert valid_pct > 0.3, f"{col} 有效值仅 {valid_pct:.1%}"
+
+
+class TestAlpha191Liquidity:
+    def test_all_registered(self):
+        from factors import ALL_FACTORS
+        expected = [
+            "amihud_5", "dollar_volume", "turnover_breakout", "bid_ask_proxy",
+        ]
+        for name in expected:
+            assert name in ALL_FACTORS, f"{name} 未注册"
+
+    def test_factor_output_valid(self):
+        from factors.engine import FactorEngine
+        df = _make_ohlcv(200)
+        engine = FactorEngine(factor_names=[
+            "amihud_5", "dollar_volume", "turnover_breakout", "bid_ask_proxy",
+        ])
+        result = engine.compute(df)
+        for col in engine.factor_names:
+            valid_pct = result[col].notna().sum() / len(result)
+            assert valid_pct > 0.3, f"{col} 有效值仅 {valid_pct:.1%}"
