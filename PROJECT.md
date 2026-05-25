@@ -48,7 +48,7 @@ quant/
 │   └── settings.py           # 集中配置（数据库、数据参数）
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 10 张表 DDL + 连接池 + upsert
+│   ├── db.py                 # 12 张表 DDL + 连接池 + upsert
 │   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东）
 │   ├── sync.py               # 历史数据批量同步（多进程增量，6 种模式）
 │   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
@@ -68,12 +68,23 @@ quant/
 │   ├── custom.py               # 7 个自定义 A 股因子
 │   └── monitor.py              # IC/ICIR/衰减曲线监控
 │
-├── models/                     # ML 预测层（预留）
-├── portfolio/                  # 组合优化层（预留）
+├── models/                     # ML 预测层
+│   ├── __init__.py             # 模块导出
+│   ├── dataset.py              # 因子数据集构造 + walk-forward 切分
+│   ├── trainer.py              # XGBoost/LightGBM 训练器
+│   └── predictor.py            # DailyPredictor 横截面打分排序
+│
+├── portfolio/                  # 组合优化层
+│   ├── __init__.py             # 模块导出
+│   ├── selector.py             # Top-N 选股 + ST/次新过滤
+│   ├── allocator.py            # 等权/波动率倒数仓位分配
+│   └── risk.py                 # 个股止损 + 组合回撤控制
 │
 ├── tests/                      # 测试
 │   ├── test_fetcher.py         # 数据获取测试
-│   └── test_factors.py         # 因子+引擎+IC 测试
+│   ├── test_factors.py         # 因子+引擎+IC 测试
+│   ├── test_models.py          # ML 模型测试（数据集+训练+预测）
+│   └── test_portfolio.py       # 组合优化测试（选股+仓位+风控）
 │
 ├── app/                      # Web 界面层
 │   ├── main.py               # 入口：导航 + sys.path + 每日同步调度
@@ -90,7 +101,8 @@ quant/
 │       └── stock_pools.py    # 股票池引擎（加载/编译/执行筛选规则）
 │
 ├── scripts/                  # 批量工具
-│   └── batch_backtest.py     # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
+│   ├── batch_backtest.py     # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
+│   └── run_ml_backtest.py    # ML 选股端到端验证（因子→训练→预测→回测）
 │
 ├── docs/                     # 文档 & 研究报告
 │   ├── quant-strategy-research.md  # 量化策略研究报告
@@ -415,7 +427,7 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
-| 2026-05-25 | **多因子 ML 体系启动**：新增 `factors/` 模块（30 Alpha101 + 7 自定义因子 + 计算引擎 + 中性化 + IC 监控）；新增 `data/fetcher.py` 财务数据获取（同花顺财务摘要）；新增 `data/sync.py` 财务/行业同步模式；新增 `stock_financial`（12 字段）和 `stock_industry`（申万行业）2 张表；估值指标 `stock_daily_extra` 全量覆盖 5,519 只；设计文档 `docs/superpowers/specs/` + 实现计划 `docs/superpowers/plans/` |
+| 2026-05-25 | **Phase 2 ML 选股管线**：新增 `models/` 模块（dataset 构造+walk-forward 切分、XGBoost/LightGBM 训练器、DailyPredictor 截面排序）；新增 `portfolio/` 模块（Top-N 选股+ST/次新过滤、等权/波动率倒数分配、个股止损+回撤风控）；新增 `scripts/run_ml_backtest.py` 端到端验证脚本；新增 16 个测试（models 9 + portfolio 7），全量 36 测试通过；Phase 1+2 合计 37 个因子 + IC 监控 + ML 训练预测 + 组合优化 |
 | 2026-05-25 | **股票池系统**：新增自定义股票池编辑器（`app/pages/6_📦_Stock_Pools.py`），支持 Python 代码定义筛选规则，集成回测批量模式；**回测升级**：支持单只/股票池双模式，池模式含汇总统计+排名表+分布直方图+CSV 导出；**基本面数据**：新增 `stock_daily_extra`（市值/PB）和 `stock_shareholder`（股东户数）2 张表及对应 fetcher/sync；**历史数据扩展**：stock_daily 起始日期 2020→2015，约 1,000 万行；**fetcher 修复**：`stock_a_indicator_lg` 不存在→改用 `stock_zh_valuation_baidu` |
 | 2026-05-25 | **清理 ETF/基金**：删除 etf_basic/etf_daily/fund_basic/fund_nav 4 张表；data_loader 路由点 + 页面标签精简为纯股票；fetcher/sync 中对应代码注释保留可恢复；数据库从 12 表→8 表。**ML 环境就绪**：sklearn 1.8.0 / xgboost 3.2.0 / lightgbm 4.6.0 / statsmodels 0.14.6 / torch 2.12.0。**量化策略研究报告**：新增 2020-2025 因子挖掘新范式（LLM+RL/ABCM/分析师因子/Risk-Attention/VAE-KAN），更新参考文献至 19 篇。**回测性能优化**：细粒度并行 + worker 级数据缓存 + batch_mode 加速，默认 8 并发。**基金净值同步 bug 修复**：accumulated_nav 列 None→np.nan |
 | 2026-05-24 | **A 股实盘交易规则**：`AShareCommission`（佣金万0.9 买卖双向 + 印花税万5 卖出单向）；**大盘年线过滤器**：`MarketAwareSizer` 牛市 95% / 熊市 40% 动态仓位；**批量回测系统**：`scripts/batch_backtest.py` 全股票多策略多参数牛熊市对比，输出排名报告；基金净值同步（部分数据源缺失跳过） |
