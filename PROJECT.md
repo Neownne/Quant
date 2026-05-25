@@ -1,6 +1,6 @@
 # Quant — A 股量化交易项目
 
-> 最后更新：2026-05-24  
+> 最后更新：2026-05-25  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
@@ -8,27 +8,27 @@
 ## 架构概览
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │          Streamlit Web UI (app/)         │
-                    │  ┌─────────┐ ┌──────┐ ┌──────────────┐  │
-                    │  │实时报价  │ │K线图 │ │策略回测/编辑器│  │
-                    │  └────┬────┘ └──┬───┘ └──────┬───────┘  │
-                    │       └─────────┼─────────────┘          │
-                    │    data_loader.py / backtest_runner.py   │
-                    └─────────────────┼────────────────────────┘
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-              │           data/ 数据层                        │
-              │  ┌──────────┐  ┌──────┐  ┌────────────────┐  │
-              │  │fetcher.py│  │db.py │  │sync.py/recorder│  │
-              │  │ AKShare  │  │ PG   │  │ 数据同步/录制   │  │
-              │  └────┬─────┘  └──┬───┘  └───────┬────────┘  │
-              │       └───────────┼───────────────┘           │
-              └───────────────────┼───────────────────────────┘
+                    ┌─────────────────────────────────────────────────┐
+                    │            Streamlit Web UI (app/)              │
+                    │  ┌──────┐ ┌──────┐ ┌───────┐ ┌──────┐ ┌─────┐ │
+                    │  │实时报价│ │K线图 │ │策略回测│ │模拟盘│ │股票池│ │
+                    │  └──┬───┘ └──┬───┘ └───┬───┘ └──┬───┘ └──┬──┘ │
+                    │     └────────┼──────────┼────────┼────────┘    │
+                    │   data_loader / backtest_runner / stock_pools  │
+                    └──────────────┼─────────────────────────────────┘
+                                   │
+              ┌────────────────────┼────────────────────┐
+              │            data/ 数据层                  │
+              │  ┌──────────┐  ┌──────┐  ┌───────────┐  │
+              │  │fetcher.py│  │db.py │  │sync.py     │  │
+              │  │ AKShare  │  │ PG   │  │数据同步     │  │
+              │  └────┬─────┘  └──┬───┘  └─────┬─────┘  │
+              │       └───────────┼─────────────┘        │
+              └───────────────────┼──────────────────────┘
                                   │
                     ┌─────────────┴─────────────┐
                     │     PostgreSQL 数据库       │
-                    │  12 张表（行情 + 模拟盘）    │
+                    │  10 张表（行情 + 基本面 + 模拟盘）│
                     └───────────────────────────┘
 ```
 
@@ -48,9 +48,9 @@ quant/
 │   └── settings.py           # 集中配置（数据库、数据参数）
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 12 张表 DDL + 连接池 + upsert
-│   ├── fetcher.py            # AKShare 数据获取（全部数据源）
-│   ├── sync.py               # 历史数据批量同步（多进程增量）
+│   ├── db.py                 # 10 张表 DDL + 连接池 + upsert
+│   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东）
+│   ├── sync.py               # 历史数据批量同步（多进程增量，6 种模式）
 │   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
 │
 ├── strategies/               # 策略层
@@ -65,12 +65,25 @@ quant/
 │   ├── pages/
 │   │   ├── 1_📈_Watchlist.py     # 自选股实时报价
 │   │   ├── 2_📊_Charts.py        # K线图 + 技术指标 + 自选分组
-│   │   ├── 3_🧪_Backtest.py      # 策略回测引擎
+│   │   ├── 3_🧪_Backtest.py      # 策略回测（单只 / 股票池批量）
 │   │   ├── 4_📋_Paper_Trade.py   # 模拟盘账户/持仓/委托
-│   │   └── 5_📝_Strategy_Editor.py # 在线策略编辑器
+│   │   ├── 5_📝_Strategy_Editor.py # 在线策略编辑器
+│   │   └── 6_📦_Stock_Pools.py   # 自定义股票池（代码编写筛选规则）
 │   └── utils/
 │       ├── data_loader.py    # DB查询 + 指标计算 + K线图构建 + 实时行情
-│       └── backtest_runner.py # backtrader 回测封装 + 自定义分析器
+│       ├── backtest_runner.py # backtrader 回测封装 + A股费用 + 大盘过滤器
+│       └── stock_pools.py    # 股票池引擎（加载/编译/执行筛选规则）
+│
+├── scripts/                  # 批量工具
+│   └── batch_backtest.py     # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
+│
+├── docs/                     # 文档 & 研究报告
+│   ├── quant-strategy-research.md  # 量化策略研究报告
+│   └── postgresql-guide.md         # PostgreSQL 使用指南
+│
+├── output/                   # 批量回测输出（不入 git）
+│   ├── batch_results.csv     # 逐笔回测结果明细
+│   └── batch_summary.md      # 排名汇总报告
 │
 └── notebooks/                # Jupyter Notebook（预留）
 ```
@@ -84,7 +97,7 @@ quant/
 ```
 data/sync.py
   │
-  ├──> data/fetcher.py  ─── AKShare API ─── 腾讯/新浪/交易所
+  ├──> data/fetcher.py  ─── AKShare API ─── 腾讯/新浪/百度/交易所
   │         │
   │         └── 返回 DataFrame（字段对齐数据库表结构）
   │
@@ -93,27 +106,44 @@ data/sync.py
             └── upsert_df()：临时表 → ON CONFLICT DO UPDATE
 ```
 
-**sync.py 特性**：
-- 多进程并发（ProcessPoolExecutor，因为 AKShare V8 引擎不支持多线程）
-- 增量同步：计算最近交易日，跳过已覆盖到最新日期的股票
-- 单股 60s 超时自动跳过
-- tqdm 进度条
+**sync.py 同步模式**：
+| 模式 | 说明 | 数据源 |
+|---|---|---|
+| `stock` | 股票基本信息（行业/上市日期） | 深交所 + 上交所 + 北交所 |
+| `stock-daily` | 日线 OHLCV（后复权，2015 年起） | 腾讯财经 |
+| `index` | 7 只指数日线 | 腾讯财经 |
+| `daily-extra` | 估值指标（市值/PB，~1 年日频） | 百度财经 |
+| `shareholder` | 股东户数（季度数据，2013 年起） | 东方财富 |
+| `all` | 全量同步 | — |
 
-### 2. 实时数据（交易时段）
+**特性**：多进程并发（ProcessPoolExecutor）、增量同步（跳过已覆盖股票）、单股 60s 超时、tqdm 进度条。
+
+### 2. 股票池系统
 
 ```
-data/recorder.py
+app/pages/6_📦_Stock_Pools.py  (编辑器)
   │
-  ├── 分钟K线模式：每 60s 轮询，并发拉取最新分钟数据 → stock_minute 表
-  └── 逐笔成交模式：收盘后一次性抓取 → stock_tick 表
+  └──> app/utils/stock_pools.py  (引擎)
+        │
+        ├── 池文件保存在 ~/.quant_stock_pools/*.py
+        ├── 每文件定义 filter_stocks(basic, extra, shareholder) -> list[str]
+        ├── 实时筛选预览（编译测试 + 运行预览）
+        └── 被回测页面集成：支持「单只股票」或「股票池批量」回测
 ```
+
+**数据输入**：
+- `basic` — 股票基本信息（代码、名称、行业、市场、上市日期、ST 标记）
+- `extra` — 估值指标最新快照（市值、PB）
+- `shareholder` — 股东户数最新报告期
+
+**筛选范式示例**：小盘股（流通市值 10-200 亿）、高散户参与度（股东户数 > 20000）、排除特定行业、排除 ST/新股、低 PE 价值股。
 
 ### 3. Web 界面数据流
 
 ```
 app/main.py (入口)
   │
-  ├── 后台线程：每日 18:00 自动运行 data/sync.py
+  ├── 后台线程：每日 18:00 自动运行 data/sync.py --mode stock-daily
   │
   └── 页面导航
         │
@@ -129,10 +159,20 @@ app/main.py (入口)
         │
         ├── Backtest ──> backtest_runner.run_backtest()
         │                 │
+        │                 ├── 单只模式：原有 K 线图 + 权益曲线 + 交易明细
+        │                 ├── 股票池模式：逐只回测 → 汇总统计 + 排名表 + 分布直方图
         │                 ├── PgDataFeed：DataFrame → backtrader 数据源
+        │                 ├── AShareCommission：A股真实费用
+        │                 │   ├── 佣金 万0.9（买卖双向）
+        │                 │   └── 印花税 万5（仅卖出）
+        │                 ├── MarketAwareSizer：动态仓位管理
+        │                 │   ├── 牛市（指数 ≥ 200MA）→ 95% 仓位
+        │                 │   └── 熊市（指数 < 200MA）→ 自动降至 40%
         │                 ├── TradeRecorder：自定义分析器记录逐笔交易
-        │                 ├── PercentSizer(95%)：仓位管理
         │                 └── 分析器：SharpeRatio, DrawDown, TradeAnalyzer, Returns
+        │
+        ├── Stock Pools ──> stock_pools 引擎
+        │                    └── filter_stocks() 编译/测试/保存/预览
         │
         └── Strategy Editor ──> ~/.quant_strategies/（保存 .py 文件）
                                 │
@@ -141,21 +181,24 @@ app/main.py (入口)
 
 ---
 
-## 数据库表结构（12 张表）
+## 数据库表结构（10 张表）
 
-### 行情数据（9 张）
+### 行情数据（5 张）
 
-| 表 | 主键 | 记录数 | 数据源 |
+| 表 | 主键 | 说明 | 数据源 |
 |---|---|---|---|
-| `stock_basic` | code | 5,522 | 深交所 + 上交所 + 北交所官网 |
-| `stock_daily` | (code, trade_date) | 7,140,788 | 腾讯财经（后复权） |
-| `index_daily` | (code, trade_date) | 10,815 | 腾讯财经 |
-| `etf_basic` | code | 1,528 | 新浪财经 |
-| `etf_daily` | (code, trade_date) | 1,166,415 | 新浪财经 |
-| `fund_basic` | code | 16,958 | 天天基金 |
-| `fund_nav` | (code, nav_date) | 同步中 | 天天基金 |
-| `stock_tick` | (code, trade_time) | 0 | 腾讯财经逐笔 |
-| `stock_minute` | (code, trade_time, period) | 0 | 新浪财经分钟K线 |
+| `stock_basic` | code | 5,522 只股票基本信息（含行业/上市日期） | 深交所 + 上交所 + 北交所官网 |
+| `stock_daily` | (code, trade_date) | 日线 OHLCV + 换手率（后复权，2015-01 起） | 腾讯财经 |
+| `index_daily` | (code, trade_date) | 7 只指数日线（上证/深证/创业板/科创/沪深300/中证500/中证1000） | 腾讯财经 |
+| `stock_tick` | (code, trade_time) | 逐笔成交（实时录制） | 腾讯财经逐笔 |
+| `stock_minute` | (code, trade_time, period) | 分钟K线（实时录制） | 新浪财经分钟K线 |
+
+### 基本面数据（2 张）
+
+| 表 | 主键 | 说明 | 数据源 |
+|---|---|---|---|
+| `stock_daily_extra` | (code, trade_date) | 估值指标（总市值、PB） | 百度财经 |
+| `stock_shareholder` | (code, end_date) | 股东户数（季度，含户均持股市值/持股数量） | 东方财富 |
 
 ### 模拟盘（3 张）
 
@@ -164,6 +207,8 @@ app/main.py (入口)
 | `paper_account` | 模拟账户（名称、初始资金、现金） |
 | `paper_orders` | 委托记录（代码、方向、价格、数量、状态） |
 | `paper_positions` | 当前持仓（代码、数量、均价） |
+
+> ETF/基金相关 4 张表（etf_basic / etf_daily / fund_basic / fund_nav）DDL 保留但未启用。fetcher.py 和 sync.py 中对应函数代码完整保留但调用链已注释。
 
 ---
 
@@ -202,37 +247,133 @@ strategies/__init__.py
 
 ---
 
+## 股票池系统
+
+### 自定义股票池（Web 编辑器）
+
+- 在线编写 Python 筛选代码，保存为 `~/.quant_stock_pools/*.py`
+- 每文件定义 `filter_stocks(basic, extra, shareholder) -> list[str]`
+- 数据输入：股票基本信息 + 估值指标 + 股东户数
+- 实时的数据概览（股票总数、估值覆盖率、股东数据覆盖率）
+- 筛选预览（编译 → 运行 → 显示前 20 匹配股票）
+
+### 回测集成
+
+- 回测页面新增「单只股票 / 股票池」模式切换
+- 股票池模式：逐只回测 → 汇总统计（均值/中位数/夏普/回撤/胜率）
+- 排名表 + 收益率分布直方图 + CSV 导出
+
+---
+
+## 批量回测系统
+
+### scripts/batch_backtest.py
+
+全量回测：所有股票 × 策略参数网格 × 牛熊市周期。
+
+```
+用法：
+    python scripts/batch_backtest.py                         # 全量运行（8 并发）
+    python scripts/batch_backtest.py --workers 16            # 指定并发数
+    python scripts/batch_backtest.py --limit 50 --resume     # 只测前 50 只，从断点继续
+```
+
+**特性**：
+- 细粒度并行：每个 策略×参数×周期 组合作为独立任务提交 ProcessPoolExecutor
+- Worker 级 OHLCV 缓存：同一进程内同只股票只查一次 DB
+- batch_mode 加速：跳过 TimeReturn/CSV writer 等非必要输出
+- 大盘年线过滤器：牛市 95% 仓位 / 熊市 40% 仓位
+- 断点续跑 + 增量保存
+
+### 回测结果
+
+| 策略 | 平均收益率% | 平均胜率% | 平均回撤% |
+|---|---|---|---|
+| RSI超买超卖 | 11.6 | 47.2 | 19.1 |
+| MACD金叉死叉 | 4.8 | 33.1 | 34.1 |
+| 双均线交叉 | 2.6 | 28.3 | 34.1 |
+
+- RSI(7, 20, 80) 在全周期上有大量 100% 胜率案例（交易次数 ≥ 10）
+- 熊市（慢熊2021-24）平均收益 -7.3%，反弹期（2024-26）平均 15.4%
+
+---
+
+## 量化策略研究
+
+详见 [docs/quant-strategy-research.md](docs/quant-strategy-research.md)，涵盖：
+
+1. **技术指标数学原理**：SMA/EMA/MACD/RSI/Stochastic/CCI/Bollinger/ATR/OBV
+2. **经典策略体系**：趋势跟踪 / 均值回归 / 配对交易 / 统计套利 / 动量
+3. **Alpha101 & Alpha191 因子体系**：5 大类因子 + A 股适配
+4. **2020-2025 因子挖掘新范式**：
+   - LLM + RL 公式化因子自动发现（中科院 2025）
+   - ABCM 神经网络 Alpha-Beta 协同挖掘（东方证券 2024）
+   - 分析师预期正交因子（华泰证券 2024）
+   - Risk-Attention / VAE / KAN-Autoencoder 因子模型
+5. **ML 前沿应用**：XGBoost/LightGBM/Transformer/GAN
+6. **可行性路线图**：因子库建设 → 单模型预测 → 正交 Alpha 扩展 → 集成优化
+
+---
+
+## ML 环境
+
+已安装（Python 3.14）：
+
+| 包 | 版本 | 用途 |
+|---|---|---|
+| scikit-learn | 1.8.0 | 特征工程、模型评估 |
+| xgboost | 3.2.0 | 梯度提升（因子→收益预测） |
+| lightgbm | 4.6.0 | 梯度提升（大规模特征） |
+| statsmodels | 0.14.6 | 统计检验、回归分析 |
+| torch | 2.12.0 | 深度学习（Transformer/LSTM） |
+
+---
+
 ## 文件关联关系
 
 ### config/settings.py → 全局配置中心
-- `DBConfig`：被 `data/db.py` 的 `get_engine()` 使用，控制数据库连接
-- `DataConfig`：被 `data/sync.py` 和 `data/fetcher.py` 使用，控制请求间隔和指数列表
+- `DBConfig`：被 `data/db.py` 的 `get_engine()` 使用
+- `DataConfig`：被 `data/sync.py` 和 `data/fetcher.py` 使用
 
 ### data/fetcher.py → 数据获取
 - 被 `data/sync.py` 调用（批量历史同步）
 - 被 `data/recorder.py` 调用（实盘录制）
-- 被 `app/utils/data_loader.py` 间接调用（通过 `akshare` 直调实时行情）
-- 所有函数统一返回 pandas DataFrame，字段名对齐数据库表结构
+- 被 `app/utils/data_loader.py` 间接调用（实时行情）
 - `@retry_on_network_error` 装饰器提供指数退避自动重试
+- `fetch_stock_lg_indicator()` — 估值指标（市值/PB，数据源百度财经）
+- `fetch_shareholder_count()` — 股东户数（季度，数据源东方财富）
 
 ### data/db.py → 数据库层
-- 被所有需要读写数据库的模块调用
-- `init_db()`：建表（幂等），被 `app/main.py` 各页面调用
+- `init_db()`：建表（幂等，10 张表），被 `app/main.py` 各页面调用
 - `upsert_df()`：写入，被 `data/sync.py` 和 `data/recorder.py` 调用
-- `get_existing_dates()`：增量查询，被 `data/sync.py` 调用
+
+### data/sync.py → 数据同步
+- 6 种同步模式：stock / stock-daily / index / daily-extra / shareholder / all
+- 默认起始日期 20150101（10 年历史）
+- 多进程并发（ProcessPoolExecutor），模块级 worker 函数
 
 ### app/utils/data_loader.py → Web 数据服务
-- 被所有页面调用，封装 DB 查询和指标计算
 - `@st.cache_data` 缓存策略：实时行情 5s、日线 60s、股票列表 3600s
 - `build_kline_chart()`：生成 Plotly 多 pane K 线图
 
 ### app/utils/backtest_runner.py → 回测引擎
-- 被 Backtest 页面调用
-- 封装 backtrader 的 Cerebro、数据源、分析器、仓位管理
-- `TradeRecorder`：自定义分析器，通过 `notify_order` 记录逐笔交易详情
+- `AShareCommission`：A 股真实交易费用
+- `MarketAwareSizer`：大盘年线过滤器
+- `load_index_data()`：加载上证指数日线
+- `TradeRecorder`：FIFO 逐笔交易记录器
+- `batch_mode=True`：跳过权益曲线/CSV 输出加速批量回测
+
+### app/utils/stock_pools.py → 股票池引擎
+- 池文件 `~/.quant_stock_pools/*.py`，每文件定义 `filter_stocks()`
+- `compile_pool()` / `execute_pool()` / `get_pool_data()`
+- 被回测页面集成，支持批量回测
+
+### scripts/batch_backtest.py → 批量回测
+- 细粒度并行 + worker 级数据缓存 + batch_mode 加速
+- 输出 `output/batch_results.csv` + `output/batch_summary.md`
 
 ### strategies/__init__.py → 策略注册
-- 被 `app/pages/3_🧪_Backtest.py` 调用（获取策略列表）
+- 被 `app/pages/3_🧪_Backtest.py` 调用
 - 动态扫描 `~/.quant_strategies/` 加载自定义策略
 
 ---
@@ -244,8 +385,10 @@ cd /Users/chenwan/Documents/quant
 source .venv/bin/activate
 
 # 数据同步（首次使用）
-python -m data.sync                        # 全量同步
-python -m data.sync --mode stock-daily     # 只更新日线
+python -m data.sync --mode stock           # 股票基本信息
+python -m data.sync --mode stock-daily     # 日线行情
+python -m data.sync --mode daily-extra     # 估值指标
+python -m data.sync --mode shareholder     # 股东户数
 
 # 启动 Web 界面
 streamlit run app/main.py                  # 浏览器打开 http://localhost:8501
@@ -257,8 +400,11 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
-| 2026-05-24 | ETF/基金全页面支持：data_loader 按资产类型自动路由（stock_daily/etf_daily/fund_nav），基金净值曲线图，类型标签显示；Git 初始化 + GitHub 私有仓库推送；.gitignore 排除 .env 和 .claude/ |
-| 2026-05-24 | Web 策略编辑器（在线编写/保存/编译测试，自动注册到回测页面）；策略文档（strategies/README.md，含逻辑/参数/风险提示）；自选股非交易时段回退最近交易日数据；K线图代码直输+自选分组快捷切换；回测默认参数更新（20万本金、佣金万0.85） |
-| 2026-05-24 | Streamlit Web 界面：实时报价、K线图+技术指标（MA/MACD/RSI/Bollinger）、策略回测、模拟盘、每日自动同步调度；新增 paper_account/paper_orders/paper_positions 3张模拟盘表；backtrader 回测引擎封装 |
-| 2026-05-23 | 全面弃用东方财富，数据源迁移至腾讯/新浪/交易所；后复权统一；sync v2（tqdm + ProcessPoolExecutor + 跳过已完成 + 60s 超时）；db.py 临时表加 UUID；新增 stock_tick/stock_minute 表 + recorder.py |
-| 2026-05-22 | 初始化项目结构、数据模块、配置文件、新增 ETF 和基金支持、网络重试机制 |
+| 2026-05-25 | **股票池系统**：新增自定义股票池编辑器（`app/pages/6_📦_Stock_Pools.py`），支持 Python 代码定义筛选规则，集成回测批量模式；**回测升级**：支持单只/股票池双模式，池模式含汇总统计+排名表+分布直方图+CSV 导出；**基本面数据**：新增 `stock_daily_extra`（市值/PB）和 `stock_shareholder`（股东户数）2 张表及对应 fetcher/sync；**历史数据扩展**：stock_daily 起始日期 2020→2015，约 1,000 万行；**fetcher 修复**：`stock_a_indicator_lg` 不存在→改用 `stock_zh_valuation_baidu` |
+| 2026-05-25 | **清理 ETF/基金**：删除 etf_basic/etf_daily/fund_basic/fund_nav 4 张表；data_loader 路由点 + 页面标签精简为纯股票；fetcher/sync 中对应代码注释保留可恢复；数据库从 12 表→8 表。**ML 环境就绪**：sklearn 1.8.0 / xgboost 3.2.0 / lightgbm 4.6.0 / statsmodels 0.14.6 / torch 2.12.0。**量化策略研究报告**：新增 2020-2025 因子挖掘新范式（LLM+RL/ABCM/分析师因子/Risk-Attention/VAE-KAN），更新参考文献至 19 篇。**回测性能优化**：细粒度并行 + worker 级数据缓存 + batch_mode 加速，默认 8 并发。**基金净值同步 bug 修复**：accumulated_nav 列 None→np.nan |
+| 2026-05-24 | **A 股实盘交易规则**：`AShareCommission`（佣金万0.9 买卖双向 + 印花税万5 卖出单向）；**大盘年线过滤器**：`MarketAwareSizer` 牛市 95% / 熊市 40% 动态仓位；**批量回测系统**：`scripts/batch_backtest.py` 全股票多策略多参数牛熊市对比，输出排名报告；基金净值同步（部分数据源缺失跳过） |
+| 2026-05-24 | ETF/基金全页面支持：data_loader 按资产类型自动路由；Git 初始化 + GitHub 私有仓库推送 |
+| 2026-05-24 | Web 策略编辑器；策略文档；自选股非交易时段回退；K线图分组切换；回测默认参数更新 |
+| 2026-05-24 | Streamlit Web 界面：实时报价、K线图+技术指标、策略回测、模拟盘、每日自动同步；模拟盘 3 张表；backtrader 回测引擎 |
+| 2026-05-23 | 弃用东方财富，迁移至腾讯/新浪/交易所；后复权统一；sync v2（tqdm + ProcessPoolExecutor + 超时）；stock_tick/stock_minute 表 + recorder.py |
+| 2026-05-22 | 初始化项目结构、数据模块、配置文件、ETF/基金支持、网络重试机制 |
