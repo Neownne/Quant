@@ -151,3 +151,96 @@ class TestCustomFactors:
             # warmup 后应有非 NaN 值
             assert result.iloc[-1] is not np.nan or result.iloc[-1] is np.nan, \
                 f"{fn.__name__}: 最后几个值至少应有定义"
+
+
+class TestICMonitor:
+    def test_rank_ic_bounds(self):
+        """RankIC 应在 [-1, 1] 范围内。"""
+        from factors.monitor import compute_rank_ic
+        np.random.seed(42)
+        f = np.random.randn(100)
+        r = np.random.randn(100)
+        ic = compute_rank_ic(f, r)
+        assert -1.0 <= ic <= 1.0, f"RankIC 超出范围: {ic}"
+
+    def test_rank_ic_perfect_positive(self):
+        """完全正相关应返回 1.0。"""
+        from factors.monitor import compute_rank_ic
+        vals = np.array([1, 2, 3, 4, 5])
+        ic = compute_rank_ic(vals, vals)
+        assert np.isclose(ic, 1.0), f"完全正相关 RankIC 应为 1.0，实际: {ic}"
+
+    def test_rank_ic_perfect_negative(self):
+        """完全负相关应返回 -1.0。"""
+        from factors.monitor import compute_rank_ic
+        f = np.array([1, 2, 3, 4, 5])
+        r = np.array([5, 4, 3, 2, 1])
+        ic = compute_rank_ic(f, r)
+        assert np.isclose(ic, -1.0), f"完全负相关 RankIC 应为 -1.0，实际: {ic}"
+
+    def test_rank_ic_small_sample(self):
+        """少于 5 个有效样本应返回 NaN。"""
+        from factors.monitor import compute_rank_ic
+        f = np.array([1.0, 2.0, np.nan, np.nan, np.nan, np.nan])
+        r = np.array([1.0, np.nan, np.nan, np.nan, np.nan, np.nan])
+        ic = compute_rank_ic(f, r)
+        assert np.isnan(ic), f"少于 5 个有效样本应返回 NaN，实际: {ic}"
+
+    def test_ic_series_shape(self):
+        """IC series 应有正确的行/列数。"""
+        from factors.monitor import compute_ic_series
+        np.random.seed(42)
+        dates = pd.date_range("2020-01-02", periods=20, freq="B")
+        n = len(dates) * 20  # 20 stocks per day
+        df = pd.DataFrame({
+            "trade_date": np.tile(dates, 20),
+            "code": np.repeat([f"{i:06d}" for i in range(20)], len(dates)),
+            "factor_a": np.random.randn(n),
+            "factor_b": np.random.randn(n),
+            "ret_1d": np.random.randn(n) * 0.02,
+        })
+
+        ic_df = compute_ic_series(df, factor_cols=["factor_a", "factor_b"], ret_col="ret_1d")
+        assert "trade_date" in ic_df.columns
+        assert "factor_a" in ic_df.columns
+        assert "factor_b" in ic_df.columns
+        # 应该每个交易日一行
+        assert len(ic_df) == len(dates)
+
+    def test_ic_summary(self):
+        """IC 汇总应有 ic_mean, ic_std, icir, n_days 列。"""
+        from factors.monitor import compute_ic_series, compute_ic_summary
+        np.random.seed(42)
+        dates = pd.date_range("2020-01-02", periods=30, freq="B")
+        n = len(dates) * 10
+        df = pd.DataFrame({
+            "trade_date": np.tile(dates, 10),
+            "code": np.repeat([f"{i:06d}" for i in range(10)], len(dates)),
+            "factor_a": np.random.randn(n),
+            "ret_1d": np.random.randn(n) * 0.02,
+        })
+        ic_df = compute_ic_series(df, factor_cols=["factor_a"])
+        summary = compute_ic_summary(ic_df)
+        assert "ic_mean" in summary.columns
+        assert "ic_std" in summary.columns
+        assert "icir" in summary.columns
+        assert "factor_a" in summary.index
+
+    def test_ic_decay(self):
+        """IC 衰减应返回 horizon × mean_ic DataFrame。"""
+        from factors.monitor import compute_ic_decay
+        np.random.seed(42)
+        dates = pd.date_range("2020-01-02", periods=50, freq="B")
+        n = len(dates) * 10
+        df = pd.DataFrame({
+            "trade_date": np.tile(dates, 10),
+            "code": np.repeat([f"{i:06d}" for i in range(10)], len(dates)),
+            "f": np.random.randn(n),
+            "ret_1d": np.random.randn(n) * 0.02,
+            "ret_3d": np.random.randn(n) * 0.03,
+            "ret_5d": np.random.randn(n) * 0.04,
+        })
+        decay = compute_ic_decay(df, factor_col="f", ret_cols=["ret_1d", "ret_3d", "ret_5d"])
+        assert "horizon" in decay.columns
+        assert "mean_ic" in decay.columns
+        assert len(decay) == 3
