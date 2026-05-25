@@ -1,0 +1,42 @@
+"""因子筛选测试。"""
+import pytest
+import pandas as pd
+import numpy as np
+from factors.screening import compute_factor_correlation, select_orthogonal_factors
+
+
+class TestScreening:
+    def test_compute_correlation_matrix(self):
+        """应返回因子间相关性矩阵。"""
+        np.random.seed(42)
+        n = 200
+        df = pd.DataFrame({
+            "f1": np.random.randn(n),
+            "f2": np.random.randn(n),
+            "f3": np.random.randn(n),
+        })
+        corr = compute_factor_correlation(df, ["f1", "f2", "f3"])
+        assert corr.shape == (3, 3)
+        assert abs(corr.loc["f1", "f1"] - 1.0) < 0.001
+
+    def test_select_orthogonal_drops_highly_correlated(self):
+        """相关性 > 0.9 的因子应被剔除。"""
+        np.random.seed(42)
+        n = 200
+        base = np.random.randn(n)
+        df = pd.DataFrame({
+            "f1": base,
+            "f2": base + np.random.randn(n) * 0.05,  # 与 f1 高相关
+            "f3": np.random.randn(n),                  # 独立
+        })
+        selected = select_orthogonal_factors(df, ["f1", "f2", "f3"], threshold=0.9)
+        # f1 与 f2 高相关，方差更大的 f2 被选入，f1 被剔除；f3 独立保留
+        assert "f2" in selected
+        assert "f3" in selected
+        assert len(selected) == 2
+        assert "f1" not in selected
+
+    def test_empty_factor_list(self):
+        """空列表应返回空列表。"""
+        result = select_orthogonal_factors(pd.DataFrame(), [], threshold=0.7)
+        assert result == []
