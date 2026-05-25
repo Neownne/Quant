@@ -141,3 +141,45 @@ class TestTrainer:
         model, metrics = train_lightgbm(X, y, X, y)
         assert model is not None
         assert "accuracy" in metrics
+
+
+class TestPredictor:
+    def test_predict_returns_scores(self):
+        """预测器应返回每只股票的得分和排名。"""
+        from models.predictor import DailyPredictor
+        from models.trainer import train_xgboost
+        import numpy as np
+        import pandas as pd
+
+        np.random.seed(42)
+        n = 300
+        X = pd.DataFrame({"f1": np.random.randn(n), "f2": np.random.randn(n)})
+        y = (X["f1"] * 0.7 + X["f2"] * 0.3 > 0).astype(int)
+
+        model, _ = train_xgboost(X, y, X, y)
+        predictor = DailyPredictor(model, factor_names=["f1", "f2"])
+
+        # 模拟今日横截面
+        today_data = pd.DataFrame({
+            "code": [f"{i:06d}" for i in range(50)],
+            "f1": np.random.randn(50),
+            "f2": np.random.randn(50),
+        })
+
+        result = predictor.predict(today_data)
+        assert "code" in result.columns
+        assert "score" in result.columns
+        assert "rank" in result.columns
+        assert result["rank"].min() == 1
+        assert result["rank"].max() == 50
+
+    def test_predict_handles_missing_factors(self):
+        """缺失因子列时应报清晰错误。"""
+        from models.predictor import DailyPredictor
+        import pytest
+
+        predictor = DailyPredictor(None, factor_names=["f1", "f2"])
+        bad_data = pd.DataFrame({"code": ["000001"], "f1": [1.0]})  # missing f2
+
+        with pytest.raises(KeyError):
+            predictor.predict(bad_data)
