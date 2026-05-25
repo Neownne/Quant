@@ -60,19 +60,27 @@ quant/
 │   ├── macd_strategy.py      # MACD 金叉死叉策略
 │   └── rsi_strategy.py       # RSI 超买超卖策略
 │
-├── factors/                    # 因子层（新增）
-│   ├── __init__.py             # ALL_FACTORS 注册表（37 个因子）
+├── factors/                    # 因子层（65 个因子）
+│   ├── __init__.py             # ALL_FACTORS 注册表（65 个因子）
 │   ├── engine.py               # FactorEngine + 截面中性化
 │   ├── alpha101.py             # 30 个 Alpha101 核心因子
-│   ├── alpha191.py             # Alpha191 A股适配因子（预留）
+│   ├── alpha191_turnover.py    # Alpha191 换手率类 5 因子
+│   ├── alpha191_intraday.py    # Alpha191 日内形态类 4 因子
+│   ├── alpha191_flow.py        # Alpha191 资金流向类 6 因子
+│   ├── alpha191_gap.py         # Alpha191 隔夜效应类 4 因子
+│   ├── alpha191_vol.py         # Alpha191 波动率高阶类 5 因子
+│   ├── alpha191_liquidity.py   # Alpha191 流动性高阶类 4 因子
 │   ├── custom.py               # 7 个自定义 A 股因子
-│   └── monitor.py              # IC/ICIR/衰减曲线监控
+│   ├── monitor.py              # IC/ICIR/衰减曲线监控
+│   └── screening.py            # 正交性筛选（Spearman + 贪心）
 │
 ├── models/                     # ML 预测层
 │   ├── __init__.py             # 模块导出
 │   ├── dataset.py              # 因子数据集构造 + walk-forward 切分
-│   ├── trainer.py              # XGBoost/LightGBM 训练器
-│   └── predictor.py            # DailyPredictor 横截面打分排序
+│   ├── trainer.py              # XGBoost/LightGBM 训练器 + EnsemblePredictor
+│   ├── predictor.py            # DailyPredictor 横截面打分排序
+│   ├── regime.py               # 市场状态识别（牛/熊/震荡）
+│   └── tuning.py               # 阈值搜索 + Optuna 超参调优
 │
 ├── portfolio/                  # 组合优化层
 │   ├── __init__.py             # 模块导出
@@ -80,10 +88,13 @@ quant/
 │   ├── allocator.py            # 等权/波动率倒数仓位分配
 │   └── risk.py                 # 个股止损 + 组合回撤控制
 │
-├── tests/                      # 测试
+├── tests/                      # 测试（59 通过 + 1 跳过）
 │   ├── test_fetcher.py         # 数据获取测试
 │   ├── test_factors.py         # 因子+引擎+IC 测试
-│   ├── test_models.py          # ML 模型测试（数据集+训练+预测）
+│   ├── test_alpha191.py        # Alpha191 因子测试（13 个）
+│   ├── test_models.py          # ML 模型测试（数据集+训练+集成+调优）
+│   ├── test_regime.py          # 市场状态识别测试
+│   ├── test_screening.py       # 正交筛选测试
 │   └── test_portfolio.py       # 组合优化测试（选股+仓位+风控）
 │
 ├── app/                      # Web 界面层
@@ -427,6 +438,7 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
+| 2026-05-25 | **Phase 3 因子扩展+集成优化**：新增 28 个 Alpha191 A 股因子（换手率5/日内形态4/资金流向6/波动率5/隔夜效应4/流动性4 共 6 类）；激活 extra_data（市值+PB+股东户数）激活 3 个估值因子；市场状态识别 `models/regime.py`（牛/熊/震荡三态）；正交筛选 `factors/screening.py`（Spearman 秩相关 < 0.7 门禁）；XGBoost+LightGBM 概率平均集成 `EnsemblePredictor`；`models/tuning.py` 阈值搜索+Optuna 调优。因子总数 37→65，经正交筛选 ≥ 50 活跃。E2E 集成回测 4 窗口 acc=54.2%, prec=52.1%, rec=26.9%。全量 59 测试通过 + 1 跳过 |
 | 2026-05-25 | **Phase 2 ML 选股管线**：新增 `models/` 模块（dataset 构造+walk-forward 切分、XGBoost/LightGBM 训练器、DailyPredictor 截面排序）；新增 `portfolio/` 模块（Top-N 选股+ST/次新过滤、等权/波动率倒数分配、个股止损+回撤风控）；新增 `scripts/run_ml_backtest.py` 端到端验证脚本；新增 16 个测试（models 9 + portfolio 7），全量 36 测试通过；Phase 1+2 合计 37 个因子 + IC 监控 + ML 训练预测 + 组合优化 |
 | 2026-05-25 | **股票池系统**：新增自定义股票池编辑器（`app/pages/6_📦_Stock_Pools.py`），支持 Python 代码定义筛选规则，集成回测批量模式；**回测升级**：支持单只/股票池双模式，池模式含汇总统计+排名表+分布直方图+CSV 导出；**基本面数据**：新增 `stock_daily_extra`（市值/PB）和 `stock_shareholder`（股东户数）2 张表及对应 fetcher/sync；**历史数据扩展**：stock_daily 起始日期 2020→2015，约 1,000 万行；**fetcher 修复**：`stock_a_indicator_lg` 不存在→改用 `stock_zh_valuation_baidu` |
 | 2026-05-25 | **清理 ETF/基金**：删除 etf_basic/etf_daily/fund_basic/fund_nav 4 张表；data_loader 路由点 + 页面标签精简为纯股票；fetcher/sync 中对应代码注释保留可恢复；数据库从 12 表→8 表。**ML 环境就绪**：sklearn 1.8.0 / xgboost 3.2.0 / lightgbm 4.6.0 / statsmodels 0.14.6 / torch 2.12.0。**量化策略研究报告**：新增 2020-2025 因子挖掘新范式（LLM+RL/ABCM/分析师因子/Risk-Attention/VAE-KAN），更新参考文献至 19 篇。**回测性能优化**：细粒度并行 + worker 级数据缓存 + batch_mode 加速，默认 8 并发。**基金净值同步 bug 修复**：accumulated_nav 列 None→np.nan |

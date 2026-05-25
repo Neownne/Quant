@@ -2,8 +2,9 @@
 """ML 选股端到端回测验证。
 
 用法:
-    python scripts/run_ml_backtest.py                   # 默认参数
-    python scripts/run_ml_backtest.py --model lightgbm  # 换模型
+    python scripts/run_ml_backtest.py                        # 集成模式
+    python scripts/run_ml_backtest.py --model xgboost        # 单模型
+    python scripts/run_ml_backtest.py --no-ensemble          # 禁用集成
 """
 import argparse
 import sys
@@ -15,10 +16,11 @@ import pandas as pd
 from loguru import logger
 
 from data.db import get_engine
-from models.dataset import build_factor_dataset, walk_forward_split
-from models.trainer import walk_forward_train
-from models.predictor import DailyPredictor
+from models.dataset import build_factor_dataset
+from models.trainer import walk_forward_train, walk_forward_train_ensemble
+from models.tuning import find_best_threshold
 from factors import ALL_FACTORS
+from factors.screening import select_orthogonal_factors
 
 
 def main():
@@ -31,6 +33,8 @@ def main():
     parser.add_argument("--start", default="20180101")
     parser.add_argument("--end", default="20260101")
     parser.add_argument("--codes", default="", help="测试股票代码，逗号分隔，留空=全量")
+    parser.add_argument("--no-ensemble", action="store_true", help="禁用集成，仅使用单模型")
+    parser.add_argument("--no-orthogonal", action="store_true", help="禁用正交筛选")
     args = parser.parse_args()
 
     # 选择因子
@@ -101,12 +105,28 @@ def main():
         extra_data=extra_data if extra_data else None,
     )
 
+    # 正交筛选
+    if not args.no_orthogonal:
+        factor_cols = select_orthogonal_factors(dataset, factor_names, threshold=0.7)
+    else:
+        factor_cols = factor_names
+
     # Walk-forward 训练
-    factor_cols = factor_names
-    results = walk_forward_train(
-        dataset, factor_cols, model_type=args.model,
-        train_years=args.train_years, val_years=args.val_years,
-    )
+    use_ensemble = not args.no_ensemble
+
+    if use_ensemble:
+        logger.info("使用 XGBoost + LightGBM 集成模式")
+        results = walk_forward_train_ensemble(
+            dataset, factor_cols,
+            train_years=args.train_years, val_years=args.val_years,
+        )
+    else:
+        logger.info(f"使用单模型: {args.model}")
+        results = walk_forward_train(
+            dataset, factor_cols, model_type=args.model,
+            train_years=args.train_years, val_years=args.val_years,
+        )
+
     logger.info(f"完成 {len(results)} 个 walk-forward 窗口")
 
     # 汇总
@@ -133,12 +153,19 @@ def main():
     print(f"平均精确率: {summary['precision'].mean():.3f}")
     print(f"平均召回率: {summary['recall'].mean():.3f}")
 
-    # 特征重要性
-    if results:
+    # 特征重要性（单模型模式）
+    if not use_ensemble and results:
         fi = results[-1]["metrics"].get("feature_importance", pd.Series(dtype=float))
         if not fi.empty:
             print("\n=== Top-10 因子 ===")
             print(fi.head(10).to_string())
+
+    # 最优阈值（集成模式）
+    if use_ensemble and results:
+        print("\n=== 集成模式活跃因子 ===")
+        active = results[-1].get("active_cols", [])
+        print(f"正交筛选后: {len(active)} 个因子")
+        print(f"因子列表: {active[:10]}..." if len(active) > 10 else f"因子列表: {active}")
 
 
 if __name__ == "__main__":
