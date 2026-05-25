@@ -56,7 +56,9 @@ class FactorEngine:
                     left_on=["code", "trade_date"],
                     right_on=["code", date_col],
                     how="left",
-                ).drop(columns=[date_col])
+                )
+                if date_col != "trade_date":
+                    df = df.drop(columns=[date_col])
 
         result_parts = []
 

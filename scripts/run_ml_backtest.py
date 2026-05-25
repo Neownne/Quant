@@ -58,11 +58,48 @@ def main():
         ORDER BY code, trade_date
     """
     ohlcv = pd.read_sql(sql, engine)
-    engine.dispose()
     logger.info(f"OHLCV: {len(ohlcv)} 行")
 
+    # 加载 extra_data（估值+股东）
+    logger.info("加载 extra_data ...")
+    extra_data = {}
+    try:
+        extra_sql = f"""
+            SELECT code, trade_date, market_cap, pb
+            FROM stock_daily_extra
+            WHERE code IN ({code_list})
+              AND trade_date BETWEEN '{args.start}' AND '{args.end}'
+        """
+        extra_df = pd.read_sql(extra_sql, engine)
+        if not extra_df.empty:
+            extra_df["log_mcap"] = np.log(extra_df["market_cap"].replace(0, np.nan))
+            extra_data["log_mcap"] = extra_df[["code", "trade_date", "log_mcap"]]
+            extra_data["pb"] = extra_df[["code", "trade_date", "pb"]]
+            logger.info(f"  估值数据: {len(extra_df)} 行")
+    except Exception as e:
+        logger.warning(f"  估值数据加载失败: {e}")
+
+    try:
+        sh_sql = f"""
+            SELECT code, end_date AS trade_date, shareholder_count
+            FROM stock_shareholder
+            WHERE code IN ({code_list})
+              AND end_date BETWEEN '{args.start}' AND '{args.end}'
+        """
+        sh_df = pd.read_sql(sh_sql, engine)
+        if not sh_df.empty:
+            extra_data["shareholder_count"] = sh_df[["code", "trade_date", "shareholder_count"]]
+            logger.info(f"  股东数据: {len(sh_df)} 行")
+    except Exception as e:
+        logger.warning(f"  股东数据加载失败: {e}")
+
+    engine.dispose()
+
     # 构建因子数据集
-    dataset = build_factor_dataset(ohlcv, factor_names, label_mode="binary")
+    dataset = build_factor_dataset(
+        ohlcv, factor_names, label_mode="binary",
+        extra_data=extra_data if extra_data else None,
+    )
 
     # Walk-forward 训练
     factor_cols = factor_names
