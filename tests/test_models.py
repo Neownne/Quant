@@ -87,3 +87,57 @@ class TestDataset:
         assert "trade_date" in result.columns
         # 应有足够有效行（200天 × 20只，warmup 后）
         assert len(result.dropna()) > 1000
+
+
+class TestTrainer:
+    def test_train_xgboost_binary(self):
+        """用模拟数据训练 XGBoost 二分类器，应返回模型和指标。"""
+        from models.trainer import train_xgboost
+
+        np.random.seed(42)
+        n = 500
+        X = pd.DataFrame({
+            "f1": np.random.randn(n),
+            "f2": np.random.randn(n),
+            "f3": np.random.randn(n),
+        })
+        y = (X["f1"] + X["f2"] * 0.5 > 0).astype(int)
+
+        model, metrics = train_xgboost(X, y, X, y)
+        assert model is not None
+        assert "accuracy" in metrics
+        assert metrics["accuracy"] > 0.5  # better than random
+
+    def test_train_xgboost_returns_feature_importance(self):
+        """应返回特征重要性 DataFrame。"""
+        from models.trainer import train_xgboost
+
+        np.random.seed(42)
+        n = 500
+        X = pd.DataFrame({
+            "f1": np.random.randn(n),
+            "f2": np.random.randn(n),
+        })
+        y = (X["f1"] > 0).astype(int)
+
+        model, metrics = train_xgboost(X, y, X, y)
+        assert "feature_importance" in metrics
+        fi = metrics["feature_importance"]
+        assert "f1" in fi.index
+        assert "f2" in fi.index
+
+    def test_train_lightgbm(self):
+        """LightGBM 也应能训练并返回模型。"""
+        from models.trainer import train_lightgbm
+
+        np.random.seed(42)
+        n = 500
+        X = pd.DataFrame({
+            "f1": np.random.randn(n),
+            "f2": np.random.randn(n),
+        })
+        y = (X["f1"] + X["f2"] * 0.3 > 0).astype(int)
+
+        model, metrics = train_lightgbm(X, y, X, y)
+        assert model is not None
+        assert "accuracy" in metrics
