@@ -404,6 +404,29 @@ def fetch_shareholder_count(symbol: str) -> pd.DataFrame:
 #  财务基本面数据
 # ============================================================
 
+def _parse_financial_value(val) -> float | None:
+    """Parse a Chinese financial value like '4302.00万' or '1.13亿' to float in yuan."""
+    if pd.isna(val) or val in (False, True, ""):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace(",", "").strip()
+    if not s:
+        return None
+    multiplier = 1.0
+    if "亿" in s:
+        multiplier = 1e8
+        s = s.replace("亿", "")
+    elif "万" in s:
+        multiplier = 1e4
+        s = s.replace("万", "")
+    s = s.replace("%", "")
+    try:
+        return float(s) * multiplier
+    except ValueError:
+        return None
+
+
 @retry_on_network_error()
 def fetch_financial_data(symbol: str) -> pd.DataFrame:
     """获取单只股票的财务基本面数据（同花顺接口）。
@@ -418,12 +441,12 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
     def _empty_result() -> pd.DataFrame:
         """Return an empty DataFrame with all required columns."""
         empty = pd.DataFrame(columns=["code", "report_date"] + spec_cols)
-        empty["report_date"] = pd.to_datetime(empty["report_date"])
         return empty
 
     try:
         raw = ak.stock_financial_abstract_ths(symbol=symbol)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"fetch_financial_data({symbol}) 失败: {e}")
         return _empty_result()
 
     if raw.empty:
@@ -460,21 +483,10 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
     # Convert report_date to date type
     df["report_date"] = pd.to_datetime(df["report_date"], errors="coerce").dt.date
 
-    # Convert numeric columns, stripping Chinese units (万/亿/%) first
+    # Convert numeric columns using the Chinese-unit-aware parser
     numeric_cols = [v for v in existing.values() if v != "report_date"]
     for col in numeric_cols:
-        # Replace boolean-like values with NaN
-        series = df[col].replace([False, True], np.nan)
-        # Coerce to string, strip whitespace
-        s = series.astype(str).str.strip()
-        # Strip common Chinese financial units
-        s = s.str.replace("亿", "").str.replace("万", "").str.replace("%", "").str.replace(",", "")
-        df[col] = pd.to_numeric(s, errors="coerce")
-        # Restore percentage units (multiply back — net_margin and roe are already percentages)
-        # Note: no multiplier needed, we just strip the % sign since the value is already
-        # in percentage points (e.g., "29.86%" → 29.86)
-        # For 万/亿, the raw format represents actual amounts in those units, so we
-        # leave the magnitude as-is to match the raw data presentation
+        df[col] = df[col].apply(_parse_financial_value).astype("float64")
 
     # Reorder: code + report_date + all spec columns
     return df[["code", "report_date"] + spec_cols]
