@@ -82,3 +82,39 @@ class TestFactorEngineIntegration:
         result = engine.compute(sample_ohlcv)
         assert "stub_factor" in result.columns
         assert len(result) == len(sample_ohlcv)
+
+
+class TestAlpha101Factors:
+    def test_registered_functions_are_callable(self, sample_ohlcv):
+        """所有 Alpha101 因子应可对分组数据调用，返回 Series。"""
+        from factors.alpha101 import ALPHA101_FUNCTIONS
+        code_df = sample_ohlcv[sample_ohlcv["code"] == "000001"].reset_index(drop=True)
+
+        for name, fn in ALPHA101_FUNCTIONS.items():
+            result = fn(code_df)
+            assert isinstance(result, pd.Series), f"{name}: 应返回 Series, 实际 {type(result)}"
+            assert len(result) == len(code_df), f"{name}: 长度不匹配 (期望 {len(code_df)}, 实际 {len(result)})"
+
+    def test_rsi_range(self, sample_ohlcv):
+        """RSI 应在 [0, 100] 范围内 (warmup 期后)。"""
+        from factors.alpha101 import rsi_14
+        code_df = sample_ohlcv[sample_ohlcv["code"] == "000001"].reset_index(drop=True)
+        result = rsi_14(code_df)
+        warmup = 20
+        vals = result.iloc[warmup:].dropna()
+        assert (vals >= 0).all() and (vals <= 100).all(), \
+            f"RSI 值应在 [0,100] 范围内，实际: {vals.min():.1f} ~ {vals.max():.1f}"
+
+    def test_factor_engine_with_real_factors(self, sample_ohlcv):
+        """FactorEngine 应能用真实因子计算因子矩阵。"""
+        from factors import FactorEngine, ALL_FACTORS
+        assert len(ALL_FACTORS) >= 30, f"应有至少 30 个因子，实际: {len(ALL_FACTORS)}"
+
+        engine = FactorEngine(factor_names=["rsi_14", "mom_20"])
+        result = engine.compute(sample_ohlcv)
+
+        assert "code" in result.columns
+        assert "trade_date" in result.columns
+        assert "rsi_14" in result.columns
+        assert "mom_20" in result.columns
+        assert len(result) == len(sample_ohlcv)

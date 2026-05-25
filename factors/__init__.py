@@ -6,9 +6,9 @@
     result = engine.compute(df_ohlcv)
 """
 from factors.engine import FactorEngine
+from factors.alpha101 import ALPHA101_FUNCTIONS
 
-# 因子注册表将在后续任务中填充
-# 此处先定义空注册表，确保模块可导入
-ALL_FACTORS: dict = {}
+# ALL_FACTORS 将在后续任务中加入 alpha191 和 custom
+ALL_FACTORS: dict = dict(ALPHA101_FUNCTIONS)
 
 __all__ = ["FactorEngine", "ALL_FACTORS"]
