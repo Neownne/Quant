@@ -53,7 +53,7 @@
                                   │
                     ┌─────────────┴─────────────┐
                     │     PostgreSQL 数据库       │
-                    │  15 张表（行情 + 基本面 + 回测 + 模拟盘）│
+                    │  16 张表（行情 + 基本面 + 回测 + 模拟盘 + 策略配置）│
                     └───────────────────────────┘
 ```
 
@@ -73,8 +73,8 @@ quant/
 │   └── settings.py           # 集中配置（数据库、数据参数）
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 15 张表 DDL + 连接池 + upsert
-│   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东/财务/质押）
+│   ├── db.py                 # 16 张表 DDL + 连接池 + upsert
+│   ├── fetcher.py            # 数据获取（日线:AKShare/腾讯, 分钟:新浪直连API）
 │   ├── sync.py               # 历史数据批量同步（多进程增量，10 种模式 + 质量检查）
 │   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
 │
@@ -83,7 +83,8 @@ quant/
 │   ├── __init__.py           # STRATEGY_REGISTRY + 自定义策略加载
 │   ├── sma_cross.py          # 双均线交叉策略
 │   ├── macd_strategy.py      # MACD 金叉死叉策略
-│   └── rsi_strategy.py       # RSI 超买超卖策略
+│   ├── rsi_strategy.py       # RSI 超买超卖策略
+│   └── grid_shock.py         # 震荡网格(高抛低吸)策略
 │
 ├── factors/                    # 因子层（76 个因子）
 │   ├── __init__.py             # ALL_FACTORS 注册表（76 个因子）
@@ -147,12 +148,17 @@ quant/
 │   ├── grid_backtest.py          # 全市场回测 + 参数网格搜索 + 过拟合检测
 │   ├── run_ml_backtest.py        # ML 选股端到端评估（因子→筛选→训练→汇总）
 │   ├── run_simulation.py         # ML 每日模拟回测（选股→分配→止损→P&L）
-│   └── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
+│   ├── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
+│   ├── sync_minute_data.py       # 60 分钟 K 线批量同步（Sina 直连，超时+续传）
+│   ├── compare_freq.py           # 日频 vs 分钟频 ML 回测对比
+│   └── validate_minute_data.py   # 分钟线日收益 vs 日线收益一致性校验
 │
 ├── docs/                     # 文档 & 研究报告
 │   ├── quant-strategy-research.md  # 量化策略研究报告（技术指标+学术前沿）
 │   ├── strategy-interpretability.md # ML策略可解释性分析（因子+筛选+回测验证）
-│   └── postgresql-guide.md         # PostgreSQL 使用指南
+│   ├── postgresql-guide.md         # PostgreSQL 使用指南
+│   ├── project-learning-guide.md   # 项目学习指南
+│   └── factor-table.md             # 因子分类表
 │
 ├── output/                   # 批量回测输出（不入 git）
 │   ├── batch_results.csv     # 逐笔回测结果明细
@@ -217,6 +223,40 @@ data/sync.py
 **因子筛选链**：76 个因子 → IC 门禁 (65→20, \|IC\|>0.02, \|t\|>2.0) → 正交筛选 (20→8, Spearman<0.7) → XGBoost+LightGBM 概率平均集成
 
 **基本面排雷**（月频）：8 项排雷综合评分 (audit_score ≥ -3) + 三项硬排除（商誉>27%/质押>72%/负债>105%），每月约 330-390/800 只通过。
+
+---
+
+## 分钟频 ML 回测（NEW）
+
+> 对比日频(daily) vs 60 分钟频(60min) ML 策略表现。
+
+**数据**：1004 只股票（深市主板+创业板+沪市主板），新浪财经 `money.finance.sina.com.cn` 直连 API（akshare `stock_zh_a_minute` 的 `quotes.sina.cn` 已被 Sina 封锁返回 HTTP 456）。
+
+**因子聚合**：分钟 K 线因子按 (code, trade_date) groupby last，标签仍为日频 ret_1d，bar_per_day=4。
+
+| 指标 | 日频(daily) | 分钟频(60min) | 差异 |
+|------|:---:|:---:|:---:|
+| 年化收益率 | 67.00% | 431.28% | +364pp |
+| 总收益率 | 68.36% | 445.55% | +377pp |
+| 最大回撤 | -11.9% | -10.2% | +1.7pp |
+| 夏普比率 | 2.76 | 5.78 | +3.02 |
+| 胜率 | 51.77% | 58.11% | +6.34pp |
+| 交易次数 | 1030 | 1051 | +21 |
+| 可用因子数 | 21 | 15 | -6 |
+| 耗时 | 35s | 36s | +1s |
+
+> **注意**：分钟频复权方式为前复权(qfq)，日频为后复权(hfq)。日收益理论上不受复权方式影响，但绝对价格差异可能影响仓位计算粒度。431% 年化偏高，待进一步排查是否有前瞻偏差或复权影响。
+
+**同步命令**：
+```bash
+python scripts/sync_minute_data.py --limit 50    # 测试
+python scripts/sync_minute_data.py --skip 1381    # 续传（跳过前 N 只）
+```
+
+**数据校验**：
+```bash
+python scripts/validate_minute_data.py    # 对比分钟聚合日收益 vs stock_daily
+```
 
 ---
 
@@ -304,7 +344,7 @@ app/main.py (入口)
 
 ---
 
-## 数据库表结构（15 张表）
+## 数据库表结构（16 张表）
 
 ### 行情数据（5 张）
 
@@ -326,7 +366,7 @@ app/main.py (入口)
 | `stock_industry` | code | 行业分类（申万一级/二级行业） | 东方财富 |
 | `stock_pledge` | (code, trade_date) | 股权质押数据（质押比例/股数/市值/笔数） | 东方财富 |
 
-### 模拟盘 & 回测（5 张）
+### 模拟盘 & 回测 & 策略配置（6 张）
 
 | 表 | 说明 |
 |---|---|
@@ -335,6 +375,7 @@ app/main.py (入口)
 | `paper_positions` | 当前持仓（代码、数量、均价） |
 | `paper_daily_pnl` | 每日净值（现金、持仓市值、总资产、日收益、回撤） |
 | `backtest_results` | 回测结果持久化（策略参数、资产模式、股票池、指标汇总、完整结果 JSON） |
+| `ml_strategy_config` | ML 策略配置持久化（因子/训练/组合/风控参数，支持 UI 编辑和版本管理） |
 
 > ETF/基金相关 4 张表（etf_basic / etf_daily / fund_basic / fund_nav）DDL 保留但未启用。fetcher.py 和 sync.py 中对应函数代码完整保留但调用链已注释。
 
@@ -366,6 +407,7 @@ strategies/__init__.py
 | 双均线交叉 | 快线上穿买入，下穿卖出 | (5, 20) | 趋势市 |
 | MACD 金叉死叉 | DIF 上穿 DEA 买入，下穿卖出 | (12, 26, 9) | 趋势转折 |
 | RSI 超买超卖 | RSI<30 买入，RSI>70 卖出 | (14, 30, 70) | 震荡市 |
+| 震荡网格(高抛低吸) | 价格触及网格下沿买入、上沿卖出 | (20, 0.05) | 震荡市 |
 
 ### 自定义策略（Web 编辑器）
 
@@ -540,6 +582,7 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
+| 2026-05-26 | **分钟频 ML 回测 + API 换源**：`data/fetcher.py` 分钟数据从 akshare(`quotes.sina.cn`)切换到新浪直连 API(`money.finance.sina.com.cn`)，旧 JSONP 端点被 Sina 封锁(HTTP 456)。1004 只股票分钟数据（000/001/002/300/600 五个板块），日频 vs 60 分钟频对比回测完成（分钟频胜率+6%、夏普翻倍）。新增 `scripts/sync_minute_data.py`(批量同步)、`scripts/compare_freq.py`(频率对比)、`scripts/validate_minute_data.py`(数据校验)。`ml_backtest.py` 支持 `freq="daily"|"60min"`，因子引擎支持 `bar_per_day`。新增 `GridShockStrategy`(震荡网格)。数据库 15→16 张表(新增 `ml_strategy_config`)。`ml_config_manager.py` 实现 ML 策略配置 CRUD+内置预设。回测页新增日期区间筛选+权益曲线 x 轴限制 |
 | 2026-05-26 | **架构重构：统一量化工作流**：统一账户配置系统 `account_manager.py`（策略类型/名称/参数/费率绑定到 paper_account）；回测结果持久化 `backtest_results` 表（历史对比/查看详情/CSV 导出）；策略→模拟盘无缝衔接（回测页"🚀 升级到模拟盘"→账户选择→跳转）；模拟盘页面全面升级（权益曲线+回撤阴影/行业分布饼图/个股权重柱状图/策略信息卡片）；StaticPaperEngine 支持静态策略模拟盘（backtrader 信号回放）；ML Monitor 新增"数据健康"Tab（5 页签）；新建 `app/pages/9_📡_Data_Monitor.py` 数据监控页面（质量概览+手动同步+覆盖度追踪）；数据同步调度扩展为 5 种模式（index/stock-daily/daily-extra/shareholder/financial）；数据库 14→15 张表；所有 11 个 Python 文件 AST 解析通过 |
 | 2026-05-26 | **全市场回测+参数优化+过拟合检测**：`scripts/grid_backtest.py` 新增参数网格搜索（12组合）+ 过拟合检测（样本内2019-2022 vs 样本外2024-2026）。800只股票（沪深300+中证500成分股）全市场回测完成：Sharpe=1.01, 年化收益26.3%, 最大回撤-36.7%, 4个Walk-forward窗口。最优参数：top_n=15, NDrop(ndrop_n=2)。因子筛选链：76因子→IC门禁(65→20, |IC|>0.02, |t|>2.0)→正交筛选(20→8, Spearman<0.7)。过拟合诊断：无（样本外Sharpe 2.27 > 样本内 1.09, 衰减比208.1%）。`docs/strategy-interpretability.md` 策略可解释性分析文档（因子经济学含义+IC门禁+正交筛选+双周期设计+NDrop逻辑+特征重要性+失效场景+改进方向）。行业数据补充（沪市/北交所）因东方财富API不可用暂时跳过 |
 | 2026-05-25 | **基本面因子扩展+财务数据补全**：`factors/fundamental.py` 新增 fin_debt_ratio（资产负债率）、fin_goodwill_ratio（商誉风险）、fin_pledge_risk（质押风险）3 个因子，fin_cashflow_gap 增强为优先使用经营现金流总额对比，fin_audit_score 扩展至 8 项排雷检查（新增扣非<0/负债>70%/商誉>30%）。`data/fetcher.py` 新增 fetch_financial_supplement（资产负债表+现金流+利润表）、fetch_pledge_data（质押快照）、fetch_industry_classification（申万行业）。`data/db.py` 扩展 stock_financial（+7 列 ALTER TABLE）+ 新增 stock_pledge 表。因子总数 65→76，9 项排雷可用 6/9。数据库 13→14 张表。61 测试通过 |

@@ -17,17 +17,18 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                     数据来源（AKShare）                         │
-│  腾讯财经(行情) / 同花顺(财务) / 东方财富(质押/行业) / 百度(估值)    │
+│  腾讯财经(行情) / 同花顺(财务) / 东方财富(质押/行业) / 百度(估值) / 新浪(分钟)│
 └──────────────────────────┬───────────────────────────────────┘
                            │ data/fetcher.py (获取)
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                   PostgreSQL 数据库（14 张表）                  │
-│  行情: stock_daily / index_daily / stock_tick / stock_minute  │
-│  基本面: stock_basic / stock_daily_extra / stock_financial    │
-│          stock_shareholder / stock_pledge / stock_industry     │
-│  模拟盘: paper_account / paper_orders / paper_positions        │
-│          paper_daily_pnl                                       │
+│                   PostgreSQL 数据库（16 张表）                  │
+│  行情: stock_daily / stock_minute / index_daily / stock_tick     │
+│  基本面: stock_basic / stock_daily_extra / stock_financial       │
+│          stock_shareholder / stock_pledge / stock_industry        │
+│  模拟盘: paper_account / paper_orders / paper_positions           │
+│          paper_daily_pnl / backtest_results                       │
+│  策略配置: ml_strategy_config                                     │
 └──────────────────────────┬───────────────────────────────────┘
                            │
           ┌────────────────┼────────────────┐
@@ -63,11 +64,11 @@
 
 | 文件 | 看什么 |
 |------|-------|
-| [data/db.py](../data/db.py) | 14 张表的 DDL，理解表结构就是理解数据模型 |
-| [data/fetcher.py](../data/fetcher.py) | `fetch_stock_daily()` 是最核心的接口，看它怎么从 AKShare 拿数据 |
+| [data/db.py](../data/db.py) | 16 张表的 DDL，理解表结构就是理解数据模型 |
+| [data/fetcher.py](../data/fetcher.py) | `fetch_stock_daily()`(日线/AKShare) + `fetch_minute_data()`(分钟/新浪直连) |
 | [data/sync.py](../data/sync.py) | `sync_stock_daily()` 看增量同步逻辑，`main()` 看 9 种同步模式 |
 
-**关键理解**：数据格式是统一的后复权 OHLCV，代码格式是纯数字（如 `000001`），不带 SH/SZ 前缀。
+**关键理解**：数据格式是统一的后复权 OHLCV（日线）、前复权（分钟线），代码格式是纯数字（如 `000001`），不带 SH/SZ 前缀。分钟线使用新浪财经 `money.finance.sina.com.cn` 直连 API（旧 akshare `quotes.sina.cn` JSONP 端点已被 Sina 封锁返回 HTTP 456）。
 
 ### 第三站：因子层（20分钟）
 
@@ -127,6 +128,9 @@
 | `scripts/grid_backtest.py` | 参数网格搜索 + 过拟合检测（~30min） |
 | `scripts/batch_backtest.py` | 静态策略全量回测（所有股票 × 策略 × 参数） |
 | `scripts/verify_paper_trading.py` | simulation vs PaperEngine 一致性验证 |
+| `scripts/sync_minute_data.py` | 60 分钟 K 线批量同步（超时+续传，~200 只/次） |
+| `scripts/compare_freq.py` | 日频 vs 分钟频 ML 回测对比 |
+| `scripts/validate_minute_data.py` | 分钟聚合日收益 vs stock_daily 一致性校验 |
 
 ---
 
@@ -150,6 +154,7 @@
 | 数据 | 频率 | 命令 |
 |------|------|------|
 | 股票日线 | 每日 | `python -m data.sync --mode stock-daily` |
+| 股票分钟线 | 按需 | `python scripts/sync_minute_data.py --limit 200` |
 | 指数日线 | 每日 | `python -m data.sync --mode index` |
 | 估值指标 | 每日 | `python -m data.sync --mode daily-extra` |
 | 财务数据 | 季度 | `python -m data.sync --mode financial` |
@@ -157,6 +162,7 @@
 | 行业分类 | 按需 | `python -m data.sync --mode industry` |
 
 **自动同步**：app/main.py 已配置每日 18:00 自动运行 stock-daily 同步。
+**分钟线同步**：新浪 API 限制约 75 次连续请求后封 IP 30 分钟，建议分批 200 只/次，间隔 40 分钟。
 
 ---
 
