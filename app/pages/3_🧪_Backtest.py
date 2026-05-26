@@ -158,6 +158,15 @@ with st.sidebar:
                 st.metric("IC阈值", f"{ml_config.get('ic_threshold', 0.02):.3f}")
                 st.metric("正交阈值", f"{ml_config.get('orthogonal_threshold', 0.7):.2f}")
                 st.metric("止损", f"{float(ml_config.get('stop_loss_pct', 0.08))*100:.0f}%")
+            freq = st.selectbox(
+                "数据频率",
+                options=["daily", "60min"],
+                index=0,
+                key="ml_backtest_freq",
+                help="60分钟线使用 Sina 前复权数据。分钟频回测耗时更长，建议先用少量股票测试。",
+            )
+            if freq == "60min":
+                st.caption("⏱ 分钟频回测耗时较长（因子计算量 ×4），建议先用 50-100 只股票测试。")
             strategy_params = ml_config
         else:
             st.warning("请先在「策略编辑器」中创建 ML 策略配置")
@@ -216,17 +225,219 @@ with st.sidebar:
                 pool_codes = []
             code = ""  # pool mode doesn't use single code
 
+    # 快捷区间选择
+    quick_ranges = {
+        "1年": 365, "3年": 365 * 3, "5年": 365 * 5,
+        "10年": 365 * 10, "全部": 365 * 20,
+    }
+    quick_cols = st.columns(len(quick_ranges))
+    selected_range = st.session_state.get("backtest_range", "5年")
+    for i, (label, days) in enumerate(quick_ranges.items()):
+        with quick_cols[i]:
+            if st.button(label, key=f"range_{label}", use_container_width=True,
+                        type="primary" if label == selected_range else "secondary"):
+                st.session_state["backtest_range"] = label
+                st.session_state["backtest_start"] = date.today() - timedelta(days=days)
+                st.session_state["backtest_end"] = date.today()
+                st.rerun()
+
+    default_start = st.session_state.get("backtest_start", date.today() - timedelta(days=365 * 5))
+    default_end = st.session_state.get("backtest_end", date.today())
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("起始", value=date.today() - timedelta(days=365 * 3))
+        start_date = st.date_input("起始", value=default_start)
     with col2:
-        end_date = st.date_input("截止", value=date.today())
+        end_date = st.date_input("截止", value=default_end)
 
     run_btn = st.button("🚀 运行回测", use_container_width=True, type="primary")
 
+# ---- 主区域：历史记录 & 策略对比（始终可见） ----
+st.subheader("📋 历史回测记录")
+
+history = load_backtest_history()
+if history.empty:
+    st.info("暂无保存的回测记录，运行一次回测后自动保存")
+else:
+    for _, row in history.iterrows():
+        sp = row["strategy_params"]
+        if isinstance(sp, str):
+            try:
+                sp = json.loads(sp)
+            except Exception:
+                sp = {}
+
+        with st.expander(
+            f"{row['created_at'].strftime('%m-%d %H:%M') if hasattr(row['created_at'], 'strftime') else str(row['created_at'])[:16]} | "
+            f"{row['strategy_name']} | "
+            f"{row['asset_mode']} | "
+            f"收益: {row['avg_return']*100:.2f}% | "
+            f"夏普: {row['avg_sharpe']:.2f} | "
+            f"回撤: {row['avg_drawdown']:.2f}%"
+        ):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"策略类型: {row['strategy_type']} | 模式: {row['asset_mode']}")
+                st.caption(f"区间: {row['start_date']} ~ {row['end_date']} | 股票数: {row['n_stocks']}")
+                if sp:
+                    st.caption(f"参数: {sp}")
+            with col2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("🚀 升级到模拟盘", key=f"promote_{row['id']}"):
+                        new_id = promote_strategy_to_account(
+                            strategy_type=row["strategy_type"],
+                            strategy_name=row["strategy_name"],
+                            strategy_params=sp,
+                        )
+                        st.success(f"已创建模拟账户 #{new_id}，请切换到「模拟盘」页面运行")
+                with c2:
+                    if st.button("📊 查看详情", key=f"detail_{row['id']}"):
+                        rj = row.get("results_json")
+                        if isinstance(rj, str):
+                            rj = json.loads(rj)
+                        st.json(rj if rj else {})
+
+# -- 策略对比 --
+st.divider()
+st.subheader("📊 策略对比")
+history_df = load_backtest_history()
+if not history_df.empty:
+    history_opts = []
+    for _, r in history_df.iterrows():
+        label = f"#{r['id']} {r['strategy_name']} ({r['strategy_type']}) - {str(r['start_date'])[:10]}"
+        history_opts.append(label)
+
+    selected_for_compare = st.multiselect(
+        "选择要对比的回测记录（最多5条）", history_opts,
+        max_selections=5, key="compare_select"
+    )
+
+    if selected_for_compare:
+        selected_ids = [int(opt.split()[0][1:]) for opt in selected_for_compare]
+        compare_rows = history_df[history_df["id"].isin(selected_ids)]
+
+        # -- 对比表格 --
+        compare_data = []
+        for _, row in compare_rows.iterrows():
+            rj = row.get("results_json")
+            if isinstance(rj, str):
+                try:
+                    rj = json.loads(rj)
+                except Exception:
+                    rj = {}
+            bm_returns = rj.get("benchmark_returns", {}) if isinstance(rj, dict) else {}
+            bm_000001 = bm_returns.get("000001", 0) if isinstance(bm_returns, dict) else 0
+            strat_ret = float(row["avg_return"])
+            excess = strat_ret - float(bm_000001) if bm_000001 else 0
+
+            # 计算累计盈亏 & 年化收益
+            eq_data = rj.get("equity_curve", {}) if isinstance(rj, dict) else {}
+            eq_vals = eq_data.get("values", [])
+            if eq_vals and len(eq_vals) > 1:
+                init_val = eq_vals[0]
+                final_val = eq_vals[-1]
+                cum_pnl = final_val - init_val
+                cum_pnl_str = f"{cum_pnl:+,.0f}"
+            else:
+                cum_pnl_str = f"{strat_ret * 100:+.2f}%"
+
+            # 年化收益率
+            try:
+                sdate = pd.Timestamp(row["start_date"])
+                edate = pd.Timestamp(row["end_date"])
+                n_years = max((edate - sdate).days, 1) / 365.25
+                ann_ret = (1 + strat_ret) ** (1 / n_years) - 1 if strat_ret > -1 else strat_ret
+            except Exception:
+                ann_ret = strat_ret
+
+            compare_data.append({
+                "策略名": row["strategy_name"],
+                "类型": row["strategy_type"],
+                "累计盈亏": cum_pnl_str,
+                "总收益%": f"{strat_ret * 100:.2f}",
+                "年化%": f"{ann_ret * 100:.2f}",
+                "上证同期%": f"{float(bm_000001) * 100:.2f}" if bm_000001 else "-",
+                "超额%": f"{excess * 100:+.2f}",
+                "夏普": f"{float(row['avg_sharpe']):.2f}",
+                "回撤%": f"{float(row['avg_drawdown']):.2f}",
+                "胜率%": f"{float(row['avg_win_rate']) * 100:.1f}",
+                "股票数": int(row["n_stocks"]),
+                "区间": f"{str(row['start_date'])[:10]}~{str(row['end_date'])[:10]}",
+            })
+        st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
+
+        # -- 叠加权益曲线 --
+        st.subheader("📈 归一化权益曲线对比")
+        import plotly.graph_objects as go
+
+        # 基准选择
+        bm_opts = [f"{c} {BENCHMARK_INDICES[c]}" for c in BENCHMARK_INDICES]
+        selected_bms = st.multiselect(
+            "叠加基准指数", bm_opts,
+            default=[f"000001 {BENCHMARK_INDICES['000001']}", f"000300 {BENCHMARK_INDICES['000300']}"],
+            key="compare_bm",
+        )
+        selected_bm_codes = [o.split()[0] for o in selected_bms]
+
+        # 加载基准数据
+        bm_start = str(compare_rows["start_date"].min()).replace("-", "")[:8]
+        bm_end = str(compare_rows["end_date"].max()).replace("-", "")[:8]
+        compare_bms = load_benchmark_indices(bm_start, bm_end)
+
+        fig_compare = go.Figure()
+        strategy_colors = ["#2196f3", "#ff9800", "#4caf50", "#f44336", "#9c27b0"]
+        bm_line_styles = ["dash", "dot", "dashdot", "longdash", "longdashdot", "solid"]
+
+        # 先画基准曲线
+        for bi, bm_code in enumerate(selected_bm_codes):
+            bm_df = compare_bms.get(bm_code)
+            if bm_df is not None and not bm_df.empty and len(bm_df) > 1:
+                bm_norm = bm_df["close"] / bm_df["close"].iloc[0]
+                fig_compare.add_trace(go.Scatter(
+                    x=bm_df["trade_date"], y=bm_norm, mode="lines",
+                    name=f"基准: {BENCHMARK_INDICES.get(bm_code, bm_code)}",
+                    line=dict(color="gray", width=1.2, dash=bm_line_styles[bi % len(bm_line_styles)]),
+                    opacity=0.65,
+                ))
+
+        for ci, (_, row) in enumerate(compare_rows.iterrows()):
+            rj = row.get("results_json")
+            if isinstance(rj, str):
+                try:
+                    rj = json.loads(rj)
+                except Exception:
+                    rj = {}
+            eq_data = rj.get("equity_curve", {}) if isinstance(rj, dict) else {}
+            dates = eq_data.get("dates", [])
+            values = eq_data.get("values", [])
+            if dates and values and len(dates) > 1:
+                norm_values = [v / values[0] for v in values] if values[0] > 0 else values
+                color = strategy_colors[ci % len(strategy_colors)]
+                fig_compare.add_trace(go.Scatter(
+                    x=dates, y=norm_values, mode="lines",
+                    name=f"{row['strategy_name']} ({row['strategy_type']})",
+                    line=dict(color=color, width=1.8),
+                ))
+
+        fig_compare.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                             annotation_text="0% 收益线")
+        fig_compare.update_layout(
+            height=400, template="plotly_white",
+            margin=dict(l=0, r=0, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis_title="归一化净值 (1.0 = 0%收益)",
+        )
+        if len(fig_compare.data) > 0:
+            st.plotly_chart(fig_compare, use_container_width=True)
+        else:
+            st.caption("所选记录暂无可展示的权益曲线数据")
+
+st.divider()
+
 # ---- 主区域：回测结果 ----
 if not run_btn:
-    st.info("在左侧设置参数后点击「运行回测」")
+    st.info("👆 上方可直接查看历史记录与策略对比，或左侧设置参数后运行新回测")
     st.stop()
 
 start_str = start_date.strftime("%Y%m%d")
@@ -308,8 +519,11 @@ else:
             progress_text.text(f"⏳ {stage}")
             progress_bar.progress(min(pct, 1.0))
 
+        ml_config_with_freq = dict(ml_config)
+        ml_config_with_freq["freq"] = freq
+
         ml_result = run_ml_backtest(
-            config=ml_config,
+            config=ml_config_with_freq,
             codes=target_codes,
             start_date=start_str,
             end_date=end_str,
@@ -392,35 +606,50 @@ if len(target_codes) == 1 and strategy_type_filter == "静态策略":
     st.subheader("权益曲线")
     if not equity_curve.empty:
         import plotly.graph_objects as go
+
+        # 基准选择
+        bm_opts_static = [f"{c} {BENCHMARK_INDICES[c]}" for c in BENCHMARK_INDICES]
+        selected_bms_static = st.multiselect(
+            "叠加基准指数", bm_opts_static,
+            default=[f"000001 {BENCHMARK_INDICES['000001']}", f"000300 {BENCHMARK_INDICES['000300']}"],
+            key="single_static_bm",
+        )
+        selected_bm_codes_static = [o.split()[0] for o in selected_bms_static]
+
         fig = go.Figure()
-        # 叠加基准归一化曲线
-        eq_first = float(equity_curve["equity"].iloc[0]) if len(equity_curve) > 0 else initial_cash
-        for code, bm_df in benchmarks.items():
-            if code in ("000001", "000300"):  # 只显示上证和沪深300，避免太乱
+        bm_line_styles = ["dash", "dot", "dashdot", "longdash", "longdashdot", "solid"]
+
+        # 基准归一化曲线
+        for bi, bm_code in enumerate(selected_bm_codes_static):
+            bm_df = benchmarks.get(bm_code)
+            if bm_df is not None and not bm_df.empty:
                 bm_period = bm_df[(bm_df["trade_date"] >= equity_curve["date"].iloc[0]) &
                                   (bm_df["trade_date"] <= equity_curve["date"].iloc[-1])]
                 if not bm_period.empty and len(bm_period) > 1:
                     bm_norm = bm_period["close"] / bm_period["close"].iloc[0]
                     fig.add_trace(go.Scatter(
-                        x=bm_period["trade_date"], y=bm_norm * initial_cash,
-                        mode="lines", name=BENCHMARK_INDICES.get(code, code),
-                        line=dict(width=1, dash="dot", color={
-                            "000001": "#ff9800", "000300": "#4caf50",
-                        }.get(code, "gray")),
-                        opacity=0.6,
+                        x=bm_period["trade_date"], y=bm_norm, mode="lines",
+                        name=f"基准: {BENCHMARK_INDICES.get(bm_code, bm_code)}",
+                        line=dict(color="gray", width=1.2,
+                                  dash=bm_line_styles[bi % len(bm_line_styles)]),
+                        opacity=0.65,
                     ))
+
+        # 策略归一化
+        eq_norm = equity_curve["equity"] / equity_curve["equity"].iloc[0]
         fig.add_trace(go.Scatter(
-            x=equity_curve["date"], y=equity_curve["equity"],
+            x=equity_curve["date"], y=eq_norm,
             mode="lines", name="策略权益",
             fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
             line=dict(color="#2196f3", width=2),
         ))
-        fig.add_hline(y=initial_cash, line_dash="dash", line_color="gray",
-                      annotation_text=f"初始 {initial_cash:,.0f}")
+        fig.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                      annotation_text="0% 收益线")
         fig.update_layout(
             height=400, template="plotly_white",
             margin=dict(l=0, r=0, t=10, b=0),
             hovermode="x unified",
+            yaxis_title="归一化净值 (1.0 = 0%收益)",
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -506,31 +735,45 @@ elif len(target_codes) == 1:
     if not eq.empty:
         st.subheader("权益曲线")
         import plotly.graph_objects as go
+
+        bm_opts_ml = [f"{c} {BENCHMARK_INDICES[c]}" for c in BENCHMARK_INDICES]
+        selected_bms_ml = st.multiselect(
+            "叠加基准指数", bm_opts_ml,
+            default=[f"000001 {BENCHMARK_INDICES['000001']}", f"000300 {BENCHMARK_INDICES['000300']}"],
+            key="single_ml_bm",
+        )
+        selected_bm_codes_ml = [o.split()[0] for o in selected_bms_ml]
+
         fig = go.Figure()
-        # 叠加基准归一化曲线
-        for code, bm_df in benchmarks.items():
-            if code in ("000001", "000300"):
+        bm_line_styles = ["dash", "dot", "dashdot", "longdash", "longdashdot", "solid"]
+
+        for bi, bm_code in enumerate(selected_bm_codes_ml):
+            bm_df = benchmarks.get(bm_code)
+            if bm_df is not None and not bm_df.empty:
                 bm_period = bm_df[(bm_df["trade_date"] >= eq["date"].iloc[0]) &
                                   (bm_df["trade_date"] <= eq["date"].iloc[-1])]
                 if not bm_period.empty and len(bm_period) > 1:
                     bm_norm = bm_period["close"] / bm_period["close"].iloc[0]
                     fig.add_trace(go.Scatter(
-                        x=bm_period["trade_date"], y=bm_norm * initial_cash,
-                        mode="lines", name=BENCHMARK_INDICES.get(code, code),
-                        line=dict(width=1, dash="dot", color={
-                            "000001": "#ff9800", "000300": "#4caf50",
-                        }.get(code, "gray")),
-                        opacity=0.6,
+                        x=bm_period["trade_date"], y=bm_norm, mode="lines",
+                        name=f"基准: {BENCHMARK_INDICES.get(bm_code, bm_code)}",
+                        line=dict(color="gray", width=1.2,
+                                  dash=bm_line_styles[bi % len(bm_line_styles)]),
+                        opacity=0.65,
                     ))
+
+        # 策略归一化
+        eq_norm_ml = eq["equity"] / eq["equity"].iloc[0]
         fig.add_trace(go.Scatter(
-            x=eq["date"], y=eq["equity"], mode="lines", name="策略权益",
+            x=eq["date"], y=eq_norm_ml, mode="lines", name="策略权益",
             fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
             line=dict(color="#2196f3", width=2),
         ))
-        fig.add_hline(y=initial_cash, line_dash="dash", line_color="gray",
-                      annotation_text=f"初始 {initial_cash:,.0f}")
+        fig.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                      annotation_text="0% 收益线")
         fig.update_layout(height=400, template="plotly_white",
-                          margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified")
+                          margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
+                          yaxis_title="归一化净值 (1.0 = 0%收益)")
         st.plotly_chart(fig, use_container_width=True)
 
     trades = ml_single_result["trades"]
@@ -736,136 +979,3 @@ else:
                 "pool_results": results_df.to_dict(orient="records"),
             },
         )
-
-
-# ── 历史回测记录 ─────────────────────────────────────────
-st.divider()
-st.subheader("📋 历史回测记录")
-
-history = load_backtest_history()
-if history.empty:
-    st.info("暂无保存的回测记录，运行一次回测后自动保存")
-else:
-    for _, row in history.iterrows():
-        sp = row["strategy_params"]
-        if isinstance(sp, str):
-            try:
-                sp = json.loads(sp)
-            except Exception:
-                sp = {}
-
-        with st.expander(
-            f"{row['created_at'].strftime('%m-%d %H:%M') if hasattr(row['created_at'], 'strftime') else str(row['created_at'])[:16]} | "
-            f"{row['strategy_name']} | "
-            f"{row['asset_mode']} | "
-            f"收益: {row['avg_return']*100:.2f}% | "
-            f"夏普: {row['avg_sharpe']:.2f} | "
-            f"回撤: {row['avg_drawdown']:.2f}%"
-        ):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.caption(f"策略类型: {row['strategy_type']} | 模式: {row['asset_mode']}")
-                st.caption(f"区间: {row['start_date']} ~ {row['end_date']} | 股票数: {row['n_stocks']}")
-                if sp:
-                    st.caption(f"参数: {sp}")
-            with col2:
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("🚀 升级到模拟盘", key=f"promote_{row['id']}"):
-                        new_id = promote_strategy_to_account(
-                            strategy_type=row["strategy_type"],
-                            strategy_name=row["strategy_name"],
-                            strategy_params=sp,
-                        )
-                        st.success(f"已创建模拟账户 #{new_id}，请切换到「模拟盘」页面运行")
-                with c2:
-                    if st.button("📊 查看详情", key=f"detail_{row['id']}"):
-                        rj = row.get("results_json")
-                        if isinstance(rj, str):
-                            rj = json.loads(rj)
-                        st.json(rj if rj else {})
-
-# ── 策略对比 ──
-st.divider()
-st.subheader("📊 策略对比")
-history_df = load_backtest_history()
-if not history_df.empty:
-    history_opts = []
-    for _, r in history_df.iterrows():
-        label = f"#{r['id']} {r['strategy_name']} ({r['strategy_type']}) - {str(r['start_date'])[:10]}"
-        history_opts.append(label)
-
-    selected_for_compare = st.multiselect(
-        "选择要对比的回测记录（最多5条）", history_opts,
-        max_selections=5, key="compare_select"
-    )
-
-    if selected_for_compare:
-        selected_ids = [int(opt.split()[0][1:]) for opt in selected_for_compare]
-        compare_rows = history_df[history_df["id"].isin(selected_ids)]
-
-        # -- 对比表格 --
-        compare_data = []
-        for _, row in compare_rows.iterrows():
-            rj = row.get("results_json")
-            if isinstance(rj, str):
-                try:
-                    rj = json.loads(rj)
-                except Exception:
-                    rj = {}
-            bm_returns = rj.get("benchmark_returns", {}) if isinstance(rj, dict) else {}
-            bm_000001 = bm_returns.get("000001", 0) if isinstance(bm_returns, dict) else 0
-            strat_ret = float(row["avg_return"])
-            excess = strat_ret - float(bm_000001) if bm_000001 else 0
-            compare_data.append({
-                "策略名": row["strategy_name"],
-                "类型": row["strategy_type"],
-                "收益率%": f"{strat_ret * 100:.2f}",
-                "上证同期%": f"{float(bm_000001) * 100:.2f}" if bm_000001 else "-",
-                "超额%": f"{excess * 100:+.2f}",
-                "夏普": f"{float(row['avg_sharpe']):.2f}",
-                "回撤%": f"{float(row['avg_drawdown']):.2f}",
-                "胜率%": f"{float(row['avg_win_rate']) * 100:.1f}",
-                "股票数": int(row["n_stocks"]),
-                "日期": f"{str(row['start_date'])[:10]}~{str(row['end_date'])[:10]}",
-            })
-        st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
-
-        # -- 叠加权益曲线 --
-        st.subheader("📈 归一化权益曲线对比")
-        import plotly.graph_objects as go
-        fig_compare = go.Figure()
-        colors = ["#2196f3", "#ff9800", "#4caf50", "#f44336", "#9c27b0"]
-
-        for ci, (_, row) in enumerate(compare_rows.iterrows()):
-            rj = row.get("results_json")
-            if isinstance(rj, str):
-                try:
-                    rj = json.loads(rj)
-                except Exception:
-                    rj = {}
-            eq_data = rj.get("equity_curve", {}) if isinstance(rj, dict) else {}
-            dates = eq_data.get("dates", [])
-            values = eq_data.get("values", [])
-            if dates and values and len(dates) > 1:
-                norm_values = [v / values[0] for v in values] if values[0] > 0 else values
-                color = colors[ci % len(colors)]
-                fig_compare.add_trace(go.Scatter(
-                    x=dates, y=norm_values, mode="lines",
-                    name=f"{row['strategy_name']} ({row['strategy_type']})",
-                    line=dict(color=color, width=1.8),
-                ))
-
-        fig_compare.add_hline(y=1.0, line_dash="dash", line_color="gray",
-                             annotation_text="基准线 (1.0)")
-        fig_compare.update_layout(
-            height=400, template="plotly_white",
-            margin=dict(l=0, r=0, t=10, b=0),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            yaxis_title="归一化净值",
-        )
-        if len(fig_compare.data) > 1:  # has traces beyond the hline
-            st.plotly_chart(fig_compare, use_container_width=True)
-        else:
-            st.caption("所选记录暂无可展示的权益曲线数据")
