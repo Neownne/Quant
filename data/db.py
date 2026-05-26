@@ -295,6 +295,38 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 );
 """
 
+DDL_ML_STRATEGY_CONFIG = """
+CREATE TABLE IF NOT EXISTS ml_strategy_config (
+    id              SERIAL PRIMARY KEY,
+    name            VARCHAR(100) UNIQUE NOT NULL,
+    description     TEXT DEFAULT '',
+    factor_names    JSONB DEFAULT '[]',
+    ic_threshold    DOUBLE PRECISION DEFAULT 0.02,
+    t_threshold     DOUBLE PRECISION DEFAULT 2.0,
+    orthogonal_threshold DOUBLE PRECISION DEFAULT 0.7,
+    label_mode      VARCHAR(20) DEFAULT 'binary',
+    forward_days    INTEGER DEFAULT 1,
+    train_years     INTEGER DEFAULT 3,
+    val_years       INTEGER DEFAULT 1,
+    model_type      VARCHAR(20) DEFAULT 'ensemble',
+    top_n           INTEGER DEFAULT 15,
+    rebalance_mode  VARCHAR(20) DEFAULT 'ndrop',
+    ndrop_n         INTEGER DEFAULT 2,
+    max_single      DOUBLE PRECISION DEFAULT 0.10,
+    max_industry    DOUBLE PRECISION DEFAULT 0.30,
+    stop_loss_pct           DOUBLE PRECISION DEFAULT 0.08,
+    atr_multiplier          DOUBLE PRECISION DEFAULT 1.5,
+    atr_period              INTEGER DEFAULT 20,
+    portfolio_dd_threshold  DOUBLE PRECISION DEFAULT 0.20,
+    portfolio_dd_reduce_to  DOUBLE PRECISION DEFAULT 0.50,
+    max_dd_limit            DOUBLE PRECISION DEFAULT 0.25,
+    stock_pool      VARCHAR(100) DEFAULT '',
+    stock_count     INTEGER DEFAULT 500,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    updated_at      TIMESTAMP DEFAULT NOW()
+);
+"""
+
 
 def get_engine() -> Engine:
     """创建数据库引擎（每次调用返回同一个连接池）。"""
@@ -335,6 +367,7 @@ def init_db() -> None:
         conn.execute(text(DDL_PAPER_DAILY_PNL))
         conn.execute(text(DDL_PAPER_ACCOUNT_V2))
         conn.execute(text(DDL_BACKTEST_RESULTS))
+        conn.execute(text(DDL_ML_STRATEGY_CONFIG))
         # migration: add note column for trade reason tracking
         try:
             conn.execute(text(
@@ -342,7 +375,7 @@ def init_db() -> None:
             ))
         except Exception:
             pass
-    logger.info("数据库表初始化完成（15张表）")
+    logger.info("数据库表初始化完成（16张表）")
     engine.dispose()
 
 
