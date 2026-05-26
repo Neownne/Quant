@@ -71,11 +71,12 @@ def walk_forward_split(
         val_start = train_end + pd.DateOffset(days=gap_days)
         val_end = val_start + pd.DateOffset(years=val_years)
 
-        if val_end > pd.Timestamp(end):
+        if val_start >= pd.Timestamp(end):
             break
 
+        actual_val_end = min(val_end, pd.Timestamp(end))
         train_mask = (df[date_col] >= train_start) & (df[date_col] < train_end)
-        val_mask = (df[date_col] >= val_start) & (df[date_col] < val_end)
+        val_mask = (df[date_col] >= val_start) & (df[date_col] < actual_val_end)
 
         train_df = df[train_mask]
         val_df = df[val_mask]
@@ -92,6 +93,7 @@ def build_factor_dataset(
     label_mode: str = "binary",
     forward_days: int = 1,
     extra_data: dict[str, pd.DataFrame] | None = None,
+    bar_per_day: int = 1,
 ) -> pd.DataFrame:
     """从 OHLCV 构建带标签的因子数据集。
 
@@ -102,21 +104,30 @@ def build_factor_dataset(
     label_mode : "binary" | "regression"
     forward_days : 标签前瞻天数
     extra_data : 传递给 FactorEngine 的额外数据
+    bar_per_day : 每日 bar 数（60min=4, daily=1）。分钟频因子值聚合成日频用于标签。
 
     返回
     ----
     pd.DataFrame: [code, trade_date] + factor_names + [label]
     """
-    engine = FactorEngine(factor_names=factor_names)
+    engine = FactorEngine(factor_names=factor_names, bar_per_day=bar_per_day)
     logger.info(f"计算 {len(factor_names)} 个因子 ...")
     result = engine.compute(ohlcv, extra_data=extra_data)
 
-    # 统一 trade_date 类型
     result["trade_date"] = pd.to_datetime(result["trade_date"])
+
+    # 分钟频：因子值聚合成日频（取每日最后一根 bar 的因子值）
+    if bar_per_day > 1:
+        group_cols = ["code", "trade_date"]
+        factor_vals = result[group_cols + factor_names].copy()
+        result = factor_vals.groupby(group_cols, as_index=False).last()
+
+    # 构建日频 close 用于标签
     ohlcv_sub = ohlcv[["code", "trade_date", "close"]].copy()
     ohlcv_sub["trade_date"] = pd.to_datetime(ohlcv_sub["trade_date"])
+    if bar_per_day > 1:
+        ohlcv_sub = ohlcv_sub.groupby(["code", "trade_date"], as_index=False).last()
 
-    # 合并回 close 列用于标签计算
     result = result.merge(ohlcv_sub, on=["code", "trade_date"], how="left")
 
     # 按股票分组计算标签
@@ -127,6 +138,7 @@ def build_factor_dataset(
         labelled_parts.append(make_labels(group, forward_days, label_mode))
 
     result = pd.concat(labelled_parts, ignore_index=True)
+
     # 计算 T+1 连续收益率（供 IC 计算用）
     ret_parts = []
     for code, group in result.groupby("code"):
@@ -134,7 +146,7 @@ def build_factor_dataset(
         group["ret_1d"] = group["close"].pct_change().shift(-1)
         ret_parts.append(group)
     result = pd.concat(ret_parts, ignore_index=True)
-    # drop the close column since it was only needed for label computation
+
     result = result.drop(columns=["close"])
     logger.info(f"数据集: {len(result)} 行, {len(result.dropna())} 有效")
     return result

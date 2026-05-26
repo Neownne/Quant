@@ -19,14 +19,16 @@ class FactorEngine:
     参数
     ----
     factor_names : 要计算的因子名列表，必须在 ALL_FACTORS 中注册。
+    bar_per_day  : 每日 bar 数，用于 window 自适应（60min=4, daily=1）。
     """
 
-    def __init__(self, factor_names: list[str]):
+    def __init__(self, factor_names: list[str], bar_per_day: int = 1):
         if factor_names:
             missing = set(factor_names) - set(factors.ALL_FACTORS.keys())
             if missing:
                 raise KeyError(f"未知因子: {missing}")
         self.factor_names = factor_names
+        self.bar_per_day = bar_per_day
 
     def compute(self, df: pd.DataFrame, extra_data: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
         """计算因子矩阵。

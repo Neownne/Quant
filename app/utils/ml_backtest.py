@@ -13,6 +13,62 @@ from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from portfolio.selector import select_top_n, select_topk_ndrop
 
 
+def _get_daily_ohlcv(codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    """从 stock_daily 加载日线 OHLCV。"""
+    engine = get_engine()
+    code_list = ",".join([f"'{c}'" for c in codes])
+    try:
+        df = pd.read_sql(
+            f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
+            f"FROM stock_daily WHERE code IN ({code_list}) "
+            f"AND trade_date BETWEEN '{start_date}' AND '{end_date}' "
+            f"ORDER BY code, trade_date",
+            engine,
+        )
+    finally:
+        engine.dispose()
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    return df
+
+
+def _get_minute_ohlcv(codes: list[str], start_date: str, end_date: str, period: str = "60") -> pd.DataFrame:
+    """从 stock_minute 加载分钟 K 线。返回列包含 trade_date（date 类型）。"""
+    engine = get_engine()
+    code_list = ",".join([f"'{c}'" for c in codes])
+    try:
+        df = pd.read_sql(
+            f"SELECT code, trade_time, trade_time::date AS trade_date, "
+            f"open, high, low, close, volume, amount "
+            f"FROM stock_minute WHERE code IN ({code_list}) "
+            f"AND trade_time >= '{start_date}' AND trade_time < '{end_date}235959' "
+            f"AND period = '{period}' "
+            f"ORDER BY code, trade_time",
+            engine,
+        )
+    finally:
+        engine.dispose()
+    if not df.empty:
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df["turnover"] = None
+    return df
+
+
+def load_price_data(codes: list[str], start_date: str, end_date: str,
+                    freq: str = "daily") -> pd.DataFrame:
+    """统一价格数据加载入口。
+
+    参数
+    ----
+    freq : "daily" | "60min"
+    """
+    if freq == "daily":
+        return _get_daily_ohlcv(codes, start_date, end_date)
+    elif freq == "60min":
+        return _get_minute_ohlcv(codes, start_date, end_date, period="60")
+    else:
+        raise ValueError(f"不支持的频率: {freq}")
+
+
 def run_ml_backtest(
     config: dict,
     codes: list[str],
@@ -45,30 +101,21 @@ def run_ml_backtest(
     if progress_callback:
         progress_callback("加载OHLCV数据...", 0.05)
 
-    engine = get_engine()
-    code_list = ",".join([f"'{c}'" for c in codes])
-    try:
-        ohlcv = pd.read_sql(
-            f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
-            f"FROM stock_daily WHERE code IN ({code_list}) "
-            f"AND trade_date BETWEEN '{start_date}' AND '{end_date}' "
-            f"ORDER BY code, trade_date",
-            engine,
-        )
-    finally:
-        engine.dispose()
+    freq = config.get("freq", "daily")
+    ohlcv = load_price_data(codes, start_date, end_date, freq=freq)
 
     if ohlcv.empty:
         return {"error": "无OHLCV数据"}
-
-    ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"])
 
     # 3. 构建因子数据集
     if progress_callback:
         progress_callback("计算因子...", 0.10)
 
+    bar_per_day = 4 if freq == "60min" else 1
     try:
-        dataset = build_factor_dataset(ohlcv, factor_names, label_mode=config.get("label_mode", "binary"))
+        dataset = build_factor_dataset(ohlcv, factor_names,
+                                        label_mode=config.get("label_mode", "binary"),
+                                        bar_per_day=bar_per_day)
     except Exception as e:
         return {"error": f"因子计算失败: {e}"}
 
