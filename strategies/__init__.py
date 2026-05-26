@@ -5,11 +5,13 @@ import sys
 from strategies.sma_cross import SMACross
 from strategies.macd_strategy import MACDStrategy
 from strategies.rsi_strategy import RSIStrategy
+from strategies.grid_shock import GridShockStrategy
 
 STRATEGY_REGISTRY = {
     "双均线交叉": SMACross,
     "MACD金叉死叉": MACDStrategy,
     "RSI超买超卖": RSIStrategy,
+    "震荡网格(高抛低吸)": GridShockStrategy,
 }
 
 # 自定义策略目录

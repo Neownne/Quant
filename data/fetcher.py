@@ -11,6 +11,7 @@ from typing import Callable
 import akshare as ak
 import numpy as np
 import pandas as pd
+import requests
 from loguru import logger
 
 from config.settings import DataConfig
@@ -742,36 +743,51 @@ def fetch_minute_data(
 ) -> pd.DataFrame:
     """
     获取单只股票分钟 K 线。
-    数据源：新浪财经。
+    数据源：新浪财经 (money.finance.sina.com.cn)。
 
     参数
     ----
     symbol : 纯数字代码
     period : '1', '5', '15', '30', '60'
-    adjust : 'qfq' 前复权 / '' 不复权
+    adjust : 保留参数，sina 分钟线默认为前复权
 
     返回
     ----
     DataFrame 字段：code, trade_time, period, open, high, low, close, volume, amount
     """
     sina_symbol = _to_tencent_symbol(symbol)
-    raw = ak.stock_zh_a_minute(symbol=sina_symbol, period=period, adjust=adjust)
-
-    if raw.empty:
+    url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+    params = {
+        "symbol": sina_symbol,
+        "scale": period,
+        "ma": "no",
+        "datalen": "1970",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
         return pd.DataFrame()
 
-    raw = raw.reset_index(drop=True)
-    n = len(raw)
-    df = pd.DataFrame({
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data)
+    if "day" not in df.columns:
+        return pd.DataFrame()
+
+    n = len(df)
+    result = pd.DataFrame({
         "code": [symbol] * n,
-        "trade_time": pd.to_datetime(raw["day"].values, errors="coerce"),
+        "trade_time": pd.to_datetime(df["day"].values, errors="coerce"),
         "period": period,
-        "open": pd.to_numeric(raw["open"].values, errors="coerce"),
-        "high": pd.to_numeric(raw["high"].values, errors="coerce"),
-        "low": pd.to_numeric(raw["low"].values, errors="coerce"),
-        "close": pd.to_numeric(raw["close"].values, errors="coerce"),
-        "volume": pd.to_numeric(raw["volume"].values, errors="coerce"),
-        "amount": pd.to_numeric(raw["amount"].values, errors="coerce"),
+        "open": pd.to_numeric(df["open"].values, errors="coerce"),
+        "high": pd.to_numeric(df["high"].values, errors="coerce"),
+        "low": pd.to_numeric(df["low"].values, errors="coerce"),
+        "close": pd.to_numeric(df["close"].values, errors="coerce"),
+        "volume": pd.to_numeric(df["volume"].values, errors="coerce"),
+        "amount": np.nan,
     })
-    df = df.dropna(subset=["open", "close"])
-    return df
+    result = result.dropna(subset=["open", "close"])
+    return result
