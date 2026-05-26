@@ -126,11 +126,44 @@ st.subheader("当前持仓")
 if pos.empty:
     st.info("暂无持仓")
 else:
+    # 尝试获取实时价格
+    price_map = {}
+    try:
+        import akshare as ak
+        spot = ak.stock_zh_a_spot_em()
+        spot["代码"] = spot["代码"].astype(str)
+        for _, p in pos.iterrows():
+            code = str(p["code"])
+            match = spot[spot["代码"] == code]
+            if not match.empty:
+                price_map[code] = float(match.iloc[0]["最新价"])
+    except Exception:
+        pass
+
     pos_display = pos.copy()
     pos_display["volume"] = pos_display["volume"].astype(int)
-    pos_display["avg_cost"] = pos_display["avg_cost"].apply(lambda x: f"{x:.2f}")
+    pos_display["均价"] = pos_display["avg_cost"].apply(lambda x: f"{x:.2f}")
+    pos_display["现价"] = pos_display["code"].apply(
+        lambda c: f"{price_map.get(str(c), 0):.2f}" if price_map.get(str(c)) else "-"
+    )
+    pos_display["持仓成本"] = pos_display.apply(
+        lambda r: r["volume"] * float(r["avg_cost"]), axis=1
+    )
+    pos_display["持仓市值"] = pos_display.apply(
+        lambda r: r["volume"] * price_map.get(str(r["code"]), 0)
+        if price_map.get(str(r["code"])) else 0, axis=1
+    )
+    pos_display["浮动盈亏"] = pos_display["持仓市值"] - pos_display["持仓成本"]
+    pos_display["盈亏%"] = pos_display.apply(
+        lambda r: f"{(r['浮动盈亏'] / r['持仓成本'] * 100):.2f}%"
+        if r["持仓成本"] > 0 else "-", axis=1
+    )
+    pos_display["浮动盈亏"] = pos_display["浮动盈亏"].apply(lambda x: f"{x:,.0f}")
+    pos_display["持仓成本"] = pos_display["持仓成本"].apply(lambda x: f"{x:,.0f}")
+    pos_display["持仓市值"] = pos_display["持仓市值"].apply(lambda x: f"{x:,.0f}" if x > 0 else "-")
+
     st.dataframe(
-        pos_display[["code", "volume", "avg_cost"]],
+        pos_display[["code", "volume", "均价", "现价", "持仓成本", "持仓市值", "浮动盈亏", "盈亏%"]],
         use_container_width=True,
         hide_index=True,
     )
@@ -143,10 +176,75 @@ if orders.empty:
 else:
     orders_display = orders.copy()
     orders_display["order_time"] = pd.to_datetime(orders_display["order_time"])
+    orders_display["日期"] = orders_display["order_time"].dt.date
     orders_display["price"] = orders_display["price"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
     orders_display["amount"] = orders_display["amount"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "-")
+
+    # 每日买卖汇总
+    st.caption("每日汇总")
+    daily_summary = orders_display.groupby(["日期", "direction"]).agg(
+        笔数=("id", "count"), 总金额=("amount", lambda x: sum(float(v.replace(",", "")) for v in x))
+    ).reset_index()
+    st.dataframe(daily_summary, use_container_width=True, hide_index=True)
+
+    # 详细订单
+    show_cols = ["日期", "code", "direction", "price", "volume", "amount", "status"]
+    if "note" in orders_display.columns:
+        show_cols.append("note")
+    st.caption(f"最近 {len(orders_display)} 笔委托")
     st.dataframe(
-        orders_display[["code", "direction", "price", "volume", "amount", "status", "order_time"]],
+        orders_display[show_cols],
         use_container_width=True,
         hide_index=True,
     )
+
+# ---- 已平仓交易（FIFO 匹配） ----
+st.subheader("已平仓交易")
+all_orders = get_orders(account_id)
+if all_orders.empty:
+    st.info("暂无已平仓交易")
+else:
+    all_orders["order_time"] = pd.to_datetime(all_orders["order_time"])
+    completed = all_orders[all_orders["status"] == "filled"].sort_values("order_time")
+
+    if completed.empty:
+        st.info("暂无已成交订单")
+    else:
+        closed_trades = []
+        for code, group in completed.groupby("code"):
+            buys = []  # FIFO queue: [(price, volume, date)]
+            for _, row in group.iterrows():
+                vol = int(row["volume"])
+                price = float(row["price"])
+                if row["direction"] == "BUY":
+                    buys.append((price, vol, row["order_time"]))
+                else:
+                    remaining = vol
+                    while remaining > 0 and buys:
+                        entry_price, entry_vol, entry_time = buys.pop(0)
+                        matched = min(entry_vol, remaining)
+                        pnl = (price - entry_price) * matched
+                        cost = entry_price * matched
+                        closed_trades.append({
+                            "代码": code,
+                            "买入日": entry_time.date(),
+                            "卖出日": row["order_time"].date(),
+                            "买入价": f"{entry_price:.2f}",
+                            "卖出价": f"{price:.2f}",
+                            "数量": matched,
+                            "盈亏(元)": f"{pnl:,.0f}",
+                            "盈亏%": f"{pnl / cost * 100:.2f}%" if cost > 0 else "-",
+                        })
+                        if entry_vol > matched:
+                            buys.insert(0, (entry_price, entry_vol - matched, entry_time))
+                        remaining -= matched
+
+        if closed_trades:
+            closed_df = pd.DataFrame(closed_trades)
+            total_realized = sum(
+                float(t["盈亏(元)"].replace(",", "")) for t in closed_trades
+            )
+            st.caption(f"共 {len(closed_df)} 笔已平仓交易，合计盈亏: {total_realized:,.0f} 元")
+            st.dataframe(closed_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无已平仓交易（需先卖出持仓）")

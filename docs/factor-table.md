@@ -1,7 +1,7 @@
 # A 股多因子选股 — 因子全景表
 
 > 日期：2026-05-25  
-> 合计：现有 37 个 + 候选 28 个 = 65 个因子  
+> 合计：价量 65 个 + 基本面 11 个 = 76 个因子  
 > 新增标准：逐因子验证 IC 显著性 + 与已有因子相关性 < 0.7（正交性门禁）
 
 ---
@@ -177,6 +177,84 @@ Phase 3f: 流动性高阶类（4个）→ IC 验证 + 相关性门禁
 - **IC 门禁**：|RankIC| 均值 > 0.02 且 t 统计量 > 2.0
 - **正交性门禁**：与已有因子最大 |correlation| < 0.7
 - **边际贡献**：加入后 E2E 准确率不下降（允许 0.2% 误差）
+
+---
+
+---
+
+## 三、基本面质量因子（11 个）
+
+> 来源：聚宽"七星高照ETF轮动策略-V1.7.2"九项排雷系统改编  
+> 数据源：AKShare 同花顺财务摘要 + 资产负债表 + 现金流量表 + 利润表 + 东方财富质押数据  
+> 适配方式：将离散排雷检查改写为连续因子，供 ML 模型学习质量溢价
+
+### 3.1 盈利能力类（4）
+
+| 因子 | 公式 | 数据源 | API | 预期 IC | 状态 |
+|---|---|---|---|---|---|
+| fin_roe_quality | ROE/0.20 + ΔROE_q/0.10, clip[-1,1] | `stock_financial.roe` | `stock_financial_abstract_ths` | 正 | ✅ 已实现 |
+| fin_net_margin | net_margin / 0.30, clip[-1,1] | `stock_financial.net_margin` | `stock_financial_abstract_ths` | 正 | ✅ 已实现 |
+| fin_profit_cv | -clip(CV(net_profit, 252d)/2, 0, 1) | `stock_financial.net_profit` | `stock_financial_abstract_ths` | 负（高波动=低质量） | ✅ 已实现 |
+| fin_eps_growth | ΔEPS_q / 0.50, clip[-1,1] | `stock_financial.eps` | `stock_financial_abstract_ths` | 正 | ✅ 已实现 |
+
+### 3.2 成长性类（2）
+
+| 因子 | 公式 | 数据源 | API | 预期 IC | 状态 |
+|---|---|---|---|---|---|
+| fin_bps_growth | ΔBPS_q / 0.50, clip[-1,1] | `stock_financial.bps` | `stock_financial_abstract_ths` | 正 | ✅ 已实现 |
+| fin_revenue_stability | (trend + stability)/2, clip[-1,1] | `stock_financial.revenue` | `stock_financial_abstract_ths` | 正 | ✅ 已实现 |
+
+### 3.3 财务健康类（4）
+
+| 因子 | 公式 | 数据源 | API | 预期 IC | 状态 |
+|---|---|---|---|---|---|
+| fin_cashflow_gap | -(OCF缺口), profit>0 & ocf<0 → -1 | `stock_financial.net_profit` + `operating_cash_flow` (优先) / `cash_flow` (回退) | `stock_financial_abstract_ths` + `stock_financial_cash_new_ths` | 负（有利润无现金=差） | ✅ 已实现 |
+| fin_debt_ratio | 1 - (total_liability/total_assets) / 0.70, clip[-1,1] | `stock_financial.total_assets` + `total_liability` | `stock_financial_debt_new_ths` | 负（高负债=风险） | ✅ 已实现 |
+| fin_goodwill_ratio | -clip(goodwill/holder_equity / 0.30, 0, 1) | `stock_financial.goodwill` + `holder_equity` | `stock_financial_debt_new_ths` | 负（高商誉=减值风险） | ✅ 已实现 |
+| fin_pledge_risk | -clip(pledge_ratio / 0.80, 0, 1) | `stock_pledge.pledge_ratio` | `stock_gpzy_pledge_ratio_em` | 负（高质押=爆仓风险） | ✅ 已实现 |
+
+### 3.4 综合评分（1）
+
+| 因子 | 公式 | 数据源 | 预期 IC | 状态 |
+|---|---|---|---|---|
+| fin_audit_score | Σ(8项排雷扣分), 0=全通过, -8=全踩雷 | `stock_financial` (8列) | 正（高质量>低质量） | ✅ 已实现 |
+
+**排雷检查项（8/9 可用）**：
+
+| # | 检查项 | 阈值 | 数据列 | 可用 |
+|---|---|---|---|---|
+| 1 | 年报迟发 | — | pub_date | ❌ |
+| 2 | 业绩预告不良 | — | STK_FIN_FORCAST | ❌ |
+| 3 | 审计意见异常 | — | STK_AUDIT_OPINION | ❌ |
+| 4 | 主业存疑 | 扣非净利润 < 0 | `adjusted_profit` | ✅ |
+| 5 | 现金流异常 | 净利润>0 且 经营现金流<0 | `net_profit` + `operating_cash_flow` | ✅ |
+| 6 | 商誉过高 | 商誉/权益 > 30% | `goodwill` + `holder_equity` | ✅ |
+| 7 | 资金链紧绷 | 资产负债率 > 70% | `total_assets` + `total_liability` | ✅ |
+| 8 | 大股东高质押 | 质押比例 > 80% | `pledge_ratio` | ✅ |
+| 9 | 监管立案 | — | STK_INVESTIGATION | ❌ |
+
+### 3.5 数据注入方式
+
+基本面因子依赖 `FactorEngine.extra_data` 参数注入额外列：
+
+```python
+# 财务列（quarterly report_date → daily trade_date via merge_asof）
+extra_data = {
+    "net_profit":           fin_df[["code", "report_date", "net_profit"]],
+    "operating_cash_flow":  fin_df[["code", "report_date", "operating_cash_flow"]],
+    "total_assets":         fin_df[["code", "report_date", "total_assets"]],
+    "total_liability":      fin_df[["code", "report_date", "total_liability"]],
+    "goodwill":             fin_df[["code", "report_date", "goodwill"]],
+    "holder_equity":        fin_df[["code", "report_date", "holder_equity"]],
+    "adjusted_profit":      fin_df[["code", "report_date", "adjusted_profit"]],
+    # ... roe, bps, net_margin, revenue, eps, cash_flow
+}
+
+# 日频列（left merge on code + trade_date）
+extra_data["pledge_ratio"] = pledge_df[["code", "trade_date", "pledge_ratio"]]
+```
+
+> **注意**：财务数据按 `report_date` 做 `merge_asof(direction='backward')`，将季度末数据向前填充到后续交易日。质押数据为日频，直接 left merge。
 
 ---
 

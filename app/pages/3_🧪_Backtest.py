@@ -243,13 +243,21 @@ if len(target_codes) == 1:
     st.subheader("交易明细")
     if not trades_df.empty:
         trades_display = trades_df.copy()
-        for col in ["pnl", "pnl_pct"]:
+        # Format P&L columns
+        for col in ["盈亏(元)", "盈亏%"]:
+            if col in trades_display.columns:
+                trades_display[col] = trades_display[col].apply(
+                    lambda x: f"{x:,.2f}" if pd.notna(x) else "-"
+                )
+        # Format price columns
+        for col in ["买入价", "卖出价"]:
             if col in trades_display.columns:
                 trades_display[col] = trades_display[col].apply(
                     lambda x: f"{x:.2f}" if pd.notna(x) else "-"
                 )
         st.dataframe(trades_display, use_container_width=True, hide_index=True)
-        total_pnl = trades_df["pnl"].sum() if "pnl" in trades_df.columns else 0
+        pnl_col = "盈亏(元)" if "盈亏(元)" in trades_df.columns else "pnl"
+        total_pnl = trades_df[pnl_col].sum() if pnl_col in trades_df.columns else 0
         st.caption(f"总盈亏: {total_pnl:,.0f} 元  |  交易次数: {len(trades_df)}")
 
 # ---- 股票池模式：汇总统计 ----
@@ -299,6 +307,39 @@ else:
         "final_value": "最终权益",
     })
     st.dataframe(display, use_container_width=True, hide_index=True)
+
+    # 查看单只股票交易明细
+    st.subheader("交易明细（选择股票查看）")
+    detail_code = st.selectbox("选择股票", [""] + [r["code"] for r in all_results])
+    if detail_code:
+        df_detail = load_ohlcv(detail_code, start_str, end_str)
+        if not df_detail.empty:
+            with st.spinner(f"回测 {detail_code} 中 ..."):
+                result_detail = run_backtest(
+                    strategy_class=strategy_class,
+                    df=df_detail,
+                    strategy_params=strategy_params,
+                    initial_cash=initial_cash,
+                    commission=commission,
+                    stamp_duty=stamp_duty,
+                    slippage=slippage,
+                    index_df=index_df,
+                )
+                trades_d = result_detail["trades"]
+                if not trades_d.empty:
+                    td = trades_d.copy()
+                    for c in ["盈亏(元)", "盈亏%"]:
+                        if c in td.columns:
+                            td[c] = td[c].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "-")
+                    for c in ["买入价", "卖出价"]:
+                        if c in td.columns:
+                            td[c] = td[c].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+                    st.caption(f"{detail_code} — {len(td)} 笔交易")
+                    st.dataframe(td, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"{detail_code} 无交易记录")
+        else:
+            st.warning(f"{detail_code} 无数据")
 
     # 分布直方图
     st.subheader("收益率分布")

@@ -492,7 +492,155 @@ def fetch_financial_data(symbol: str) -> pd.DataFrame:
     return df[["code", "report_date"] + spec_cols]
 
 
-# ============================================================
+def _pivot_ths_long(raw: pd.DataFrame, metric_map: dict[str, str]) -> pd.DataFrame:
+    """将同花顺 _new_ths 长表转宽表，提取指定指标。
+
+    参数
+    ----
+    raw : stock_financial_{debt,benefit,cash}_new_ths 的原始返回
+    metric_map : {metric_name: output_col_name}
+
+    返回
+    ----
+    DataFrame，列为 [report_date] + list(metric_map.values())，按 report_date 排序
+    """
+    if raw.empty:
+        return pd.DataFrame()
+    subset = raw[raw["metric_name"].isin(metric_map.keys())].copy()
+    if subset.empty:
+        return pd.DataFrame()
+    # value 列是字符串，空串=NaN
+    subset["value_num"] = pd.to_numeric(subset["value"].replace("", None), errors="coerce")
+    pivot = subset.pivot_table(
+        index="report_date", columns="metric_name", values="value_num", aggfunc="first"
+    )
+    pivot = pivot.rename(columns=metric_map)
+    pivot = pivot.reset_index()
+    pivot["report_date"] = pd.to_datetime(pivot["report_date"], errors="coerce").dt.date
+    return pivot.sort_values("report_date")
+
+
+def fetch_balance_sheet(symbol: str) -> pd.DataFrame:
+    """获取资产负债表关键字段。
+
+    数据源：同花顺 stock_financial_debt_new_ths。
+    返回 columns: report_date, total_assets, total_liability, goodwill,
+                   short_term_loans, cash_equivalents, holder_equity
+    """
+    try:
+        raw = ak.stock_financial_debt_new_ths(symbol=symbol)
+    except Exception as e:
+        logger.warning(f"资产负债表获取失败 {symbol}: {e}")
+        return pd.DataFrame()
+
+    metric_map = {
+        "assets_total": "total_assets",
+        "total_debt": "total_liability",
+        "goodwill": "goodwill",
+        "short_term_loans": "short_term_loans",
+        "cash": "cash_equivalents",
+        "holder_equity_total": "holder_equity",
+    }
+    df = _pivot_ths_long(raw, metric_map)
+    if not df.empty:
+        df["code"] = symbol
+        cols = ["code", "report_date"] + [v for v in metric_map.values() if v in df.columns]
+        return df[cols]
+    return df
+
+
+def fetch_cash_flow_statement(symbol: str) -> pd.DataFrame:
+    """获取现金流量表关键字段。
+
+    数据源：同花顺 stock_financial_cash_new_ths。
+    返回 columns: report_date, operating_cash_flow
+    """
+    try:
+        raw = ak.stock_financial_cash_new_ths(symbol=symbol)
+    except Exception as e:
+        logger.warning(f"现金流量表获取失败 {symbol}: {e}")
+        return pd.DataFrame()
+
+    metric_map = {"act_cash_flow_net": "operating_cash_flow"}
+    df = _pivot_ths_long(raw, metric_map)
+    if not df.empty:
+        df["code"] = symbol
+        cols = ["code", "report_date"] + [v for v in metric_map.values() if v in df.columns]
+        return df[cols]
+    return df
+
+
+def fetch_profit_statement(symbol: str) -> pd.DataFrame:
+    """获取利润表补充字段。
+
+    数据源：同花顺 stock_financial_benefit_new_ths。
+    返回 columns: report_date, adjusted_profit, parent_net_profit
+    """
+    try:
+        raw = ak.stock_financial_benefit_new_ths(symbol=symbol)
+    except Exception as e:
+        logger.warning(f"利润表获取失败 {symbol}: {e}")
+        return pd.DataFrame()
+
+    metric_map = {
+        "index_deduct_holder_net_profit": "adjusted_profit",
+        "parent_holder_net_profit": "parent_net_profit",
+    }
+    df = _pivot_ths_long(raw, metric_map)
+    if not df.empty:
+        df["code"] = symbol
+        cols = ["code", "report_date"] + [v for v in metric_map.values() if v in df.columns]
+        return df[cols]
+    return df
+
+
+def fetch_financial_supplement(symbol: str) -> pd.DataFrame:
+    """合并资产负债表 + 现金流量表 + 利润表补充字段。
+
+    返回宽表，按 report_date 对齐。
+    """
+    bs = fetch_balance_sheet(symbol)
+    cf = fetch_cash_flow_statement(symbol)
+    pl = fetch_profit_statement(symbol)
+
+    frames = [df for df in [bs, cf, pl] if not df.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    from functools import reduce
+
+    result = reduce(
+        lambda left, right: pd.merge(left, right, on=["code", "report_date"], how="outer"),
+        frames,
+    )
+    return result.sort_values("report_date")
+
+
+@retry_on_network_error()
+def fetch_pledge_data() -> pd.DataFrame:
+    """获取全市场股权质押比例。
+
+    数据源：东方财富 stock_gpzy_pledge_ratio_em。
+    返回 columns: code, trade_date, pledge_ratio, pledge_shares, pledge_market_cap, pledge_count
+    """
+    try:
+        raw = ak.stock_gpzy_pledge_ratio_em()
+    except Exception as e:
+        logger.warning(f"质押数据获取失败: {e}")
+        return pd.DataFrame()
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    df = pd.DataFrame({
+        "code": raw["股票代码"].astype(str).str.replace(" ", ""),
+        "trade_date": pd.to_datetime(raw["交易日期"], errors="coerce").dt.date,
+        "pledge_ratio": pd.to_numeric(raw["质押比例"], errors="coerce"),
+        "pledge_shares": pd.to_numeric(raw["质押股数"], errors="coerce"),
+        "pledge_market_cap": pd.to_numeric(raw["质押市值"], errors="coerce"),
+        "pledge_count": pd.to_numeric(raw["质押笔数"], errors="coerce"),
+    })
+    return df.dropna(subset=["code", "trade_date"])
 #  行业分类数据
 # ============================================================
 

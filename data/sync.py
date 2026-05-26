@@ -36,6 +36,8 @@ from data.fetcher import (
     fetch_etf_daily,
     fetch_fund_list,
     fetch_fund_nav,
+    fetch_financial_supplement,
+    fetch_pledge_data,
 )
 
 
@@ -231,10 +233,12 @@ def sync_financial(engine: Engine, workers: int = 4) -> None:
 
     codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
 
-    # 跳过已有记录
+    # 跳过已有基础财务数据的股票（以 net_profit 为准，避免补充数据造成的假阳性）
     existing_codes = set()
     with engine.connect() as conn:
-        r = conn.execute(text("SELECT DISTINCT code FROM stock_financial")).fetchall()
+        r = conn.execute(text(
+            "SELECT DISTINCT code FROM stock_financial WHERE net_profit IS NOT NULL"
+        )).fetchall()
         existing_codes = {x[0] for x in r}
     to_fetch = [c for c in codes if c not in existing_codes]
     logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
@@ -247,6 +251,48 @@ def sync_financial(engine: Engine, workers: int = 4) -> None:
                 logger.debug(f"{code} +{n}条")
 
     logger.success("财务数据同步完成")
+
+
+def _do_fetch_financial_supplement(code: str) -> tuple[str, int]:
+    """模块级 worker：获取资产负债表/现金流/利润表补充字段。"""
+    try:
+        df = fetch_financial_supplement(code)
+        if df.empty:
+            return code, 0
+        return code, upsert_df(df, "stock_financial", engine=None)
+    except Exception as e:
+        logger.warning(f"{code} 财务补充数据同步失败: {e}")
+        return code, 0
+
+
+def sync_financial_supplement(engine: Engine, workers: int = 2) -> None:
+    """同步资产负债表/现金流/扣非净利润等补充字段到 stock_financial。"""
+    logger.info("=" * 50)
+    logger.info("开始同步财务补充数据（资产负债表/现金流/扣非净利润）...")
+
+    codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
+    logger.info(f"共 {len(codes)} 只股票，使用 {workers} 并发")
+
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_do_fetch_financial_supplement, c) for c in codes]
+        for f in tqdm(as_completed(futures), total=len(codes), desc="财务补充"):
+            pass
+
+    logger.success("财务补充数据同步完成")
+
+
+def sync_pledge(engine: Engine) -> None:
+    """同步全市场股权质押数据到 stock_pledge。"""
+    logger.info("=" * 50)
+    logger.info("开始同步股权质押数据 ...")
+
+    df = fetch_pledge_data()
+    if df.empty:
+        logger.warning("质押数据为空，跳过")
+        return
+
+    n = upsert_df(df, "stock_pledge", engine)
+    logger.success(f"质押数据同步完成，写入/更新 {n} 行")
 
 
 # ============================================================
@@ -395,7 +441,8 @@ def main():
         choices=[
             "all", "stock", "stock-daily", "index",
             "etf", "etf-daily", "fund", "fund-nav",
-            "daily-extra", "shareholder", "financial", "industry",
+            "daily-extra", "shareholder", "financial", "financial-supplement",
+            "pledge", "industry",
         ],
         default="all",
         help="同步模式",
@@ -449,6 +496,12 @@ def main():
 
         if mode in ("all", "financial"):
             sync_financial(engine, workers=args.workers)
+
+        if mode in ("all", "financial-supplement"):
+            sync_financial_supplement(engine, workers=args.workers)
+
+        if mode in ("all", "pledge"):
+            sync_pledge(engine)
 
         if mode in ("all", "industry"):
             sync_industry(engine)

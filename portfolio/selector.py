@@ -1,9 +1,60 @@
-"""选股：模型打分 top-N + ST/停牌/涨跌停/次新过滤。"""
+"""选股：模型打分 top-N + TopK+NDrop 增量调仓 + ST/停牌/涨跌停/次新过滤。"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 from datetime import date
+
+
+def select_topk_ndrop(
+    scores: pd.Series,
+    current_holdings: set[str] | None = None,
+    K: int = 20,
+    N: int = 2,
+) -> tuple[set[str], set[str], set[str]]:
+    """TopK + NDrop 增量调仓：每日只替换持仓中得分最低的 N 只。
+
+    首次建仓时买入得分最高的 K 只；后续每日保留持仓中得分最高的 K-N 只，
+    卖出得分最低的 N 只，买入未持仓中得分最高的同等数量补足至 K 只。
+
+    参数
+    ----
+    scores : Series, index=code, values=预测得分（越高越好），已降序排列
+    current_holdings : 当前持仓股票代码集合，None 或空集合表示首次建仓
+    K : 目标持仓数
+    N : 每日最大替换数
+
+    返回
+    ----
+    (new_holdings, to_buy, to_sell) : 新持仓集合、买入集合、卖出集合
+    """
+    if current_holdings is None:
+        current_holdings = set()
+
+    if not current_holdings:
+        new = set(scores.head(K).index)
+        return new, new, set()
+
+    # 已不在候选池中的持仓（退市/停牌/无数据）→ 必须清掉
+    dropped = current_holdings - set(scores.index)
+
+    # 仍在候选池中的持仓
+    alive = current_holdings & set(scores.index)
+
+    # 持仓中得分最高的 K-N 只保留
+    hold_scores = scores[scores.index.isin(alive)].head(K - N)
+    keep = set(hold_scores.index)
+
+    # 需要卖出 = 存活的但不保留的 + 已消失的
+    to_sell = (alive - keep) | dropped
+
+    # 需要买入 = 从候选池中补足至 K 只
+    slots = K - len(keep)
+    candidates = scores[~scores.index.isin(alive | keep)]
+    to_buy = set(candidates.head(slots).index)
+
+    new_holdings = keep | to_buy
+    return new_holdings, to_buy, to_sell
 
 
 def select_top_n(scores: pd.DataFrame, n: int = 20) -> pd.DataFrame:

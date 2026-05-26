@@ -49,16 +49,62 @@ class FactorEngine:
 
         # 合并额外数据
         if extra_data:
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+            # 分离财务数据（有 report_date）和日频数据（有 trade_date）
+            fin_cols = {}
+            daily_cols = {}
             for col_name, extra_df in extra_data.items():
-                date_col = "report_date" if "report_date" in extra_df.columns else "trade_date"
+                if "report_date" in extra_df.columns:
+                    fin_cols[col_name] = extra_df.copy()
+                else:
+                    daily_cols[col_name] = extra_df.copy()
+
+            # 财务数据：按 code 分组做 asof merge（避免 pandas 3.x 的 by= 排序问题）
+            if fin_cols:
+                # 先将所有财务列合并为一张表
+                fin_df = None
+                for col_name, extra_df in fin_cols.items():
+                    extra_df["report_date"] = pd.to_datetime(extra_df["report_date"])
+                    sub = extra_df[["code", "report_date", col_name]].sort_values(
+                        ["code", "report_date"]
+                    )
+                    if fin_df is None:
+                        fin_df = sub
+                    else:
+                        fin_df = pd.merge(
+                            fin_df, sub, on=["code", "report_date"], how="outer"
+                        )
+
+                # 按股票逐一 merge_asof，避免 pandas 3.x by= 的排序兼容问题
+                parts = []
+                for code, group in df.groupby("code", sort=False):
+                    group = group.sort_values("trade_date")
+                    fin_sub = fin_df[fin_df["code"] == code].sort_values("report_date")
+                    if fin_sub.empty:
+                        parts.append(group)
+                    else:
+                        # 去掉右侧 code 列避免 merge_asof 产生 code_x/code_y
+                        fin_sub = fin_sub.drop(columns=["code"])
+                        merged = pd.merge_asof(
+                            group,
+                            fin_sub,
+                            left_on="trade_date",
+                            right_on="report_date",
+                            direction="backward",
+                        )
+                        parts.append(merged)
+                df = pd.concat(parts, ignore_index=True)
+                df = df.drop(columns=["report_date"], errors="ignore")
+
+            # 日频数据：标准 left merge
+            for col_name, extra_df in daily_cols.items():
+                extra_df["trade_date"] = pd.to_datetime(extra_df["trade_date"])
                 df = pd.merge(
-                    df, extra_df[["code", date_col, col_name]],
-                    left_on=["code", "trade_date"],
-                    right_on=["code", date_col],
+                    df, extra_df[["code", "trade_date", col_name]],
+                    on=["code", "trade_date"],
                     how="left",
                 )
-                if date_col != "trade_date":
-                    df = df.drop(columns=[date_col])
 
         result_parts = []
 

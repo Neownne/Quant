@@ -1,14 +1,17 @@
 #!/usr/bin/env python
 """ML 选股每日模拟回测：完整交易管线验证。
 
-链路: DailyPredictor → select_top_n → equal_weight → apply_stop_loss → P&L
+链路: 基本面排雷 → 量价因子ML排序 → NDrop增量调仓 → 等权/上限 → 止损/回撤
 
 用法:
     python scripts/run_simulation.py                      # 默认参数
     python scripts/run_simulation.py --top-n 10           # 持仓 10 只
-    python scripts/run_simulation.py --no-orthogonal      # 跳过正交筛选
+    python scripts/run_simulation.py --ndrop              # 启用 NDrop 增量调仓
+    python scripts/run_simulation.py --no-quality         # 跳过基本面筛选
+    python scripts/run_simulation.py --save-results out.json  # 保存信号
 """
 import argparse
+import json
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,50 +26,98 @@ from models.trainer import walk_forward_train_ensemble, walk_forward_train_by_re
 from factors import ALL_FACTORS
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from models.regime import detect_regime
-from portfolio.selector import select_top_n
+from models.dual_period import DualPeriodModel
+from portfolio.selector import select_top_n, select_topk_ndrop
 from portfolio.allocator import equal_weight
-from portfolio.risk import apply_stop_loss, check_drawdown_limit, apply_atr_stop_loss, compute_atr
+from portfolio.risk import apply_stop_loss, check_drawdown_limit, check_index_crash
 
 
-def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000_000):
-    """在单个验证窗口上运行每日模拟交易。
+def _get_price(price_map, code, trade_date):
+    subset = price_map[(price_map["code"] == code) & (price_map["trade_date"] == trade_date)]
+    if subset.empty:
+        return None
+    return float(subset["close"].iloc[0])
 
-    参数
-    ----
-    ensemble : EnsemblePredictor
-    factor_df : DataFrame，含 code, trade_date 和所有因子列，按 trade_date 排序
-    price_map : DataFrame，含 code, trade_date, close
-    top_n : 每日持仓数
-    init_cash : 初始资金
 
-    返回
-    ----
-    dict: {daily_returns, total_return, sharpe, max_drawdown, win_rate, n_days}
-    """
+def _is_month_first(dates, today):
+    """判断 today 是否当月首个交易日。"""
+    month = today.strftime("%Y-%m")
+    month_dates = [d for d in dates if d.strftime("%Y-%m") == month]
+    if not month_dates:
+        return False
+    return today == min(month_dates)
+
+
+def run_window_simulation(
+    ensemble, factor_df, price_map, top_n, ndrop_n, index_ohlcv,
+    quality_model, ohlcv_data, extra_data, init_cash=1_000_000,
+    use_ndrop=False, use_quality=True,
+):
+    """在单个验证窗口上运行每日模拟交易。"""
     dates = sorted(factor_df["trade_date"].unique())
     if len(dates) < 2:
-        return None
+        return None, []
 
     cash = init_cash
     peak_value = init_cash
-    positions = {}  # code -> {shares, cost_basis}
+    positions = {}
     daily_values = [init_cash]
     daily_returns = []
+    daily_signals = []
 
     for i, today in enumerate(dates[:-1]):
         tomorrow = dates[i + 1]
+        today_ts = pd.Timestamp(today)
 
-        # 收盘前：获取今日因子截面
+        # ---- 指数大跌 → 空仓 ----
+        daily_trades = []
+        if index_ohlcv is not None:
+            idx_hist = index_ohlcv[
+                pd.to_datetime(index_ohlcv["trade_date"]) <= today_ts
+            ]
+            if not idx_hist.empty:
+                idx_close = idx_hist.sort_values("trade_date")["close"].values
+                if check_index_crash(idx_close):
+                    logger.warning(f"  {today.date()} 指数大跌，空仓")
+                    for code, pos in positions.items():
+                        p = _get_price(price_map, code, today)
+                        if p and p > 0:
+                            cash += pos["shares"] * p
+                            daily_trades.append({
+                                "code": code, "action": "SELL",
+                                "price": p, "shares": pos["shares"],
+                                "amount": pos["shares"] * p,
+                                "reason": "index_crash",
+                            })
+                    positions.clear()
+                    daily_signals.append({
+                        "date": str(today.date()), "crash": True,
+                        "trades": daily_trades, "value": cash,
+                    })
+                    daily_values.append(cash)
+                    daily_returns.append(0)
+                    continue
+
+        # ---- 候选池 ----
         today_factors = factor_df[factor_df["trade_date"] == today].copy()
         if len(today_factors) < top_n:
-            daily_values.append(cash + sum(
-                positions[c]["shares"] * _get_price(price_map, c, today)
-                for c in positions
-            ))
-            daily_returns.append(0)
+            _record_skip(daily_values, daily_returns, daily_signals, today, cash, positions, price_map)
             continue
 
-        # 预测得分
+        # 基本面质量筛选（月频）
+        is_month_first = _is_month_first(dates, today_ts)
+        if use_quality and quality_model is not None:
+            quality_codes = quality_model.quality_screen(
+                ohlcv_data, extra_data or {}, today_ts,
+            )
+            if quality_codes:
+                today_factors = today_factors[today_factors["code"].isin(quality_codes)]
+
+        if len(today_factors) < top_n:
+            _record_skip(daily_values, daily_returns, daily_signals, today, cash, positions, price_map)
+            continue
+
+        # ML 预测
         try:
             scores = ensemble.predict(today_factors)
         except Exception:
@@ -74,11 +125,22 @@ def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000
             scores["score"] = 0.5
             scores["rank"] = range(1, len(scores) + 1)
 
-        # 选股 + 分配
-        selected = select_top_n(scores, n=top_n)
-        target_codes = selected["code"].tolist()
+        # 选股
+        if use_ndrop:
+            holding_codes = set(positions.keys())
+            score_series = pd.Series(
+                scores.set_index("code")["score"].to_dict()
+            ).sort_values(ascending=False)
+            new_holdings, to_buy, to_sell = select_topk_ndrop(
+                score_series, current_holdings=holding_codes,
+                K=top_n, N=ndrop_n,
+            )
+            target_codes = list(new_holdings)
+        else:
+            selected = select_top_n(scores, n=top_n)
+            target_codes = selected["code"].tolist()
 
-        # 今日收盘价
+        # 当日价格
         today_prices = {}
         for code in target_codes:
             p = _get_price(price_map, code, today)
@@ -86,79 +148,110 @@ def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000
                 today_prices[code] = p
 
         if not today_prices:
-            daily_values.append(cash + sum(
-                positions[c]["shares"] * _get_price(price_map, c, today)
-                for c in positions
-            ))
-            daily_returns.append(0)
+            _record_skip(daily_values, daily_returns, daily_signals, today, cash, positions, price_map)
             continue
 
-        # 卖出所有现有持仓（按今日收盘价）
-        for code, pos in list(positions.items()):
-            p = _get_price(price_map, code, today)
-            if p and p > 0:
-                cash += pos["shares"] * p
-        positions.clear()
+        # 卖出非目标持仓
+        for code in list(positions.keys()):
+            if code not in target_codes:
+                p = _get_price(price_map, code, today)
+                if p and p > 0:
+                    pos_shares = positions[code]["shares"]
+                    cash += pos_shares * p
+                    daily_trades.append({
+                        "code": code, "action": "SELL",
+                        "price": p, "shares": pos_shares,
+                        "amount": pos_shares * p,
+                        "reason": "rebalance",
+                    })
+                    del positions[code]
 
-        # 等权买入目标股票
-        alloc = equal_weight(list(today_prices.keys()), cash)
-        cash_after = 0  # 全仓买入
-        for _, row in alloc.iterrows():
-            code = row["code"]
-            price = today_prices[code]
-            shares = int(row["value"] / price / 100) * 100  # A 股整手
-            cost = shares * price
-            if shares > 0 and cost <= cash:
-                cash -= cost
-                positions[code] = {"shares": shares, "cost_basis": price}
+        # 等权买入目标
+        n_buy = len([c for c in target_codes if c not in positions])
+        alloc_cash = cash / max(n_buy, 1)
+        for code in target_codes:
+            if code in positions:
+                continue
+            price = today_prices.get(code, 0)
+            if price > 0:
+                shares = int(alloc_cash / price / 100) * 100
+                cost = shares * price
+                if shares > 0 and cost <= cash:
+                    cash -= cost
+                    positions[code] = {"shares": shares, "cost_basis": price}
+                    daily_trades.append({
+                        "code": code, "action": "BUY",
+                        "price": price, "shares": shares,
+                        "amount": cost,
+                        "reason": "signal",
+                    })
 
-        # 次日：计算持仓收益
+        # 次日估值
         tomorrow_value = cash
-        # 构建持仓 DataFrame 供风控函数使用
+        tomorrow_prices = {}
+        for code in list(positions.keys()):
+            p_tom = _get_price(price_map, code, tomorrow)
+            if p_tom and p_tom > 0:
+                tomorrow_prices[code] = p_tom
+                tomorrow_value += positions[code]["shares"] * p_tom
+            else:
+                p_prev = _get_price(price_map, code, today)
+                if p_prev and p_prev > 0:
+                    tomorrow_value += positions[code]["shares"] * p_prev
+
+        # 个股止损
         pos_list = [
             {"code": c, "shares": p["shares"], "cost_basis": p["cost_basis"]}
             for c, p in positions.items()
         ]
         pos_df = pd.DataFrame(pos_list) if pos_list else pd.DataFrame(columns=["code", "shares", "cost_basis"])
-
-        # 个股止损
-        tomorrow_prices: dict[str, float] = {}
-        for code, pos in positions.items():
-            p_tom = _get_price(price_map, code, tomorrow)
-            if p_tom and p_tom > 0:
-                tomorrow_prices[code] = p_tom
-
         if not pos_df.empty and tomorrow_prices:
             cost_basis_map = {c: p["cost_basis"] for c, p in positions.items()}
             stopped = apply_stop_loss(pos_df, tomorrow_prices, cost_basis_map, stop_pct=0.08)
             for code in stopped["code"].tolist():
-                cash += positions[code]["shares"] * tomorrow_prices[code]
+                exit_price = tomorrow_prices[code]
+                pos_shares = positions[code]["shares"]
+                cash += pos_shares * exit_price
+                tomorrow_value -= pos_shares * exit_price
+                daily_trades.append({
+                    "code": code, "action": "SELL",
+                    "price": exit_price, "shares": pos_shares,
+                    "amount": pos_shares * exit_price,
+                    "reason": "stop_loss",
+                })
                 del positions[code]
-
-        for code, pos in list(positions.items()):
-            p_tom = tomorrow_prices.get(code)
-            if p_tom and p_tom > 0:
-                tomorrow_value += pos["shares"] * p_tom
-            else:
-                # 停牌，按昨日价估值
-                p_prev = _get_price(price_map, code, today)
-                if p_prev and p_prev > 0:
-                    tomorrow_value += pos["shares"] * p_prev
 
         daily_values.append(tomorrow_value)
         ret = (tomorrow_value / daily_values[-2]) - 1 if daily_values[-2] > 0 else 0
         daily_returns.append(ret)
 
-        # 回撤检查（使用更新前的 peak）
+        # 回撤检查
         if check_drawdown_limit(tomorrow_value, peak_value, limit=0.25):
             logger.warning(f"  触发回撤上限 {today.date()}，清仓")
-            for code, pos in positions.items():
+            for code in list(positions.keys()):
                 p = _get_price(price_map, code, tomorrow)
                 if p and p > 0:
-                    cash += pos["shares"] * p
+                    pos_shares = positions[code]["shares"]
+                    cash += pos_shares * p
+                    daily_trades.append({
+                        "code": code, "action": "SELL",
+                        "price": p, "shares": pos_shares,
+                        "amount": pos_shares * p,
+                        "reason": "drawdown_clear",
+                    })
             positions.clear()
             tomorrow_value = cash
-        peak_value = max(peak_value, tomorrow_value)
+            peak_value = tomorrow_value  # 重置峰值
+
+        # 记录信号
+        daily_signals.append({
+            "date": str(today.date()),
+            "crash": False,
+            "n_candidates": len(today_factors),
+            "n_holdings": len(positions),
+            "value": tomorrow_value,
+            "trades": daily_trades,
+        })
 
     # 汇总指标
     rets = pd.Series(daily_returns)
@@ -172,27 +265,29 @@ def run_window_simulation(ensemble, factor_df, price_map, top_n, init_cash=1_000
     win_rate = float((rets > 0).mean()) if len(rets) > 0 else 0
 
     return {
-        "total_return": total_return,
-        "sharpe": sharpe,
-        "max_drawdown": max_dd,
-        "win_rate": win_rate,
-        "n_days": len(rets),
-        "final_value": daily_values[-1],
-    }
+        "total_return": total_return, "sharpe": sharpe,
+        "max_drawdown": max_dd, "win_rate": win_rate,
+        "n_days": len(rets), "final_value": daily_values[-1],
+    }, daily_signals
 
 
-def _get_price(price_map, code, trade_date):
-    """获取某只股票某日的收盘价。"""
-    subset = price_map[(price_map["code"] == code) & (price_map["trade_date"] == trade_date)]
-    if subset.empty:
-        return None
-    return float(subset["close"].iloc[0])
+def _record_skip(daily_values, daily_returns, daily_signals, today, cash, positions, price_map):
+    val = cash + sum(
+        positions[c]["shares"] * (_get_price(price_map, c, today) or 0)
+        for c in positions
+    )
+    daily_values.append(val)
+    daily_returns.append(0)
+    daily_signals.append({"date": str(today.date()), "crash": False, "n_holdings": len(positions), "value": val, "trades": []})
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--factors", default="all")
     parser.add_argument("--top-n", type=int, default=20)
+    parser.add_argument("--ndrop", action="store_true", help="启用 NDrop 增量调仓")
+    parser.add_argument("--ndrop-n", type=int, default=2)
+    parser.add_argument("--no-quality", action="store_true", help="跳过基本面排雷")
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--val-years", type=int, default=1)
     parser.add_argument("--start", default="20180101")
@@ -200,10 +295,10 @@ def main():
     parser.add_argument("--codes", default="")
     parser.add_argument("--no-orthogonal", action="store_true")
     parser.add_argument("--no-ic-gate", action="store_true")
-    parser.add_argument("--regime", action="store_true", help="启用分市场状态训练")
-    parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
+    parser.add_argument("--regime", action="store_true")
+    parser.add_argument("--optuna", action="store_true")
     parser.add_argument("--init-cash", type=float, default=1_000_000)
-    parser.add_argument("--save-results", default="", help="保存每日交易记录到 JSON 文件")
+    parser.add_argument("--save-results", default="", help="保存每日信号 JSON")
     args = parser.parse_args()
 
     if args.factors == "all":
@@ -211,12 +306,21 @@ def main():
     else:
         factor_names = [f.strip() for f in args.factors.split(",")]
 
-    logger.info(f"{len(factor_names)} 个因子, top-{args.top_n}, 初始资金 {args.init_cash:,.0f}")
+    # 分离量价因子和基本面因子
+    FUND_NAMES = {
+        "fin_cashflow_gap", "fin_roe_quality", "fin_profit_cv", "fin_net_margin",
+        "fin_bps_growth", "fin_revenue_stability", "fin_eps_growth",
+        "fin_debt_ratio", "fin_goodwill_ratio", "fin_pledge_risk", "fin_audit_score",
+    }
+    pv_factor_names = [f for f in factor_names if f not in FUND_NAMES]
+    fund_factor_names = [f for f in factor_names if f in FUND_NAMES]
+
+    logger.info(f"{len(pv_factor_names)} 量价因子 + {len(fund_factor_names)} 基本面因子, top-{args.top_n}")
 
     engine = get_engine()
     codes = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
     if codes is None:
-        codes = pd.read_sql("SELECT code FROM stock_basic LIMIT 200", engine)["code"].tolist()
+        codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
 
     code_list = ",".join([f"'{c}'" for c in codes])
     sql = f"""
@@ -229,24 +333,25 @@ def main():
     ohlcv = pd.read_sql(sql, engine)
     logger.info(f"OHLCV: {len(ohlcv)} 行")
 
-    # 加载指数数据（regime 模式需要）
+    # 指数数据（大跌过滤器 + regime）
+    index_ohlcv = None
     regime_df = None
-    if args.regime:
-        try:
-            idx_sql = f"""
-                SELECT trade_date, close FROM index_daily
-                WHERE code = '000001' AND trade_date BETWEEN '{args.start}' AND '{args.end}'
-                ORDER BY trade_date
-            """
-            index_df = pd.read_sql(idx_sql, engine)
-            if not index_df.empty:
-                regime_df = detect_regime(index_df)
-                logger.info(f"指数数据: {len(index_df)} 行")
-        except Exception as e:
-            logger.warning(f"指数数据加载失败: {e}, 回退到非 regime 模式")
-            args.regime = False
+    try:
+        idx_sql = f"""
+            SELECT trade_date, close FROM index_daily
+            WHERE code = '000001' AND trade_date BETWEEN '{args.start}' AND '{args.end}'
+            ORDER BY trade_date
+        """
+        index_ohlcv = pd.read_sql(idx_sql, engine)
+        if not index_ohlcv.empty:
+            logger.info(f"指数数据: {len(index_ohlcv)} 行")
+    except Exception as e:
+        logger.warning(f"指数数据加载失败: {e}")
 
-    # extra_data
+    if args.regime and index_ohlcv is not None:
+        regime_df = detect_regime(index_ohlcv)
+
+    # extra_data（估值 + 财务 + 质押）
     extra_data = {}
     try:
         extra_sql = f"""
@@ -263,64 +368,107 @@ def main():
     except Exception as e:
         logger.warning(f"估值数据: {e}")
 
-    try:
-        sh_sql = f"""
-            SELECT code, end_date AS trade_date, shareholder_count
-            FROM stock_shareholder
-            WHERE code IN ({code_list})
-              AND end_date BETWEEN '{args.start}' AND '{args.end}'
-        """
-        sh_df = pd.read_sql(sh_sql, engine)
-        if not sh_df.empty:
-            extra_data["shareholder_count"] = sh_df[["code", "trade_date", "shareholder_count"]]
-    except Exception as e:
-        logger.warning(f"股东数据: {e}")
+    # 财务数据
+    if not args.no_quality and fund_factor_names:
+        try:
+            fin_sql = f"""
+                SELECT code, report_date, net_profit, cash_flow, roe, bps,
+                       net_margin, revenue, eps, total_assets, total_liability,
+                       goodwill, holder_equity, operating_cash_flow, adjusted_profit
+                FROM stock_financial
+                WHERE code IN ({code_list})
+                ORDER BY code, report_date
+            """
+            fin_df = pd.read_sql(fin_sql, engine)
+            if not fin_df.empty:
+                fin_cols = [c for c in fin_df.columns if c not in ("code", "report_date")]
+                for col in fin_cols:
+                    extra_data[col] = fin_df[["code", "report_date", col]]
+                logger.info(f"财务数据: {len(fin_df)} 行, {len(fin_cols)} 列")
+        except Exception as e:
+            logger.warning(f"财务数据: {e}")
+
+    # 质押数据
+    if not args.no_quality:
+        try:
+            pledge_sql = f"""
+                SELECT code, trade_date, pledge_ratio
+                FROM stock_pledge
+                WHERE code IN ({code_list})
+                  AND trade_date BETWEEN '{args.start}' AND '{args.end}'
+            """
+            pledge_df = pd.read_sql(pledge_sql, engine)
+            if not pledge_df.empty:
+                extra_data["pledge_ratio"] = pledge_df[["code", "trade_date", "pledge_ratio"]]
+                logger.info(f"质押数据: {len(pledge_df)} 行")
+        except Exception as e:
+            logger.warning(f"质押数据: {e}")
 
     engine.dispose()
 
-    # 因子数据集（含 ret_1d 供 IC 计算）
+    # 因子数据集
     dataset = build_factor_dataset(
         ohlcv, factor_names, label_mode="binary",
         extra_data=extra_data if extra_data else None,
     )
 
-    # 1. IC 门禁
+    # IC 门禁 + 正交筛选（仅量价因子）
+    pv_active = [f for f in pv_factor_names if f in dataset.columns]
     if not args.no_ic_gate:
-        factor_names = filter_factors_by_ic(dataset, factor_names, ret_col="ret_1d")
-
-    # 2. 正交筛选
+        pv_active = filter_factors_by_ic(dataset, pv_active, ret_col="ret_1d")
     if not args.no_orthogonal:
-        factor_cols = select_orthogonal_factors(dataset, factor_names, threshold=0.7)
+        pv_active = select_orthogonal_factors(dataset, pv_active, threshold=0.7)
+
+    # 基本面因子仅用于月频质量筛选，不参与 ML 训练（日频覆盖率太低）
+    fund_active = [f for f in fund_factor_names if f in dataset.columns and dataset[f].notna().mean() > 0.10]
+    if fund_active:
+        logger.info(f"基本面因子有效（仅质量筛选）: {fund_active}")
     else:
-        factor_cols = factor_names
+        logger.warning("基本面因子全部无数据，跳过质量筛选")
 
-    logger.info(f"筛选后: {len(factor_cols)} 因子")
+    # ML 训练仅用量价因子
+    all_active = pv_active
+    logger.info(f"筛选后: {len(pv_active)} 量价因子 (ML训练) + {len(fund_active)} 基本面因子 (质量筛选)")
 
-    # 3. Walk-forward 训练
+    # Walk-forward 训练
     if args.regime and regime_df is not None:
-        logger.info("使用分市场状态集成训练")
         results = walk_forward_train_by_regime(
-            dataset, factor_cols, regime_df,
+            dataset, all_active, regime_df,
             train_years=args.train_years, val_years=args.val_years,
         )
     else:
         results = walk_forward_train_ensemble(
-            dataset, factor_cols,
+            dataset, all_active,
             train_years=args.train_years, val_years=args.val_years,
             use_optuna=args.optuna,
         )
     logger.info(f"完成 {len(results)} 个 walk-forward 窗口")
 
-    # 价格映射表（用于模拟交易）
-    price_map = ohlcv[["code", "trade_date", "close"]].copy()
-    price_map["trade_date"] = pd.to_datetime(price_map["trade_date"])
-
-    # 统一日期类型：dataset 中 trade_date 可能为 date 对象，转为 Timestamp
-    dataset["trade_date"] = pd.to_datetime(dataset["trade_date"])
+    # 初始化双周期模型（用于月频质量筛选）
+    quality_model = None
+    if not args.no_quality and fund_active:
+        from models.trainer import EnsemblePredictor
+        dummy_pred = EnsemblePredictor(None, None, pv_active) if results else None
+        if results:
+            quality_model = DualPeriodModel(
+                predictor=results[0]["ensemble"],
+                pv_factor_names=pv_active,
+                fund_factor_names=fund_active,
+                top_n=args.top_n,
+                ndrop_n=args.ndrop_n,
+            )
+            logger.info("双周期模型: 月频基本面排雷 + 日频量价ML")
 
     # 每日模拟
+    price_map = ohlcv[["code", "trade_date", "close"]].copy()
+    price_map["trade_date"] = pd.to_datetime(price_map["trade_date"])
+    dataset["trade_date"] = pd.to_datetime(dataset["trade_date"])
+    ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"])
+
     print("\n=== 每日模拟回测结果 ===\n")
     all_sim = []
+    all_signals = []
+
     for i, r in enumerate(results):
         logger.info(f"模拟窗口 {i+1}: {r['val_start'].date()}~{r['val_end'].date()}")
 
@@ -330,14 +478,21 @@ def main():
         )
         val_factors = dataset[val_mask].copy()
 
-        sim = run_window_simulation(
+        sim, signals = run_window_simulation(
             r["ensemble"], val_factors, price_map,
-            top_n=args.top_n, init_cash=args.init_cash,
+            top_n=args.top_n, ndrop_n=args.ndrop_n,
+            index_ohlcv=index_ohlcv,
+            quality_model=quality_model,
+            ohlcv_data=ohlcv, extra_data=extra_data,
+            init_cash=args.init_cash,
+            use_ndrop=args.ndrop,
+            use_quality=not args.no_quality,
         )
         if sim is None:
             continue
 
         all_sim.append(sim)
+        all_signals.extend(signals)
         print(
             f"窗口 {i+1} ({r['val_start'].date()}~{r['val_end'].date()}): "
             f"收益={sim['total_return']:.1%}, 夏普={sim['sharpe']:.2f}, "
@@ -355,10 +510,16 @@ def main():
         print(f"累计终值(均): {summary['final_value'].mean():,.0f}")
 
         if args.save_results:
-            import json
-            out = summary.to_dict(orient="records")
-            # convert numpy types
-            for rec in out:
+            out = {
+                "config": {
+                    "top_n": args.top_n, "ndrop": args.ndrop,
+                    "pv_factors": pv_active, "fund_factors": fund_active,
+                    "start": args.start, "end": args.end,
+                },
+                "summary": summary.to_dict(orient="records"),
+                "daily_signals": all_signals,
+            }
+            for rec in out["summary"]:
                 for k, v in rec.items():
                     if hasattr(v, "item"):
                         rec[k] = v.item()

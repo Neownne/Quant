@@ -175,6 +175,29 @@ CREATE TABLE IF NOT EXISTS stock_financial (
 );
 """
 
+# Phase 4+: 补全资产负债表/现金流/质押等字段
+DDL_STOCK_FINANCIAL_V2 = """
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS goodwill          DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS short_term_loans  DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS cash_equivalents  DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS operating_cash_flow DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS adjusted_profit   DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS parent_net_profit DOUBLE PRECISION;
+ALTER TABLE stock_financial ADD COLUMN IF NOT EXISTS holder_equity     DOUBLE PRECISION;
+"""
+
+DDL_STOCK_PLEDGE = """
+CREATE TABLE IF NOT EXISTS stock_pledge (
+    code              VARCHAR(10),
+    trade_date        DATE,
+    pledge_ratio      DOUBLE PRECISION,
+    pledge_shares     DOUBLE PRECISION,
+    pledge_market_cap DOUBLE PRECISION,
+    pledge_count      DOUBLE PRECISION,
+    PRIMARY KEY (code, trade_date)
+);
+"""
+
 # DDL —— 行业分类
 DDL_STOCK_INDUSTRY = """
 CREATE TABLE IF NOT EXISTS stock_industry (
@@ -207,7 +230,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     volume      INT,
     amount      DOUBLE PRECISION,
     order_time  TIMESTAMP DEFAULT NOW(),
-    status      VARCHAR(20)
+    status      VARCHAR(20),
+    note        VARCHAR(30)
 );
 """
 
@@ -269,12 +293,21 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_DAILY_EXTRA))
         conn.execute(text(DDL_STOCK_SHAREHOLDER))
         conn.execute(text(DDL_STOCK_FINANCIAL))
+        conn.execute(text(DDL_STOCK_FINANCIAL_V2))
         conn.execute(text(DDL_STOCK_INDUSTRY))
+        conn.execute(text(DDL_STOCK_PLEDGE))
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
         conn.execute(text(DDL_PAPER_POSITIONS))
         conn.execute(text(DDL_PAPER_DAILY_PNL))
-    logger.info("数据库表初始化完成（13张表）")
+        # migration: add note column for trade reason tracking
+        try:
+            conn.execute(text(
+                "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS note VARCHAR(30)"
+            ))
+        except Exception:
+            pass
+    logger.info("数据库表初始化完成（14张表）")
     engine.dispose()
 
 

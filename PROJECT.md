@@ -28,7 +28,7 @@
                                   │
                     ┌─────────────┴─────────────┐
                     │     PostgreSQL 数据库       │
-                    │  13 张表（行情 + 基本面 + 模拟盘）│
+                    │  14 张表（行情 + 基本面 + 模拟盘）│
                     └───────────────────────────┘
 ```
 
@@ -48,9 +48,9 @@ quant/
 │   └── settings.py           # 集中配置（数据库、数据参数）
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 13 张表 DDL + 连接池 + upsert
-│   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东）
-│   ├── sync.py               # 历史数据批量同步（多进程增量，6 种模式）
+│   ├── db.py                 # 14 张表 DDL + 连接池 + upsert
+│   ├── fetcher.py            # AKShare 数据获取（日线/分钟/实时/估值/股东/财务/质押）
+│   ├── sync.py               # 历史数据批量同步（多进程增量，9 种模式）
 │   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
 │
 ├── strategies/               # 策略层
@@ -60,8 +60,8 @@ quant/
 │   ├── macd_strategy.py      # MACD 金叉死叉策略
 │   └── rsi_strategy.py       # RSI 超买超卖策略
 │
-├── factors/                    # 因子层（65 个因子）
-│   ├── __init__.py             # ALL_FACTORS 注册表（65 个因子）
+├── factors/                    # 因子层（76 个因子）
+│   ├── __init__.py             # ALL_FACTORS 注册表（76 个因子）
 │   ├── engine.py               # FactorEngine + 截面中性化
 │   ├── alpha101.py             # 30 个 Alpha101 核心因子
 │   ├── alpha191_turnover.py    # Alpha191 换手率类 5 因子
@@ -71,6 +71,7 @@ quant/
 │   ├── alpha191_vol.py         # Alpha191 波动率高阶类 5 因子
 │   ├── alpha191_liquidity.py   # Alpha191 流动性高阶类 4 因子
 │   ├── custom.py               # 7 个自定义 A 股因子
+│   ├── fundamental.py          # 11 个基本面质量因子（九项排雷）
 │   ├── monitor.py              # IC/ICIR/衰减曲线监控
 │   └── screening.py            # 正交性筛选（Spearman + 贪心）
 │
@@ -89,7 +90,7 @@ quant/
 │   ├── risk.py                 # 风控（个股-8%止损/ATR止损/组合回撤减仓/最大回撤清仓）
 │   └── paper_engine.py         # PaperEngine 日频ML模拟盘引擎（信号→订单→DB写入）
 │
-├── tests/                      # 测试（59 通过 + 1 跳过）
+├── tests/                      # 测试（61 通过 + 1 跳过）
 │   ├── test_fetcher.py         # 数据获取测试
 │   ├── test_factors.py         # 因子+引擎+IC 测试
 │   ├── test_alpha191.py        # Alpha191 因子测试（13 个）
@@ -116,12 +117,14 @@ quant/
 │
 ├── scripts/                  # 批量工具
 │   ├── batch_backtest.py         # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
+│   ├── grid_backtest.py          # 全市场回测 + 参数网格搜索 + 过拟合检测
 │   ├── run_ml_backtest.py        # ML 选股端到端评估（因子→筛选→训练→汇总）
 │   ├── run_simulation.py         # ML 每日模拟回测（选股→分配→止损→P&L）
 │   └── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
 │
 ├── docs/                     # 文档 & 研究报告
-│   ├── quant-strategy-research.md  # 量化策略研究报告
+│   ├── quant-strategy-research.md  # 量化策略研究报告（技术指标+学术前沿）
+│   ├── strategy-interpretability.md # ML策略可解释性分析（因子+筛选+回测验证）
 │   └── postgresql-guide.md         # PostgreSQL 使用指南
 │
 ├── output/                   # 批量回测输出（不入 git）
@@ -155,11 +158,40 @@ data/sync.py
 | `stock` | 股票基本信息（行业/上市日期） | 深交所 + 上交所 + 北交所 |
 | `stock-daily` | 日线 OHLCV（后复权，2015 年起） | 腾讯财经 |
 | `index` | 7 只指数日线 | 腾讯财经 |
-| `daily-extra` | 估值指标（市值/PB，~1 年日频） | 百度财经 |
+| `daily-extra` | 估值指标（市值/PE/PB/股本，~1 年日频） | 百度财经 |
 | `shareholder` | 股东户数（季度数据，2013 年起） | 东方财富 |
+| `financial` | 财务摘要（营收/利润/ROE/毛利率等） | 同花顺 |
+| `financial-supplement` | 财务补充（资产负债表/现金流/扣非净利润） | 同花顺 `_new_ths` 系列 |
+| `pledge` | 全市场股权质押数据 | 东方财富 |
+| `industry` | 行业分类（申万一级/二级） | 东方财富 |
 | `all` | 全量同步 | — |
 
 **特性**：多进程并发（ProcessPoolExecutor）、增量同步（跳过已覆盖股票）、单股 60s 超时、tqdm 进度条。
+
+## ML 选股回测结果
+
+> 详见 [docs/strategy-interpretability.md](docs/strategy-interpretability.md)
+
+| 指标 | 800-Stock 全市场 | 说明 |
+|------|:---:|------|
+| Sharpe | **1.01** | 经无风险利率调整 |
+| 年化收益 | **26.3%** | 2021-2026 区间 |
+| 最大回撤 | -36.7% | 主要发生在 2022 年熊市 |
+| 胜率 | 53.7% | 日频预测准确率 |
+| Walk-forward 窗口 | 4 | 滚动训练+验证 |
+
+**参数优化**（50-stock 网格搜索，12 组）：
+- 最优参数：`top_n=15, ndrop=True, ndrop_n=2`
+- NDrop 增量调仓在所有参数级别均优于每日全换仓
+- top_n=15 是甜点区（10 太集中，20 太分散）
+
+**过拟合检测**：样本外 (2024-2026) Sharpe=2.27 > 样本内 (2019-2022) Sharpe=1.09，衰减比 208.1%，**无过拟合**。
+
+**因子筛选链**：76 个因子 → IC 门禁 (65→20, \|IC\|>0.02, \|t\|>2.0) → 正交筛选 (20→8, Spearman<0.7) → XGBoost+LightGBM 概率平均集成
+
+**基本面排雷**（月频）：8 项排雷综合评分 (audit_score ≥ -3) + 三项硬排除（商誉>27%/质押>72%/负债>105%），每月约 330-390/800 只通过。
+
+---
 
 ### 2. 股票池系统
 
@@ -230,7 +262,7 @@ app/main.py (入口)
 
 ---
 
-## 数据库表结构（13 张表）
+## 数据库表结构（14 张表）
 
 ### 行情数据（5 张）
 
@@ -242,12 +274,15 @@ app/main.py (入口)
 | `stock_tick` | (code, trade_time) | 逐笔成交（实时录制） | 腾讯财经逐笔 |
 | `stock_minute` | (code, trade_time, period) | 分钟K线（实时录制） | 新浪财经分钟K线 |
 
-### 基本面数据（2 张）
+### 基本面数据（5 张）
 
 | 表 | 主键 | 说明 | 数据源 |
 |---|---|---|---|
-| `stock_daily_extra` | (code, trade_date) | 估值指标（总市值、PB） | 百度财经 |
+| `stock_daily_extra` | (code, trade_date) | 估值指标（总市值、流通市值、PE、PB、总股本、流通股本） | 百度财经 |
 | `stock_shareholder` | (code, end_date) | 股东户数（季度，含户均持股市值/持股数量） | 东方财富 |
+| `stock_financial` | (code, report_date) | 财务数据（营收/利润/ROE/毛利率/净利率/EPS/BPS + 资产负债表+现金流+扣非净利润，共18列） | 同花顺（AKShare `_new_ths` 系列） |
+| `stock_industry` | code | 行业分类（申万一级/二级行业） | 东方财富 |
+| `stock_pledge` | (code, trade_date) | 股权质押数据（质押比例/股数/市值/笔数） | 东方财富 |
 
 ### 模拟盘（4 张）
 
@@ -390,15 +425,19 @@ strategies/__init__.py
 - 被 `data/recorder.py` 调用（实盘录制）
 - 被 `app/utils/data_loader.py` 间接调用（实时行情）
 - `@retry_on_network_error` 装饰器提供指数退避自动重试
-- `fetch_stock_lg_indicator()` — 估值指标（市值/PB，数据源百度财经）
+- `fetch_stock_lg_indicator()` — 估值指标（市值/PE/PB/股本，数据源百度财经）
 - `fetch_shareholder_count()` — 股东户数（季度，数据源东方财富）
+- `fetch_financial_data()` — 财务摘要（营收/利润/ROE/毛利率/净利率/EPS/BPS/现金流，数据源同花顺）
+- `fetch_financial_supplement()` — 财务补充（资产负债表/现金流/扣非净利润，数据源同花顺 `_new_ths` 系列）
+- `fetch_pledge_data()` — 股权质押（全市场快照，数据源东方财富）
+- `fetch_industry_classification()` — 行业分类（申万一级/二级，数据源东方财富）
 
 ### data/db.py → 数据库层
 - `init_db()`：建表（幂等，13 张表），被 `app/main.py` 各页面调用
 - `upsert_df()`：写入，被 `data/sync.py` 和 `data/recorder.py` 调用
 
 ### data/sync.py → 数据同步
-- 6 种同步模式：stock / stock-daily / index / daily-extra / shareholder / all
+- 9 种同步模式：stock / stock-daily / index / daily-extra / shareholder / financial / financial-supplement / pledge / industry / all
 - 默认起始日期 20150101（10 年历史）
 - 多进程并发（ProcessPoolExecutor），模块级 worker 函数
 
@@ -450,6 +489,8 @@ streamlit run app/main.py                  # 浏览器打开 http://localhost:85
 
 | 日期 | 变更内容 |
 |---|---|
+| 2026-05-26 | **全市场回测+参数优化+过拟合检测**：`scripts/grid_backtest.py` 新增参数网格搜索（12组合）+ 过拟合检测（样本内2019-2022 vs 样本外2024-2026）。800只股票（沪深300+中证500成分股）全市场回测完成：Sharpe=1.01, 年化收益26.3%, 最大回撤-36.7%, 4个Walk-forward窗口。最优参数：top_n=15, NDrop(ndrop_n=2)。因子筛选链：76因子→IC门禁(65→20, |IC|>0.02, |t|>2.0)→正交筛选(20→8, Spearman<0.7)。过拟合诊断：无（样本外Sharpe 2.27 > 样本内 1.09, 衰减比208.1%）。`docs/strategy-interpretability.md` 策略可解释性分析文档（因子经济学含义+IC门禁+正交筛选+双周期设计+NDrop逻辑+特征重要性+失效场景+改进方向）。行业数据补充（沪市/北交所）因东方财富API不可用暂时跳过 |
+| 2026-05-25 | **基本面因子扩展+财务数据补全**：`factors/fundamental.py` 新增 fin_debt_ratio（资产负债率）、fin_goodwill_ratio（商誉风险）、fin_pledge_risk（质押风险）3 个因子，fin_cashflow_gap 增强为优先使用经营现金流总额对比，fin_audit_score 扩展至 8 项排雷检查（新增扣非<0/负债>70%/商誉>30%）。`data/fetcher.py` 新增 fetch_financial_supplement（资产负债表+现金流+利润表）、fetch_pledge_data（质押快照）、fetch_industry_classification（申万行业）。`data/db.py` 扩展 stock_financial（+7 列 ALTER TABLE）+ 新增 stock_pledge 表。因子总数 65→76，9 项排雷可用 6/9。数据库 13→14 张表。61 测试通过 |
 | 2026-05-25 | **Phase 4 组合优化+风控+模拟盘**：选股增强（停牌/涨跌停过滤）；仓位上限（单只10%+行业30%迭代裁剪+再分配）；风控增强（ATR止损/组合-20%减仓50%/最大-25%清仓）；新建 `portfolio/paper_engine.py`（PaperEngine 日频ML模拟盘引擎，过滤→预测→分配→风控→订单→DB写入）；新增 `paper_daily_pnl` 表（第13张表）；新建 `app/pages/8_📊_ML_Monitor.py`（IC看板/模型表现/当日信号/模拟盘净值四Tab）；`scripts/run_simulation.py` 重构为使用 portfolio/risk 函数；`scripts/verify_paper_trading.py` 端到端验证（simulation vs PaperEngine 选股重合度100%收益相关性1.0）。59测试通过 |
 | 2026-05-25 | **Phase 3 因子扩展+集成优化**：新增 28 个 Alpha191 A 股因子（换手率5/日内形态4/资金流向6/波动率5/隔夜效应4/流动性4 共 6 类）；激活 extra_data（市值+PB+股东户数）激活 3 个估值因子；市场状态识别 `models/regime.py`（牛/熊/震荡三态）；正交筛选 `factors/screening.py`（Spearman 秩相关 < 0.7 门禁）；XGBoost+LightGBM 概率平均集成 `EnsemblePredictor`；`models/tuning.py` 阈值搜索+Optuna 调优。因子总数 37→65，经正交筛选 ≥ 50 活跃。E2E 集成回测 4 窗口 acc=54.2%, prec=52.1%, rec=26.9%。全量 59 测试通过 + 1 跳过 |
 | 2026-05-25 | **Phase 2 ML 选股管线**：新增 `models/` 模块（dataset 构造+walk-forward 切分、XGBoost/LightGBM 训练器、DailyPredictor 截面排序）；新增 `portfolio/` 模块（Top-N 选股+ST/次新过滤、等权/波动率倒数分配、个股止损+回撤风控）；新增 `scripts/run_ml_backtest.py` 端到端验证脚本；新增 16 个测试（models 9 + portfolio 7），全量 36 测试通过；Phase 1+2 合计 37 个因子 + IC 监控 + ML 训练预测 + 组合优化 |

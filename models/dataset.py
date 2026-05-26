@@ -111,12 +111,13 @@ def build_factor_dataset(
     logger.info(f"计算 {len(factor_names)} 个因子 ...")
     result = engine.compute(ohlcv, extra_data=extra_data)
 
+    # 统一 trade_date 类型
+    result["trade_date"] = pd.to_datetime(result["trade_date"])
+    ohlcv_sub = ohlcv[["code", "trade_date", "close"]].copy()
+    ohlcv_sub["trade_date"] = pd.to_datetime(ohlcv_sub["trade_date"])
+
     # 合并回 close 列用于标签计算
-    result = result.merge(
-        ohlcv[["code", "trade_date", "close"]],
-        on=["code", "trade_date"],
-        how="left",
-    )
+    result = result.merge(ohlcv_sub, on=["code", "trade_date"], how="left")
 
     # 按股票分组计算标签
     logger.info("生成标签 ...")

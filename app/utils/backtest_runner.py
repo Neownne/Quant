@@ -119,14 +119,13 @@ class TradeRecorder(bt.Analyzer):
                 pnl = (exit_price - entry_price) * matched
                 cost = entry_price * matched
                 self.trades.append({
-                    "entry_date": _mpl_to_datetime(entry_dt),
-                    "exit_date": _mpl_to_datetime(order.executed.dt),
-                    "direction": "买入",
-                    "entry_price": round(entry_price, 2),
-                    "exit_price": round(exit_price, 2),
-                    "size": matched,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl / cost * 100, 2) if cost else 0,
+                    "买入日期": _mpl_to_datetime(entry_dt),
+                    "卖出日期": _mpl_to_datetime(order.executed.dt),
+                    "买入价": round(entry_price, 2),
+                    "卖出价": round(exit_price, 2),
+                    "数量(股)": matched,
+                    "盈亏(元)": round(pnl, 2),
+                    "盈亏%": round(pnl / cost * 100, 2) if cost else 0,
                 })
                 if entry_size > matched:
                     self._pending_entries.insert(0, (entry_price, entry_size - matched, entry_dt))

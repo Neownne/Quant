@@ -15,10 +15,11 @@ from loguru import logger
 from sqlalchemy import text
 
 from data.db import get_engine
-from portfolio.selector import select_top_n, filter_stocks
+from portfolio.selector import select_top_n, select_topk_ndrop, filter_stocks
 from portfolio.allocator import equal_weight, apply_position_limits
 from portfolio.risk import (
     apply_atr_stop_loss, portfolio_stop_reduce, check_drawdown_limit, compute_atr,
+    check_index_crash,
 )
 
 
@@ -31,6 +32,8 @@ class PaperEngine:
         predictor,
         factor_names: list[str],
         top_n: int = 20,
+        rebalance_mode: str = "full",
+        ndrop_n: int = 2,
         max_single: float = 0.10,
         max_industry: float = 0.30,
         stop_loss_pct: float = 0.08,
@@ -40,11 +43,15 @@ class PaperEngine:
         portfolio_dd_reduce_to: float = 0.50,
         max_dd_limit: float = 0.25,
         signal_only: bool = False,
+        index_crash_lookback: int = 15,
+        index_crash_threshold: float = -0.12,
     ):
         self.account_id = account_id
         self.predictor = predictor
         self.factor_names = factor_names
         self.top_n = top_n
+        self.rebalance_mode = rebalance_mode
+        self.ndrop_n = ndrop_n
         self.max_single = max_single
         self.max_industry = max_industry
         self.stop_loss_pct = stop_loss_pct
@@ -54,6 +61,8 @@ class PaperEngine:
         self.portfolio_dd_reduce_to = portfolio_dd_reduce_to
         self.max_dd_limit = max_dd_limit
         self.signal_only = signal_only
+        self.index_crash_lookback = index_crash_lookback
+        self.index_crash_threshold = index_crash_threshold
         self.peak_value: float | None = None
 
     # ── 公开接口 ──────────────────────────────────────────
@@ -64,6 +73,7 @@ class PaperEngine:
         factor_df: pd.DataFrame,
         ohlcv_data: pd.DataFrame,
         industry_map: dict[str, str] | None = None,
+        index_ohlcv: pd.DataFrame | None = None,
     ) -> dict | None:
         """执行单日完整交易周期。
 
@@ -73,6 +83,7 @@ class PaperEngine:
         factor_df : 当日因子截面 (含 code, trade_date, 所有因子列, 可选的 name/close 列)
         ohlcv_data : OHLCV 历史数据 (含 code, trade_date, open, high, low, close, volume)
         industry_map : {code: industry_label}
+        index_ohlcv : 指数 OHLCV 数据 (含 trade_date, close)，用于大跌过滤器
 
         返回
         ----
@@ -80,6 +91,44 @@ class PaperEngine:
         """
         if factor_df.empty:
             return None
+
+        # 0. 指数大跌检查
+        crash_warning = False
+        if index_ohlcv is not None and not index_ohlcv.empty:
+            idx_hist = index_ohlcv[index_ohlcv["trade_date"] <= trade_date]
+            if not idx_hist.empty:
+                idx_close = idx_hist.sort_values("trade_date")["close"].values
+                if check_index_crash(idx_close, self.index_crash_lookback, self.index_crash_threshold):
+                    logger.warning(f"{trade_date.date()} 指数大跌触发，空仓")
+                    crash_warning = True
+                    cash, positions, peak = self._load_state()
+                    day_ohlcv = ohlcv_data[ohlcv_data["trade_date"] == trade_date]
+                    today_prices = self._get_price_map(day_ohlcv)
+                    # 清仓
+                    crash_orders = []
+                    for code in list(positions.keys()):
+                        p = today_prices.get(code, 0)
+                        if p > 0:
+                            cash += positions[code]["shares"] * p
+                        crash_orders.append({
+                            "code": code, "direction": "SELL",
+                            "price": p if p > 0 else positions[code].get("cost_basis", 0),
+                            "volume": positions[code]["shares"],
+                            "reason": "index_crash",
+                        })
+                        del positions[code]
+                    if not self.signal_only:
+                        self._record_daily_pnl(trade_date, cash, 0, cash, 0, 0)
+                    return {
+                        "date": trade_date,
+                        "n_candidates": 0, "n_selected": 0,
+                        "n_buy_orders": 0, "n_sell_orders": len(crash_orders),
+                        "stop_losses": [],
+                        "portfolio_reduced": False,
+                        "crash_warning": True,
+                        "total_value": cash,
+                        "orders": crash_orders,
+                    }
 
         # 1. 加载状态
         cash, positions, peak = self._load_state()
@@ -98,7 +147,8 @@ class PaperEngine:
             return self._skip_day(trade_date, cash, positions, day_ohlcv)
 
         # 3. 预测 → 选股 → 分配
-        target = self._select_and_allocate(factor_df, candidates, industry_map, cash)
+        current_holdings = set(positions.keys())
+        target = self._select_and_allocate(factor_df, candidates, industry_map, cash, current_holdings)
         if target.empty:
             return self._skip_day(trade_date, cash, positions, day_ohlcv)
 
@@ -110,12 +160,21 @@ class PaperEngine:
             positions, today_prices, ohlcv_data, cash,
         )
 
+        # 收集风控触发的订单
+        risk_orders = []
+
         # 6. 执行止损平仓
         for code in stop_codes:
             if code in positions:
                 p = today_prices.get(code, 0)
                 if p > 0:
                     cash += positions[code]["shares"] * p
+                risk_orders.append({
+                    "code": code, "direction": "SELL",
+                    "price": p if p > 0 else positions[code]["cost_basis"],
+                    "volume": positions[code]["shares"],
+                    "reason": "stop_loss",
+                })
                 del positions[code]
 
         # 7. 组合减仓
@@ -127,14 +186,21 @@ class PaperEngine:
                         p = today_prices.get(code, 0)
                         if p > 0:
                             cash += diff * p
+                        risk_orders.append({
+                            "code": code, "direction": "SELL",
+                            "price": p if p > 0 else positions[code]["cost_basis"],
+                            "volume": diff,
+                            "reason": "portfolio_reduce",
+                        })
                         positions[code] = rp
 
         # 8. 生成订单
         buy_orders, sell_orders = self._generate_orders(
-            target, positions, today_prices, cash,
+            target, positions, today_prices, cash, reason="signal",
         )
 
-        # 9. 执行订单
+        # 9. 执行订单（含风控订单）
+        all_orders = risk_orders + sell_orders + buy_orders
         if not self.signal_only:
             self._execute_orders(buy_orders, sell_orders, trade_date)
 
@@ -178,6 +244,7 @@ class PaperEngine:
             "stop_losses": stop_codes,
             "portfolio_reduced": portfolio_reduced,
             "total_value": total_value,
+            "orders": all_orders,
         }
 
     # ── 内部方法 ──────────────────────────────────────────
@@ -276,8 +343,9 @@ class PaperEngine:
     def _select_and_allocate(
         self, factor_df: pd.DataFrame, candidates: pd.DataFrame,
         industry_map: dict[str, str] | None, cash: float,
+        current_holdings: set[str] | None = None,
     ) -> pd.DataFrame:
-        """预测 → 选 top-N → 等权 → 上限约束。"""
+        """预测 → 选 top-N/NDrop → 等权 → 上限约束。"""
         valid_codes = set(candidates["code"].unique())
         factor_slice = factor_df[factor_df["code"].isin(valid_codes)]
 
@@ -287,19 +355,29 @@ class PaperEngine:
             logger.warning(f"预测失败: {e}")
             return pd.DataFrame()
 
-        selected = select_top_n(scores, n=self.top_n)
-        if selected.empty:
+        # NDrop 增量调仓 vs 全量换仓
+        if self.rebalance_mode == "ndrop" and current_holdings is not None:
+            score_series = pd.Series(
+                scores.set_index("code")["score"].to_dict()
+            ).sort_values(ascending=False)
+            new_holdings, to_buy, to_sell = select_topk_ndrop(
+                score_series, current_holdings=current_holdings,
+                K=self.top_n, N=self.ndrop_n,
+            )
+            codes = list(new_holdings)
+        else:
+            selected = select_top_n(scores, n=self.top_n)
+            if selected.empty:
+                return pd.DataFrame()
+            codes = selected["code"].tolist()
+
+        if not codes:
             return pd.DataFrame()
 
-        codes = selected["code"].tolist()
         alloc = equal_weight(codes, cash)
         result = apply_position_limits(alloc, industry_map or {}, self.max_single, self.max_industry)
-        # 计算目标股数（整手）
-        result["target_shares"] = (result["value"] / result["weight"] * result["weight"] / (
-            result["value"] / result["weight"]
-        )).apply(lambda _: 0)  # placeholder, actual calc below
 
-        # 实际计算
+        # 计算目标股数（整手）
         weight_per_code = dict(zip(result["code"], result["weight"]))
         for i, row in result.iterrows():
             code = row["code"]
@@ -391,6 +469,7 @@ class PaperEngine:
         positions: dict[str, dict],
         today_prices: dict[str, float],
         cash: float,
+        reason: str = "signal",
     ) -> tuple[list[dict], list[dict]]:
         """对比目标持仓和当前持仓，生成买卖单。"""
         buy_orders: list[dict] = []
@@ -412,6 +491,7 @@ class PaperEngine:
             sell_orders.append({
                 "code": code, "direction": "SELL",
                 "price": p, "volume": positions[code]["shares"],
+                "reason": reason,
             })
 
         # 买入/调整
@@ -431,6 +511,7 @@ class PaperEngine:
                     buy_orders.append({
                         "code": code, "direction": "BUY",
                         "price": t_price, "volume": diff,
+                        "reason": reason,
                     })
             elif t_shares < c_shares:
                 diff = c_shares - t_shares
@@ -439,6 +520,7 @@ class PaperEngine:
                     sell_orders.append({
                         "code": code, "direction": "SELL",
                         "price": t_price, "volume": diff,
+                        "reason": reason,
                     })
 
         return buy_orders, sell_orders
@@ -453,8 +535,8 @@ class PaperEngine:
                 # 写订单
                 for o in sell_orders + buy_orders:
                     conn.execute(text("""
-                        INSERT INTO paper_orders (account_id, code, direction, price, volume, amount, status)
-                        VALUES (:aid, :code, :dir, :price, :vol, :amt, 'filled')
+                        INSERT INTO paper_orders (account_id, code, direction, price, volume, amount, status, note)
+                        VALUES (:aid, :code, :dir, :price, :vol, :amt, 'filled', :note)
                     """), {
                         "aid": self.account_id,
                         "code": o["code"],
@@ -462,6 +544,7 @@ class PaperEngine:
                         "price": o["price"],
                         "vol": o["volume"],
                         "amt": o["price"] * o["volume"],
+                        "note": o.get("reason", ""),
                     })
 
                 # 更新持仓
@@ -554,4 +637,5 @@ class PaperEngine:
             "stop_losses": [],
             "portfolio_reduced": False,
             "total_value": total_value,
+            "orders": [],
         }

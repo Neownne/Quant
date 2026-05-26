@@ -126,6 +126,35 @@ def check_drawdown_limit(current_value: float, peak_value: float, limit: float =
     return drawdown >= limit
 
 
+def check_index_crash(
+    index_close: np.ndarray,
+    lookback: int = 15,
+    threshold: float = -0.12,
+) -> bool:
+    """指数大跌过滤器。
+
+    N 日内指数累计跌幅超过阈值 → 空仓规避系统性风险。
+
+    参数
+    ----
+    index_close : 指数收盘价序列（按时间升序）
+    lookback : 回看天数
+    threshold : 触发阈值（负值，如 -0.12 表示 -12%）
+
+    返回
+    -------
+    bool : True 表示触发大跌，应空仓
+    """
+    if len(index_close) < max(5, lookback // 2):
+        return False
+    recent = index_close[-lookback:]
+    start = float(recent[0])
+    end = float(recent[-1])
+    if start <= 0:
+        return False
+    return (end / start - 1) <= threshold
+
+
 def position_sizing(cash: float, risk_pct: float = 0.02, atr: float = 0) -> float:
     """基于风险的仓位计算。
 

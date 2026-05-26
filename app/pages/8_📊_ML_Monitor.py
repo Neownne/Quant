@@ -252,6 +252,66 @@ with tab3:
                             fig_pie.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0))
                             st.plotly_chart(fig_pie, use_container_width=True)
 
+                        # 信号成交追踪：检查模拟盘是否已执行
+                        st.divider()
+                        st.subheader("📋 信号成交状态")
+                        paper_accounts = load_paper_accounts()
+                        if paper_accounts.empty:
+                            st.info("暂无模拟账户，无法追踪信号成交")
+                        else:
+                            engine = get_engine()
+                            try:
+                                signal_codes = display["code"].tolist()
+                                code_list_str = ",".join([f"'{c}'" for c in signal_codes])
+                                with engine.connect() as conn:
+                                    exec_orders = pd.read_sql_query(
+                                        text(
+                                            f"SELECT code, direction, volume, price, order_time, status, note "
+                                            f"FROM paper_orders "
+                                            f"WHERE code IN ({code_list_str}) "
+                                            f"AND DATE(order_time) = :dt "
+                                            f"ORDER BY order_time DESC"
+                                        ),
+                                        conn,
+                                        params={"dt": str(latest_date.date())},
+                                    )
+                                if exec_orders.empty:
+                                    st.info(f"信号日期 {latest_date.date()} 暂无模拟盘成交记录")
+                                else:
+                                    signal_set = set(signal_codes)
+                                    exec_codes = set(exec_orders["code"].tolist())
+                                    matched = signal_set & exec_codes
+                                    unmatched = signal_set - exec_codes
+
+                                    col_a, col_b, col_c = st.columns(3)
+                                    with col_a:
+                                        st.metric("Top-20 信号数", len(signal_codes))
+                                    with col_b:
+                                        st.metric("已成交", len(matched))
+                                    with col_c:
+                                        st.metric("未成交", len(unmatched))
+
+                                    if matched:
+                                        st.caption(f"已成交信号（{len(matched)} 只）")
+                                        matched_orders = exec_orders[
+                                            exec_orders["code"].isin(matched)
+                                        ].copy()
+                                        matched_orders["order_time"] = pd.to_datetime(
+                                            matched_orders["order_time"]
+                                        )
+                                        st.dataframe(
+                                            matched_orders[[
+                                                "code", "direction", "price",
+                                                "volume", "status", "note",
+                                            ]],
+                                            use_container_width=True,
+                                            hide_index=True,
+                                        )
+                                    if unmatched:
+                                        st.caption(f"未成交信号: {', '.join(sorted(unmatched))}")
+                            finally:
+                                engine.dispose()
+
             except Exception as e:
                 st.error(f"预测失败: {e}")
 
@@ -326,3 +386,35 @@ with tab4:
                 pos_display[["code", "volume", "avg_cost"]],
                 use_container_width=True, hide_index=True,
             )
+
+        # 最近交易
+        st.subheader("最近交易")
+        engine = get_engine()
+        try:
+            with engine.connect() as conn:
+                recent_orders = pd.read_sql_query(
+                    text(
+                        "SELECT code, direction, price, volume, amount, "
+                        "order_time, status, note "
+                        "FROM paper_orders WHERE account_id = :aid "
+                        "ORDER BY order_time DESC LIMIT 20"
+                    ),
+                    conn, params={"aid": acc_id},
+                )
+            if recent_orders.empty:
+                st.info("暂无交易记录")
+            else:
+                recent_orders["order_time"] = pd.to_datetime(recent_orders["order_time"])
+                recent_orders["日期"] = recent_orders["order_time"].dt.date
+                recent_orders["price"] = recent_orders["price"].apply(
+                    lambda x: f"{x:.2f}" if pd.notna(x) else "-"
+                )
+                recent_orders["amount"] = recent_orders["amount"].apply(
+                    lambda x: f"{x:,.0f}" if pd.notna(x) else "-"
+                )
+                st.dataframe(
+                    recent_orders[["日期", "code", "direction", "price", "volume", "amount", "status", "note"]],
+                    use_container_width=True, hide_index=True,
+                )
+        finally:
+            engine.dispose()
