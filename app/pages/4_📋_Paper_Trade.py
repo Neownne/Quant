@@ -6,6 +6,9 @@ import streamlit as st
 from sqlalchemy import text
 
 from data.db import get_engine, init_db
+from app.utils.backtest_runner import (
+    load_benchmark_indices, compute_benchmark_returns, BENCHMARK_INDICES,
+)
 
 st.set_page_config(page_title="模拟盘", page_icon="📋", layout="wide")
 st.title("📋 模拟盘交易")
@@ -382,15 +385,41 @@ with col4:
     st.metric("累计盈亏", f"{total_pnl:,.0f} 元",
               delta=f"{total_pnl / max(float(account['initial_capital']), 1) * 100:.2f}%")
 
+# ---- 加载基准指数 ----
+@st.cache_data(ttl=3600)
+def get_benchmarks_for_paper() -> tuple:
+    """缓存加载基准指数数据。"""
+    from datetime import date as dt_date
+    benchmarks = load_benchmark_indices("20200101", dt_date.today().strftime("%Y%m%d"))
+    bm_returns = compute_benchmark_returns(benchmarks, "20200101", dt_date.today().strftime("%Y%m%d"))
+    return benchmarks, bm_returns
+
+
 # ---- 多策略对比（所有账户归一化权益叠加） ----
 st.divider()
 st.subheader("📊 多策略对比")
 
 all_accounts = get_accounts()
+benchmarks, _ = get_benchmarks_for_paper()
+bm_colors = {"000001": "#ff9800", "000300": "#4caf50"}
+
 if len(all_accounts) > 1:
     import plotly.graph_objects as go
     fig_multi = go.Figure()
     colors = ["#2196f3", "#ff9800", "#4caf50", "#f44336", "#9c27b0", "#00bcd4"]
+
+    # 添加基准指数
+    for code, bm_df in benchmarks.items():
+        if code in ("000001", "000300") and len(bm_df) > 1:
+            bm_norm = bm_df["close"].values / bm_df["close"].iloc[0]
+            fig_multi.add_trace(go.Scatter(
+                x=bm_df["trade_date"], y=bm_norm,
+                mode="lines", name=BENCHMARK_INDICES.get(code, code),
+                line=dict(width=1, dash="dot",
+                         color=bm_colors.get(code, "gray")),
+                opacity=0.5,
+                legendgroup="benchmark",
+            ))
 
     for ai, (_, acct) in enumerate(all_accounts.iterrows()):
         aid = int(acct["id"])
@@ -414,7 +443,7 @@ if len(all_accounts) > 1:
     fig_multi.add_hline(y=1.0, line_dash="dash", line_color="gray",
                          annotation_text="基准线 (1.0)")
     fig_multi.update_layout(
-        height=350, template="plotly_white",
+        height=380, template="plotly_white",
         margin=dict(l=0, r=0, t=10, b=0),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -513,6 +542,14 @@ with ecol2:
     st.caption(f"**印花税**: {float(account.get('stamp_duty_rate', 0.0005))*10000:.1f}‱")
     st.caption(f"**滑点**: {float(account.get('slippage', 0.01)):.2f} 元/股")
     st.caption(f"**大盘过滤器**: {'开启' if account.get('use_market_filter', True) else '关闭'}")
+
+    st.divider()
+    st.caption("**基准指数累计收益** (2020至今)")
+    _, bm_returns = get_benchmarks_for_paper()
+    for code in ("000001", "399001", "000300", "000905", "000852", "399006"):
+        ret = bm_returns.get(code, 0)
+        if code in BENCHMARK_INDICES:
+            st.caption(f"{BENCHMARK_INDICES[code]}: {ret * 100:+.2f}%")
 
 # ---- 持仓明细 ----
 st.subheader("当前持仓")

@@ -178,6 +178,68 @@ def load_index_data(start: str = "20150101", end: str = "20300101") -> pd.DataFr
     return df
 
 
+# -- 基准指数定义 --
+BENCHMARK_INDICES: dict[str, str] = {
+    "000001": "上证指数",
+    "399001": "深证成指",
+    "000300": "沪深300",
+    "000905": "中证500",
+    "000852": "中证1000",
+    "399006": "创业板指",
+}
+
+
+def load_benchmark_indices(start: str, end: str) -> dict[str, pd.DataFrame]:
+    """批量加载基准指数日线数据。
+
+    Returns: {code: DataFrame(trade_date, close)}
+    """
+    from sqlalchemy import text
+    from data.db import get_engine
+    engine = get_engine()
+    codes = list(BENCHMARK_INDICES.keys())
+    placeholders = ",".join([f":c{i}" for i in range(len(codes))])
+    sql = f"""
+        SELECT code, trade_date, close
+        FROM index_daily
+        WHERE code IN ({placeholders})
+          AND trade_date BETWEEN :start AND :end
+        ORDER BY code, trade_date
+    """
+    params = {f"c{i}": c for i, c in enumerate(codes)}
+    params["start"] = start
+    params["end"] = end
+    with engine.connect() as conn:
+        df = pd.read_sql_query(text(sql), conn, params=params)
+    engine.dispose()
+    if df.empty:
+        return {}
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    return {code: group.drop(columns=["code"]) for code, group in df.groupby("code")}
+
+
+def compute_benchmark_returns(
+    benchmarks: dict[str, pd.DataFrame],
+    start_date: str,
+    end_date: str,
+) -> dict[str, float]:
+    """计算各基准指数在指定区间内的买入持有收益率。"""
+    result = {}
+    for code, df in benchmarks.items():
+        if df.empty or len(df) < 2:
+            result[code] = 0.0
+            continue
+        first = df[df["trade_date"] >= pd.Timestamp(start_date)]
+        last = df[df["trade_date"] <= pd.Timestamp(end_date)]
+        if first.empty or last.empty:
+            result[code] = 0.0
+            continue
+        start_close = float(first.iloc[0]["close"])
+        end_close = float(last.iloc[-1]["close"])
+        result[code] = (end_close / start_close - 1) if start_close > 0 else 0.0
+    return result
+
+
 def run_backtest(
     strategy_class: type,
     df: pd.DataFrame,

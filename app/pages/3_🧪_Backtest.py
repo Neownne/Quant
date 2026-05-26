@@ -7,7 +7,10 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
-from app.utils.backtest_runner import load_index_data, run_backtest
+from app.utils.backtest_runner import (
+    load_index_data, run_backtest, load_benchmark_indices,
+    compute_benchmark_returns, BENCHMARK_INDICES,
+)
 from app.utils.data_loader import get_stock_list, load_ohlcv
 from app.utils.stock_pools import list_pools, load_and_execute_pool, get_pool_data
 from app.utils.account_manager import promote_strategy_to_account
@@ -231,6 +234,11 @@ if use_market_filter:
     with st.spinner("加载上证指数数据 ..."):
         index_df = load_index_data(start_str, end_str)
 
+# 加载基准指数数据
+with st.spinner("加载基准指数数据 ..."):
+    benchmarks = load_benchmark_indices(start_str, end_str)
+    benchmark_returns = compute_benchmark_returns(benchmarks, start_str, end_str)
+
 # ---- 逐只回测 ----
 all_results: list[dict] = []
 progress = st.progress(0, text=f"0/{len(target_codes)}")
@@ -350,13 +358,41 @@ if len(target_codes) == 1 and strategy_type_filter == "静态策略":
         st.metric("胜率", f"{metrics.get('win_rate', 0) * 100:.1f}%")
     st.metric("最终权益", f"{metrics.get('final_value', 0):,.0f} 元")
 
+    # 基准收益
+    with st.expander("📊 基准指数同期收益", expanded=False):
+        bcols = st.columns(min(len(benchmark_returns), 6))
+        for i, (code, ret) in enumerate(benchmark_returns.items()):
+            if code in BENCHMARK_INDICES:
+                with bcols[i % len(bcols)]:
+                    st.metric(
+                        BENCHMARK_INDICES[code],
+                        f"{ret * 100:.2f}%",
+                        delta=f"vs 策略 {(metrics.get('total_return', 0) - ret) * 100:+.2f}%",
+                    )
+
     st.subheader("权益曲线")
     if not equity_curve.empty:
         import plotly.graph_objects as go
         fig = go.Figure()
+        # 叠加基准归一化曲线
+        eq_first = float(equity_curve["equity"].iloc[0]) if len(equity_curve) > 0 else initial_cash
+        for code, bm_df in benchmarks.items():
+            if code in ("000001", "000300"):  # 只显示上证和沪深300，避免太乱
+                bm_period = bm_df[(bm_df["trade_date"] >= equity_curve["date"].iloc[0]) &
+                                  (bm_df["trade_date"] <= equity_curve["date"].iloc[-1])]
+                if not bm_period.empty and len(bm_period) > 1:
+                    bm_norm = bm_period["close"] / bm_period["close"].iloc[0]
+                    fig.add_trace(go.Scatter(
+                        x=bm_period["trade_date"], y=bm_norm * initial_cash,
+                        mode="lines", name=BENCHMARK_INDICES.get(code, code),
+                        line=dict(width=1, dash="dot", color={
+                            "000001": "#ff9800", "000300": "#4caf50",
+                        }.get(code, "gray")),
+                        opacity=0.6,
+                    ))
         fig.add_trace(go.Scatter(
             x=equity_curve["date"], y=equity_curve["equity"],
-            mode="lines", name="权益",
+            mode="lines", name="策略权益",
             fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
             line=dict(color="#2196f3", width=2),
         ))
@@ -405,12 +441,22 @@ if len(target_codes) == 1 and strategy_type_filter == "静态策略":
         avg_sharpe=metrics.get("sharpe_ratio", 0),
         avg_drawdown=metrics.get("max_drawdown", 0),
         avg_win_rate=metrics.get("win_rate", 0),
-        results_json={"code": c, "name": metrics.get("_name", ""), "metrics": {k: v for k, v in metrics.items() if not k.startswith("_")}},
+        results_json={
+            "code": c, "name": metrics.get("_name", ""),
+            "metrics": {k: v for k, v in metrics.items() if not k.startswith("_")},
+            "equity_curve": {
+                "dates": [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                          for d in equity_curve["date"].tolist()],
+                "values": [float(v) for v in equity_curve["equity"].tolist()],
+            } if not equity_curve.empty else {},
+            "benchmark_returns": benchmark_returns,
+        },
     )
 
 elif len(target_codes) == 1:
     # ML single result display
     m = ml_single_result["metrics"]
+    eq = ml_single_result["equity_curve"]
 
     st.subheader("核心指标")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -426,13 +472,39 @@ elif len(target_codes) == 1:
         st.metric("胜率", f"{m.get('win_rate', 0) * 100:.1f}%")
     st.metric("最终权益", f"{m.get('final_value', 0):,.0f} 元")
 
-    eq = ml_single_result["equity_curve"]
+    # 基准收益
+    with st.expander("📊 基准指数同期收益", expanded=False):
+        bcols = st.columns(min(len(benchmark_returns), 6))
+        for i, (code, ret) in enumerate(benchmark_returns.items()):
+            if code in BENCHMARK_INDICES:
+                with bcols[i % len(bcols)]:
+                    st.metric(
+                        BENCHMARK_INDICES[code],
+                        f"{ret * 100:.2f}%",
+                        delta=f"vs 策略 {(m.get('total_return', 0) - ret) * 100:+.2f}%",
+                    )
+
     if not eq.empty:
         st.subheader("权益曲线")
         import plotly.graph_objects as go
         fig = go.Figure()
+        # 叠加基准归一化曲线
+        for code, bm_df in benchmarks.items():
+            if code in ("000001", "000300"):
+                bm_period = bm_df[(bm_df["trade_date"] >= eq["date"].iloc[0]) &
+                                  (bm_df["trade_date"] <= eq["date"].iloc[-1])]
+                if not bm_period.empty and len(bm_period) > 1:
+                    bm_norm = bm_period["close"] / bm_period["close"].iloc[0]
+                    fig.add_trace(go.Scatter(
+                        x=bm_period["trade_date"], y=bm_norm * initial_cash,
+                        mode="lines", name=BENCHMARK_INDICES.get(code, code),
+                        line=dict(width=1, dash="dot", color={
+                            "000001": "#ff9800", "000300": "#4caf50",
+                        }.get(code, "gray")),
+                        opacity=0.6,
+                    ))
         fig.add_trace(go.Scatter(
-            x=eq["date"], y=eq["equity"], mode="lines", name="权益",
+            x=eq["date"], y=eq["equity"], mode="lines", name="策略权益",
             fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
             line=dict(color="#2196f3", width=2),
         ))
@@ -462,7 +534,15 @@ elif len(target_codes) == 1:
         avg_sharpe=m.get("sharpe_ratio", 0),
         avg_drawdown=m.get("max_drawdown", 0),
         avg_win_rate=m.get("win_rate", 0),
-        results_json=ml_single_result.get("results_json", {}),
+        results_json={
+            **ml_single_result.get("results_json", {}),
+            "equity_curve": {
+                "dates": [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                          for d in eq["date"].tolist()],
+                "values": [float(v) for v in eq["equity"].tolist()],
+            } if not eq.empty else {},
+            "benchmark_returns": benchmark_returns,
+        },
     )
 
 # ---- 股票池模式：汇总统计 ----
@@ -489,6 +569,19 @@ else:
         st.metric("最佳收益", f"{results_df['total_return'].max() * 100:.2f}%")
     with col4:
         st.metric("最差收益", f"{results_df['total_return'].min() * 100:.2f}%")
+
+    # 基准收益
+    with st.expander("📊 基准指数同期收益", expanded=False):
+        bcols = st.columns(min(len(benchmark_returns), 6))
+        for i, (code, ret) in enumerate(benchmark_returns.items()):
+            if code in BENCHMARK_INDICES:
+                with bcols[i % len(bcols)]:
+                    avg_ret = float(results_df["total_return"].mean())
+                    st.metric(
+                        BENCHMARK_INDICES[code],
+                        f"{ret * 100:.2f}%",
+                        delta=f"vs 均值 {(avg_ret - ret) * 100:+.2f}%",
+                    )
 
     st.divider()
 
@@ -593,7 +686,10 @@ else:
             avg_sharpe=float(results_df["sharpe_ratio"].mean()),
             avg_drawdown=float(results_df["max_drawdown"].mean()),
             avg_win_rate=float(results_df["win_rate"].mean()),
-            results_json=results_df.to_dict(orient="records"),
+            results_json={
+                "pool_results": results_df.to_dict(orient="records"),
+                "benchmark_returns": benchmark_returns,
+            },
         )
     elif strategy_type_filter == "ML策略":
         save_backtest_result(
@@ -610,7 +706,16 @@ else:
             avg_sharpe=float(results_df["sharpe_ratio"].mean()),
             avg_drawdown=float(results_df["max_drawdown"].mean()),
             avg_win_rate=float(results_df["win_rate"].mean()),
-            results_json=ml_single_result.get("results_json", {}),
+            results_json={
+                **ml_single_result.get("results_json", {}),
+                "equity_curve": {
+                    "dates": [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                              for d in eq["date"].tolist()],
+                    "values": [float(v) for v in eq["equity"].tolist()],
+                } if not eq.empty else {},
+                "benchmark_returns": benchmark_returns,
+                "pool_results": results_df.to_dict(orient="records"),
+            },
         )
 
 
@@ -680,12 +785,25 @@ if not history_df.empty:
         selected_ids = [int(opt.split()[0][1:]) for opt in selected_for_compare]
         compare_rows = history_df[history_df["id"].isin(selected_ids)]
 
+        # -- 对比表格 --
         compare_data = []
         for _, row in compare_rows.iterrows():
+            rj = row.get("results_json")
+            if isinstance(rj, str):
+                try:
+                    rj = json.loads(rj)
+                except Exception:
+                    rj = {}
+            bm_returns = rj.get("benchmark_returns", {}) if isinstance(rj, dict) else {}
+            bm_000001 = bm_returns.get("000001", 0) if isinstance(bm_returns, dict) else 0
+            strat_ret = float(row["avg_return"])
+            excess = strat_ret - float(bm_000001) if bm_000001 else 0
             compare_data.append({
                 "策略名": row["strategy_name"],
                 "类型": row["strategy_type"],
-                "收益率%": f"{float(row['avg_return']) * 100:.2f}",
+                "收益率%": f"{strat_ret * 100:.2f}",
+                "上证同期%": f"{float(bm_000001) * 100:.2f}" if bm_000001 else "-",
+                "超额%": f"{excess * 100:+.2f}",
                 "夏普": f"{float(row['avg_sharpe']):.2f}",
                 "回撤%": f"{float(row['avg_drawdown']):.2f}",
                 "胜率%": f"{float(row['avg_win_rate']) * 100:.1f}",
@@ -693,3 +811,42 @@ if not history_df.empty:
                 "日期": f"{str(row['start_date'])[:10]}~{str(row['end_date'])[:10]}",
             })
         st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
+
+        # -- 叠加权益曲线 --
+        st.subheader("📈 归一化权益曲线对比")
+        import plotly.graph_objects as go
+        fig_compare = go.Figure()
+        colors = ["#2196f3", "#ff9800", "#4caf50", "#f44336", "#9c27b0"]
+
+        for ci, (_, row) in enumerate(compare_rows.iterrows()):
+            rj = row.get("results_json")
+            if isinstance(rj, str):
+                try:
+                    rj = json.loads(rj)
+                except Exception:
+                    rj = {}
+            eq_data = rj.get("equity_curve", {}) if isinstance(rj, dict) else {}
+            dates = eq_data.get("dates", [])
+            values = eq_data.get("values", [])
+            if dates and values and len(dates) > 1:
+                norm_values = [v / values[0] for v in values] if values[0] > 0 else values
+                color = colors[ci % len(colors)]
+                fig_compare.add_trace(go.Scatter(
+                    x=dates, y=norm_values, mode="lines",
+                    name=f"{row['strategy_name']} ({row['strategy_type']})",
+                    line=dict(color=color, width=1.8),
+                ))
+
+        fig_compare.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                             annotation_text="基准线 (1.0)")
+        fig_compare.update_layout(
+            height=400, template="plotly_white",
+            margin=dict(l=0, r=0, t=10, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis_title="归一化净值",
+        )
+        if len(fig_compare.data) > 1:  # has traces beyond the hline
+            st.plotly_chart(fig_compare, use_container_width=True)
+        else:
+            st.caption("所选记录暂无可展示的权益曲线数据")
