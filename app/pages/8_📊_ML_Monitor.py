@@ -31,7 +31,12 @@ def load_factor_ic_summary() -> pd.DataFrame | None:
         from models.dataset import build_factor_dataset
 
         engine = get_engine()
-        codes = pd.read_sql("SELECT code FROM stock_basic LIMIT 200", engine)
+        codes = pd.read_sql(
+            "SELECT code FROM stock_basic WHERE is_st = FALSE "
+            "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+            "ORDER BY code LIMIT 500",
+            engine,
+        )
         code_list = ",".join([f"'{c}'" for c in codes["code"].tolist()])
         ohlcv = pd.read_sql(
             f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
@@ -186,7 +191,12 @@ with tab3:
                 from models.trainer import walk_forward_train_ensemble
 
                 engine = get_engine()
-                codes = pd.read_sql("SELECT code FROM stock_basic LIMIT 200", engine)
+                codes = pd.read_sql(
+                    "SELECT code FROM stock_basic WHERE is_st = FALSE "
+                    "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+                    "ORDER BY code LIMIT 500",
+                    engine,
+                )
                 code_list = ",".join([f"'{c}'" for c in codes["code"].tolist()])
 
                 ohlcv = pd.read_sql(
@@ -226,7 +236,11 @@ with tab3:
                         scores = ensemble.predict(today_factors)
                         top20 = scores.head(20)
 
-                        st.success(f"评估日期: {latest_date.date()}，基于 {len(selected)} 个因子")
+                        st.success(
+                            f"候选池: {len(codes)} 只（已排除ST/次新股） | "
+                            f"评估日期: {latest_date.date()} | "
+                            f"因子: {len(selected)} 个"
+                        )
 
                         # 合并名称
                         basic_df = pd.read_sql(

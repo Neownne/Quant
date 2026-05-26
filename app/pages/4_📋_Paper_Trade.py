@@ -62,6 +62,145 @@ with st.sidebar:
             st.success(f"账户「{acc_name}」创建成功")
             st.rerun()
 
+    st.divider()
+    st.subheader("运行模拟盘引擎")
+
+    if st.button("🚀 运行当日模拟盘", use_container_width=True,
+                 help="基于ML模型对最新交易日进行选股和交易"):
+        with st.spinner("正在加载数据并训练模型（约3-5分钟）..."):
+            try:
+                import sys, os
+                _PROJECT_ROOT = os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                )
+                if _PROJECT_ROOT not in sys.path:
+                    sys.path.insert(0, _PROJECT_ROOT)
+
+                from factors import ALL_FACTORS
+                from models.dataset import build_factor_dataset
+                from models.trainer import walk_forward_train_ensemble
+                from factors.screening import filter_factors_by_ic, select_orthogonal_factors
+                from portfolio.paper_engine import PaperEngine
+
+                engine = get_engine()
+
+                # 加载候选池（排除ST/次新）
+                codes = pd.read_sql(
+                    "SELECT code FROM stock_basic WHERE is_st = FALSE "
+                    "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+                    "ORDER BY code LIMIT 500",
+                    engine,
+                )
+                if codes.empty:
+                    st.error("候选池为空，请先同步股票基本信息")
+                    st.stop()
+
+                code_list = ",".join([f"'{c}'" for c in codes["code"].tolist()])
+
+                # 加载行情数据
+                ohlcv = pd.read_sql(
+                    f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
+                    f"FROM stock_daily WHERE code IN ({code_list}) "
+                    f"AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
+                    f"ORDER BY code, trade_date",
+                    engine,
+                )
+
+                # 加载指数数据
+                index_ohlcv = pd.read_sql(
+                    "SELECT trade_date, close FROM index_daily "
+                    "WHERE code = '000001' "
+                    "AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
+                    "ORDER BY trade_date",
+                    engine,
+                )
+                engine.dispose()
+
+                if ohlcv.empty:
+                    st.error("无行情数据，请先同步股票日线")
+                    st.stop()
+
+                # 构造因子
+                factor_names = list(ALL_FACTORS.keys())
+                dataset = build_factor_dataset(ohlcv, factor_names, label_mode="binary")
+
+                # 因子筛选
+                pv_names = [f for f in factor_names if not f.startswith("fin_")]
+                filtered = filter_factors_by_ic(dataset, pv_names, ret_col="ret_1d")
+                selected = select_orthogonal_factors(dataset, filtered, threshold=0.7)
+
+                # Walk-forward 训练
+                results = walk_forward_train_ensemble(
+                    dataset, selected, train_years=3, val_years=1,
+                )
+
+                if not results:
+                    st.error("训练失败，无有效Walk-forward窗口")
+                    st.stop()
+
+                latest_result = results[-1]
+                predictor = latest_result["ensemble"]
+
+                # 创建PaperEngine
+                paper = PaperEngine(
+                    account_id=account_id,
+                    predictor=predictor,
+                    factor_names=selected,
+                    top_n=15,
+                    rebalance_mode="ndrop",
+                    ndrop_n=2,
+                )
+
+                # 获取最新交易日因子数据
+                latest_date = dataset["trade_date"].max()
+                today_factors = dataset[dataset["trade_date"] == latest_date]
+
+                # 构建行业映射
+                industry_map = {}
+                engine = get_engine()
+                try:
+                    ind_df = pd.read_sql(
+                        "SELECT code, industry_sw1 FROM stock_industry", engine,
+                    )
+                    industry_map = dict(zip(ind_df["code"], ind_df["industry_sw1"]))
+                except Exception:
+                    pass
+                finally:
+                    engine.dispose()
+
+                # 执行当日模拟盘
+                res = paper.run_daily(
+                    trade_date=latest_date,
+                    factor_df=today_factors,
+                    ohlcv_data=ohlcv,
+                    industry_map=industry_map,
+                    index_ohlcv=index_ohlcv if not index_ohlcv.empty else None,
+                )
+
+                if res is None:
+                    st.error("模拟盘执行失败")
+                else:
+                    # 清除缓存使新数据显示
+                    get_positions.clear()
+                    get_orders.clear()
+                    st.success(
+                        f"模拟盘执行完成！日期: {latest_date.date()} | "
+                        f"选股: {res['n_selected']}只 | "
+                        f"买单: {res['n_buy_orders']}笔 | "
+                        f"卖单: {res['n_sell_orders']}笔 | "
+                        f"总资产: {res['total_value']:,.0f}元"
+                    )
+                    if res.get("crash_warning"):
+                        st.warning("⚠️ 指数崩盘触发，已清仓")
+                    if res.get("stop_losses"):
+                        st.warning(f"⚠️ 止损触发: {res['stop_losses']}")
+                    st.rerun()
+
+            except Exception as e:
+                st.error(f"模拟盘执行失败: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
 # ---- 主区域 ----
 accounts = get_accounts()
 

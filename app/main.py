@@ -17,7 +17,7 @@ st.set_page_config(page_title="Quant 量化交易系统", page_icon="📊", layo
 # ---- 每日同步线程 ----
 def _run_sync():
     """在子进程中运行股票日线同步（ETF/基金同步暂时禁用）"""
-    for mode in ["stock-daily"]:  # etf-daily, fund-nav disabled for now
+    for mode in ["index", "stock-daily", "daily-extra"]:
         subprocess.run(
             [sys.executable, "-m", "data.sync", "--mode", mode],
             cwd=_PROJECT_ROOT,

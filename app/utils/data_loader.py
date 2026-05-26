@@ -46,7 +46,7 @@ def get_stock_list() -> pd.DataFrame:
     engine = get_engine()
     with engine.connect() as conn:
         df = pd.read_sql_query(
-            text("SELECT code, name FROM stock_basic ORDER BY code"), conn
+            text("SELECT code, name FROM stock_basic WHERE is_st = FALSE ORDER BY code"), conn
         )
     engine.dispose()
     df["type"] = "stock"

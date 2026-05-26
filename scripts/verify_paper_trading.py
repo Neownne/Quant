@@ -43,7 +43,12 @@ def main():
     engine = get_engine()
     codes = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
     if codes is None:
-        codes = pd.read_sql("SELECT code FROM stock_basic LIMIT 100", engine)["code"].tolist()
+        codes = pd.read_sql(
+            "SELECT code FROM stock_basic WHERE is_st = FALSE "
+            "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+            "ORDER BY code LIMIT 100",
+            engine,
+        )["code"].tolist()
     code_list = ",".join([f"'{c}'" for c in codes])
 
     ohlcv = pd.read_sql(
