@@ -338,7 +338,7 @@ def run_backtest(
     raw_signals = strat.analyzers.signalrecorder.get_analysis() or []
     metrics["total_trades"] = len(raw_trades)
     if raw_trades:
-        won = sum(1 for t in raw_trades if t["pnl"] > 0)
+        won = sum(1 for t in raw_trades if t.get("盈亏(元)", 0) > 0)
         metrics["won_trades"] = won
         metrics["lost_trades"] = len(raw_trades) - won
         metrics["win_rate"] = won / len(raw_trades)

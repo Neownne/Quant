@@ -25,6 +25,25 @@ init_db()
 
 # ── 回测结果保存 ─────────────────────────────────────────
 
+def _safe_json(obj):
+    """JSON-safe serialize, stripping non-serializable values."""
+    def _convert(o):
+        if isinstance(o, (str, int, float, bool, type(None))):
+            return o
+        if isinstance(o, (datetime, pd.Timestamp)):
+            return str(o)
+        if isinstance(o, dict):
+            return {k: _convert(v) for k, v in o.items()
+                    if not k.startswith("created") and not k.startswith("updated")}
+        if isinstance(o, (list, tuple)):
+            return [_convert(v) for v in o]
+        try:
+            return str(o)
+        except Exception:
+            return None
+    return json.dumps(_convert(obj))
+
+
 def save_backtest_result(account_id, strategy_type, strategy_name, strategy_params,
                          asset_mode, pool_name, start_date, end_date,
                          n_stocks, avg_return, avg_sharpe, avg_drawdown, avg_win_rate,
@@ -44,7 +63,7 @@ def save_backtest_result(account_id, strategy_type, strategy_name, strategy_para
                 "aid": account_id,
                 "stype": strategy_type,
                 "sname": strategy_name,
-                "sparams": json.dumps(strategy_params),
+                "sparams": _safe_json(strategy_params),
                 "amode": asset_mode,
                 "pname": pool_name or "",
                 "sdate": start_date,
@@ -54,7 +73,7 @@ def save_backtest_result(account_id, strategy_type, strategy_name, strategy_para
                 "asharpe": avg_sharpe,
                 "add": avg_drawdown,
                 "awin": avg_win_rate,
-                "rjson": json.dumps(results_json),
+                "rjson": _safe_json(results_json),
             })
     finally:
         engine.dispose()

@@ -277,7 +277,7 @@ ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS use_market_filter BOOLEAN DEF
 DDL_BACKTEST_RESULTS = """
 CREATE TABLE IF NOT EXISTS backtest_results (
     id              SERIAL PRIMARY KEY,
-    account_id      INTEGER REFERENCES paper_account(id),
+    account_id      INTEGER,
     strategy_type   VARCHAR(20),
     strategy_name   VARCHAR(100),
     strategy_params JSONB,
@@ -372,6 +372,13 @@ def init_db() -> None:
         try:
             conn.execute(text(
                 "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS note VARCHAR(100)"
+            ))
+        except Exception:
+            pass
+        # migration: drop FK constraint on backtest_results (account_id)
+        try:
+            conn.execute(text(
+                "ALTER TABLE backtest_results DROP CONSTRAINT IF EXISTS backtest_results_account_id_fkey"
             ))
         except Exception:
             pass

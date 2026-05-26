@@ -148,15 +148,11 @@ def run_ml_backtest(
             if day_factors.empty:
                 continue
 
-            X = day_factors[selected].fillna(day_factors[selected].mean())
             try:
-                prob = ensemble.predict_proba(X)[:, 1]
+                pred_df = ensemble.predict(day_factors[["code"] + selected])
+                scores = pred_df[["code", "score", "rank"]].copy()
             except Exception:
                 continue
-
-            scores = day_factors[["code"]].copy()
-            scores["score"] = prob
-            scores = scores.sort_values("score", ascending=False)
 
             # 选股
             if rebalance_mode == "ndrop" and current_holdings:
