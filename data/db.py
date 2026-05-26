@@ -262,6 +262,39 @@ CREATE TABLE IF NOT EXISTS paper_daily_pnl (
 );
 """
 
+# DDL —— 模拟账户扩展（策略+费率配置）
+DDL_PAPER_ACCOUNT_V2 = """
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS strategy_type VARCHAR(20) DEFAULT 'ml';
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(100);
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS strategy_params JSONB DEFAULT '{}';
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS commission_rate DOUBLE PRECISION DEFAULT 0.00009;
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS stamp_duty_rate DOUBLE PRECISION DEFAULT 0.0005;
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS slippage DOUBLE PRECISION DEFAULT 0.01;
+ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS use_market_filter BOOLEAN DEFAULT TRUE;
+"""
+
+# DDL —— 回测结果持久化
+DDL_BACKTEST_RESULTS = """
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id              SERIAL PRIMARY KEY,
+    account_id      INTEGER REFERENCES paper_account(id),
+    strategy_type   VARCHAR(20),
+    strategy_name   VARCHAR(100),
+    strategy_params JSONB,
+    asset_mode      VARCHAR(20),
+    pool_name       VARCHAR(100),
+    start_date      DATE,
+    end_date        DATE,
+    n_stocks        INTEGER,
+    avg_return      DOUBLE PRECISION,
+    avg_sharpe      DOUBLE PRECISION,
+    avg_drawdown    DOUBLE PRECISION,
+    avg_win_rate    DOUBLE PRECISION,
+    results_json    JSONB,
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+"""
+
 
 def get_engine() -> Engine:
     """创建数据库引擎（每次调用返回同一个连接池）。"""
@@ -300,14 +333,16 @@ def init_db() -> None:
         conn.execute(text(DDL_PAPER_ORDERS))
         conn.execute(text(DDL_PAPER_POSITIONS))
         conn.execute(text(DDL_PAPER_DAILY_PNL))
+        conn.execute(text(DDL_PAPER_ACCOUNT_V2))
+        conn.execute(text(DDL_BACKTEST_RESULTS))
         # migration: add note column for trade reason tracking
         try:
             conn.execute(text(
-                "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS note VARCHAR(30)"
+                "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS note VARCHAR(100)"
             ))
         except Exception:
             pass
-    logger.info("数据库表初始化完成（14张表）")
+    logger.info("数据库表初始化完成（15张表）")
     engine.dispose()
 
 

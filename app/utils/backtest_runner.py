@@ -135,6 +135,29 @@ class TradeRecorder(bt.Analyzer):
         return self.trades
 
 
+class SignalRecorder(bt.Analyzer):
+    """记录每笔买卖信号（含日期、方向、价格、数量），用于模拟盘回放。"""
+
+    def __init__(self):
+        self.signals: list[dict] = []
+
+    def notify_order(self, order):
+        if order.status not in [order.Completed]:
+            return
+        dt = _mpl_to_datetime(order.executed.dt) if hasattr(order.executed, 'dt') else None
+        if dt is None:
+            dt = order.executed.dt
+        self.signals.append({
+            "date": dt,
+            "direction": "BUY" if order.isbuy() else "SELL",
+            "price": round(order.executed.price, 2),
+            "size": int(abs(order.executed.size)),
+        })
+
+    def get_analysis(self):
+        return self.signals
+
+
 def load_index_data(start: str = "20150101", end: str = "20300101") -> pd.DataFrame:
     """加载上证指数（000001）日线数据，用于大盘过滤器。"""
     from sqlalchemy import text
@@ -215,6 +238,7 @@ def run_backtest(
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
     cerebro.addanalyzer(TradeRecorder, _name="traderecorder")
+    cerebro.addanalyzer(SignalRecorder, _name="signalrecorder")
 
     if batch_mode:
         # 批量模式：跳过 TradeAnalyzer（重）、TimeReturn（重）、CSV 写入
@@ -247,8 +271,9 @@ def run_backtest(
     else:
         metrics["annual_return"] = 0
 
-    # 从 TradeRecorder 计算胜率（避免依赖 TradeAnalyzer 的慢速统计）
+    # 从 TradeRecorder 计算胜率
     raw_trades = strat.analyzers.traderecorder.get_analysis() or []
+    raw_signals = strat.analyzers.signalrecorder.get_analysis() or []
     metrics["total_trades"] = len(raw_trades)
     if raw_trades:
         won = sum(1 for t in raw_trades if t["pnl"] > 0)
@@ -267,6 +292,7 @@ def run_backtest(
             "metrics": metrics,
             "equity_curve": pd.DataFrame(),
             "trades": pd.DataFrame(raw_trades),
+            "signals": raw_signals,
         }
 
     # ---- 权益曲线 ----
@@ -285,4 +311,5 @@ def run_backtest(
         "metrics": metrics,
         "equity_curve": equity_curve,
         "trades": trades_df,
+        "signals": raw_signals,
     }

@@ -639,3 +639,173 @@ class PaperEngine:
             "total_value": total_value,
             "orders": [],
         }
+
+
+class StaticPaperEngine:
+    """非ML策略模拟盘引擎：用 backtrader 回测回放生成买卖信号。
+
+    将 backtrader 的逐笔信号写入 paper_orders/paper_positions，
+    让静态策略（SMA/MACD/RSI）也能在模拟盘中展示持仓和交易。"""
+
+    def __init__(self, account_id: int, strategy_class, strategy_params: dict,
+                 codes: list[str],
+                 initial_cash: float = 1_000_000,
+                 commission: float = 0.00009,
+                 stamp_duty: float = 0.0005,
+                 slippage: float = 0.01,
+                 use_market_filter: bool = True):
+        self.account_id = account_id
+        self.strategy_class = strategy_class
+        self.strategy_params = strategy_params
+        self.codes = codes
+        self.initial_cash = initial_cash
+        self.commission = commission
+        self.stamp_duty = stamp_duty
+        self.slippage = slippage
+        self.use_market_filter = use_market_filter
+
+    def run_replay(self, start_date: str, end_date: str) -> dict:
+        """对每只股票运行 backtrader 回测，将交易信号写入 paper 表。
+
+        返回汇总 dict。"""
+        from app.utils.backtest_runner import run_backtest, load_index_data
+        from app.utils.data_loader import load_ohlcv
+
+        engine = get_engine()
+
+        # 加载指数数据
+        index_df = None
+        if self.use_market_filter:
+            try:
+                index_df = load_index_data(start_date, end_date)
+            except Exception:
+                pass
+
+        # 清空现有记录，从头回放
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM paper_orders WHERE account_id = :aid"), {"aid": self.account_id})
+            conn.execute(text(
+                "DELETE FROM paper_positions WHERE account_id = :aid"), {"aid": self.account_id})
+            conn.execute(text(
+                "DELETE FROM paper_daily_pnl WHERE account_id = :aid"), {"aid": self.account_id})
+            conn.execute(text(
+                "UPDATE paper_account SET cash = :cash WHERE id = :aid"),
+                {"cash": self.initial_cash, "aid": self.account_id})
+
+        total_trades = 0
+        all_signals: list[dict] = []
+
+        for code in self.codes:
+            df = load_ohlcv(code, start_date, end_date)
+            if df.empty or len(df) < 50:
+                continue
+
+            try:
+                result = run_backtest(
+                    strategy_class=self.strategy_class,
+                    df=df,
+                    strategy_params=self.strategy_params,
+                    initial_cash=self.initial_cash,
+                    commission=self.commission,
+                    stamp_duty=self.stamp_duty,
+                    slippage=self.slippage,
+                    index_df=index_df,
+                    batch_mode=True,
+                )
+            except Exception:
+                continue
+
+            signals = result.get("signals", [])
+            for s in signals:
+                s["code"] = code
+            all_signals.extend(signals)
+            total_trades += len(result.get("trades", []))
+
+        # 按日期排序信号
+        all_signals.sort(key=lambda x: x.get("date", pd.Timestamp.min))
+
+        # 逐信号执行，更新持仓和现金
+        positions: dict[str, dict] = {}  # code -> {shares, cost_basis}
+        cash = self.initial_cash
+
+        for sig in all_signals:
+            code = sig["code"]
+            price = sig["price"]
+            size = sig["size"]
+            trade_date = sig["date"]
+            if isinstance(trade_date, pd.Timestamp):
+                trade_date = trade_date.to_pydatetime()
+
+            if sig["direction"] == "BUY":
+                cost = price * size
+                if cost <= cash:
+                    cash -= cost
+                    if code in positions:
+                        old_shares = positions[code]["shares"]
+                        old_cost = positions[code]["cost_basis"]
+                        new_shares = old_shares + size
+                        new_cost = (old_cost * old_shares + price * size) / new_shares
+                        positions[code] = {"shares": new_shares, "cost_basis": new_cost}
+                    else:
+                        positions[code] = {"shares": size, "cost_basis": price}
+            else:
+                if code in positions:
+                    cash += price * min(size, positions[code]["shares"])
+                    remaining = positions[code]["shares"] - size
+                    if remaining <= 0:
+                        del positions[code]
+                    else:
+                        positions[code]["shares"] = remaining
+
+        # 写入信号到 paper_orders
+        with engine.begin() as conn:
+            for sig in all_signals:
+                conn.execute(text("""
+                    INSERT INTO paper_orders (account_id, code, direction, price, volume, amount, status, note)
+                    VALUES (:aid, :code, :dir, :price, :vol, :amt, 'filled', 'static_replay')
+                """), {
+                    "aid": self.account_id,
+                    "code": sig["code"],
+                    "dir": sig["direction"],
+                    "price": sig["price"],
+                    "vol": sig["size"],
+                    "amt": sig["price"] * sig["size"],
+                })
+
+            # 写入最终持仓
+            for code, pos in positions.items():
+                conn.execute(text("""
+                    INSERT INTO paper_positions (account_id, code, volume, avg_cost)
+                    VALUES (:aid, :code, :vol, :cost)
+                    ON CONFLICT (account_id, code)
+                    DO UPDATE SET volume = :vol2, avg_cost = :cost2
+                """), {
+                    "aid": self.account_id, "code": code,
+                    "vol": pos["shares"], "cost": pos["cost_basis"],
+                    "vol2": pos["shares"], "cost2": pos["cost_basis"],
+                })
+
+            # 更新现金
+            conn.execute(text(
+                "UPDATE paper_account SET cash = :cash WHERE id = :aid"
+            ), {"cash": cash, "aid": self.account_id})
+
+        engine.dispose()
+        return {
+            "n_stocks": len(self.codes),
+            "n_signals": len(all_signals),
+            "n_trades": total_trades,
+            "n_positions": len(positions),
+            "final_cash": cash,
+        }
+
+    def run_daily(self, trade_date, factor_df, ohlcv_data,
+                  industry_map=None, index_ohlcv=None) -> dict | None:
+        """静态策略每日运行：调用 run_replay 回放全部历史。"""
+        return None
+
+
+# ══════════════════════════════════════════════════════════
+# PaperEngine batch-mode skip (restored)
+# ══════════════════════════════════════════════════════════

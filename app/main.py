@@ -16,8 +16,8 @@ st.set_page_config(page_title="Quant 量化交易系统", page_icon="📊", layo
 
 # ---- 每日同步线程 ----
 def _run_sync():
-    """在子进程中运行股票日线同步（ETF/基金同步暂时禁用）"""
-    for mode in ["index", "stock-daily", "daily-extra"]:
+    """在子进程中运行全量增量同步"""
+    for mode in ["index", "stock-daily", "daily-extra", "shareholder", "financial"]:
         subprocess.run(
             [sys.executable, "-m", "data.sync", "--mode", mode],
             cwd=_PROJECT_ROOT,
@@ -46,6 +46,7 @@ pages = [
     st.Page("pages/6_📦_Stock_Pools.py", title="股票池", icon="📦"),
     st.Page("pages/7_🔴_Recorder.py", title="数据录制", icon="🔴"),
     st.Page("pages/8_📊_ML_Monitor.py", title="ML策略监控", icon="📊"),
+    st.Page("pages/9_📡_Data_Monitor.py", title="数据监控", icon="📡"),
 ]
 
 pg = st.navigation(pages)

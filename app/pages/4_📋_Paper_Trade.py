@@ -1,3 +1,6 @@
+import json
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
@@ -25,6 +28,18 @@ def get_positions(account_id: int) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql_query(
             text("SELECT * FROM paper_positions WHERE account_id = :aid"),
+            conn, params={"aid": account_id},
+        )
+    engine.dispose()
+    return df
+
+
+@st.cache_data(ttl=5)
+def get_paper_daily_pnl(account_id: int) -> pd.DataFrame:
+    engine = get_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql_query(
+            text("SELECT * FROM paper_daily_pnl WHERE account_id = :aid ORDER BY trade_date"),
             conn, params={"aid": account_id},
         )
     engine.dispose()
@@ -65,141 +80,215 @@ with st.sidebar:
     st.divider()
     st.subheader("运行模拟盘引擎")
 
-    if st.button("🚀 运行当日模拟盘", use_container_width=True,
-                 help="基于ML模型对最新交易日进行选股和交易"):
-        with st.spinner("正在加载数据并训练模型（约3-5分钟）..."):
-            try:
-                import sys, os
-                _PROJECT_ROOT = os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                )
-                if _PROJECT_ROOT not in sys.path:
-                    sys.path.insert(0, _PROJECT_ROOT)
+    # 账户选择
+    accts = get_accounts()
+    if not accts.empty:
+        acc_labels_all = [f"#{r['id']} {r['name']}" for _, r in accts.iterrows()]
+        acc_idx = st.selectbox("选择账户", range(len(acc_labels_all)),
+                               format_func=lambda i: acc_labels_all[i],
+                               key="paper_run_account_idx")
+        sel_account = accts.iloc[acc_idx]
+        run_account_id = int(sel_account["id"])
+        run_strategy_type = sel_account.get("strategy_type", "ml") or "ml"
+        run_strategy_name = sel_account.get("strategy_name", "") or ""
 
-                from factors import ALL_FACTORS
-                from models.dataset import build_factor_dataset
-                from models.trainer import walk_forward_train_ensemble
-                from factors.screening import filter_factors_by_ic, select_orthogonal_factors
-                from portfolio.paper_engine import PaperEngine
+        if run_strategy_type == "static":
+            st.caption(f"策略: {run_strategy_name} (静态)")
+        else:
+            st.caption("策略: ML 集成 (XGBoost+LightGBM)")
 
-                engine = get_engine()
+        if st.button("🚀 运行模拟盘", use_container_width=True,
+                     help="基于选中账户的策略类型运行模拟盘"):
 
-                # 加载候选池（排除ST/次新）
-                codes = pd.read_sql(
-                    "SELECT code FROM stock_basic WHERE is_st = FALSE "
-                    "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
-                    "ORDER BY code LIMIT 500",
-                    engine,
-                )
-                if codes.empty:
-                    st.error("候选池为空，请先同步股票基本信息")
-                    st.stop()
+            if run_strategy_type == "static":
+                # ── 静态策略回放 ──
+                with st.spinner(f"正在加载数据并回放 {run_strategy_name} 策略..."):
+                    try:
+                        import sys as _sys, os as _os
+                        _PROJECT_ROOT = _os.path.dirname(
+                            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                        )
+                        if _PROJECT_ROOT not in _sys.path:
+                            _sys.path.insert(0, _PROJECT_ROOT)
 
-                code_list = ",".join([f"'{c}'" for c in codes["code"].tolist()])
+                        from strategies import get_all_strategies
+                        from portfolio.paper_engine import StaticPaperEngine
+                        from app.utils.account_manager import get_account
+                        import json as _json
 
-                # 加载行情数据
-                ohlcv = pd.read_sql(
-                    f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
-                    f"FROM stock_daily WHERE code IN ({code_list}) "
-                    f"AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
-                    f"ORDER BY code, trade_date",
-                    engine,
-                )
+                        acc_info = get_account(run_account_id)
+                        if not acc_info:
+                            st.error("账户不存在")
+                            st.stop()
 
-                # 加载指数数据
-                index_ohlcv = pd.read_sql(
-                    "SELECT trade_date, close FROM index_daily "
-                    "WHERE code = '000001' "
-                    "AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
-                    "ORDER BY trade_date",
-                    engine,
-                )
-                engine.dispose()
+                        sp = acc_info.get("strategy_params", {})
+                        if isinstance(sp, str):
+                            sp = _json.loads(sp)
 
-                if ohlcv.empty:
-                    st.error("无行情数据，请先同步股票日线")
-                    st.stop()
+                        all_s = get_all_strategies()
+                        strat_cls = None
+                        for name, cls in all_s.items():
+                            if cls.__name__ == run_strategy_name:
+                                strat_cls = cls
+                                break
 
-                # 构造因子
-                factor_names = list(ALL_FACTORS.keys())
-                dataset = build_factor_dataset(ohlcv, factor_names, label_mode="binary")
+                        if strat_cls is None:
+                            st.error(f"未找到策略类: {run_strategy_name}")
+                            st.stop()
 
-                # 因子筛选
-                pv_names = [f for f in factor_names if not f.startswith("fin_")]
-                filtered = filter_factors_by_ic(dataset, pv_names, ret_col="ret_1d")
-                selected = select_orthogonal_factors(dataset, filtered, threshold=0.7)
+                        engine = get_engine()
+                        codes = pd.read_sql(
+                            "SELECT code FROM stock_basic WHERE is_st = FALSE "
+                            "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+                            "ORDER BY code LIMIT 50",
+                            engine,
+                        )["code"].tolist()
+                        engine.dispose()
 
-                # Walk-forward 训练
-                results = walk_forward_train_ensemble(
-                    dataset, selected, train_years=3, val_years=1,
-                )
+                        static_engine = StaticPaperEngine(
+                            account_id=run_account_id,
+                            strategy_class=strat_cls,
+                            strategy_params=sp,
+                            codes=codes,
+                            initial_capital=float(acc_info["initial_capital"]),
+                            commission=float(acc_info.get("commission_rate", 0.00009)),
+                            stamp_duty=float(acc_info.get("stamp_duty_rate", 0.0005)),
+                            slippage=float(acc_info.get("slippage", 0.01)),
+                            use_market_filter=bool(acc_info.get("use_market_filter", True)),
+                        )
+                        res = static_engine.run_replay("20180101", date.today().strftime("%Y%m%d"))
+                        get_positions.clear()
+                        get_orders.clear()
+                        st.success(
+                            f"静态策略回放完成！股票: {res['n_stocks']}只 | "
+                            f"信号: {res['n_signals']}条 | "
+                            f"持仓: {res['n_positions']}只 | "
+                            f"现金: ¥{res['final_cash']:,.0f}"
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"静态策略回放失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
-                if not results:
-                    st.error("训练失败，无有效Walk-forward窗口")
-                    st.stop()
+            else:
+                # ── ML 策略 ──
+                with st.spinner("正在加载数据并训练模型（约3-5分钟）..."):
+                    try:
+                        import sys as _sys, os as _os
+                        _PROJECT_ROOT = _os.path.dirname(
+                            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                        )
+                        if _PROJECT_ROOT not in _sys.path:
+                            _sys.path.insert(0, _PROJECT_ROOT)
 
-                latest_result = results[-1]
-                predictor = latest_result["ensemble"]
+                        from factors import ALL_FACTORS
+                        from models.dataset import build_factor_dataset
+                        from models.trainer import walk_forward_train_ensemble
+                        from factors.screening import filter_factors_by_ic, select_orthogonal_factors
+                        from portfolio.paper_engine import PaperEngine
 
-                # 创建PaperEngine
-                paper = PaperEngine(
-                    account_id=account_id,
-                    predictor=predictor,
-                    factor_names=selected,
-                    top_n=15,
-                    rebalance_mode="ndrop",
-                    ndrop_n=2,
-                )
+                        engine = get_engine()
 
-                # 获取最新交易日因子数据
-                latest_date = dataset["trade_date"].max()
-                today_factors = dataset[dataset["trade_date"] == latest_date]
+                        codes = pd.read_sql(
+                            "SELECT code FROM stock_basic WHERE is_st = FALSE "
+                            "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
+                            "ORDER BY code LIMIT 500",
+                            engine,
+                        )
+                        if codes.empty:
+                            st.error("候选池为空，请先同步股票基本信息")
+                            st.stop()
 
-                # 构建行业映射
-                industry_map = {}
-                engine = get_engine()
-                try:
-                    ind_df = pd.read_sql(
-                        "SELECT code, industry_sw1 FROM stock_industry", engine,
-                    )
-                    industry_map = dict(zip(ind_df["code"], ind_df["industry_sw1"]))
-                except Exception:
-                    pass
-                finally:
-                    engine.dispose()
+                        code_list = ",".join([f"'{c}'" for c in codes["code"].tolist()])
+                        ohlcv = pd.read_sql(
+                            f"SELECT code, trade_date, open, high, low, close, volume, amount, turnover "
+                            f"FROM stock_daily WHERE code IN ({code_list}) "
+                            f"AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
+                            f"ORDER BY code, trade_date",
+                            engine,
+                        )
+                        index_ohlcv = pd.read_sql(
+                            "SELECT trade_date, close FROM index_daily "
+                            "WHERE code = '000001' "
+                            "AND trade_date >= CURRENT_DATE - INTERVAL '5 years' "
+                            "ORDER BY trade_date",
+                            engine,
+                        )
+                        engine.dispose()
 
-                # 执行当日模拟盘
-                res = paper.run_daily(
-                    trade_date=latest_date,
-                    factor_df=today_factors,
-                    ohlcv_data=ohlcv,
-                    industry_map=industry_map,
-                    index_ohlcv=index_ohlcv if not index_ohlcv.empty else None,
-                )
+                        if ohlcv.empty:
+                            st.error("无行情数据，请先同步股票日线")
+                            st.stop()
 
-                if res is None:
-                    st.error("模拟盘执行失败")
-                else:
-                    # 清除缓存使新数据显示
-                    get_positions.clear()
-                    get_orders.clear()
-                    st.success(
-                        f"模拟盘执行完成！日期: {latest_date.date()} | "
-                        f"选股: {res['n_selected']}只 | "
-                        f"买单: {res['n_buy_orders']}笔 | "
-                        f"卖单: {res['n_sell_orders']}笔 | "
-                        f"总资产: {res['total_value']:,.0f}元"
-                    )
-                    if res.get("crash_warning"):
-                        st.warning("⚠️ 指数崩盘触发，已清仓")
-                    if res.get("stop_losses"):
-                        st.warning(f"⚠️ 止损触发: {res['stop_losses']}")
-                    st.rerun()
+                        factor_names = list(ALL_FACTORS.keys())
+                        dataset = build_factor_dataset(ohlcv, factor_names, label_mode="binary")
+                        pv_names = [f for f in factor_names if not f.startswith("fin_")]
+                        filtered = filter_factors_by_ic(dataset, pv_names, ret_col="ret_1d")
+                        selected = select_orthogonal_factors(dataset, filtered, threshold=0.7)
 
-            except Exception as e:
-                st.error(f"模拟盘执行失败: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                        results = walk_forward_train_ensemble(
+                            dataset, selected, train_years=3, val_years=1,
+                        )
+                        if not results:
+                            st.error("训练失败，无有效Walk-forward窗口")
+                            st.stop()
+
+                        latest_result = results[-1]
+                        predictor = latest_result["ensemble"]
+
+                        paper = PaperEngine(
+                            account_id=run_account_id,
+                            predictor=predictor,
+                            factor_names=selected,
+                            top_n=15,
+                            rebalance_mode="ndrop",
+                            ndrop_n=2,
+                        )
+                        latest_date = dataset["trade_date"].max()
+                        today_factors = dataset[dataset["trade_date"] == latest_date]
+
+                        industry_map = {}
+                        engine = get_engine()
+                        try:
+                            ind_df = pd.read_sql(
+                                "SELECT code, industry_sw1 FROM stock_industry", engine,
+                            )
+                            industry_map = dict(zip(ind_df["code"], ind_df["industry_sw1"]))
+                        except Exception:
+                            pass
+                        finally:
+                            engine.dispose()
+
+                        res = paper.run_daily(
+                            trade_date=latest_date,
+                            factor_df=today_factors,
+                            ohlcv_data=ohlcv,
+                            industry_map=industry_map,
+                            index_ohlcv=index_ohlcv if not index_ohlcv.empty else None,
+                        )
+
+                        if res is None:
+                            st.error("模拟盘执行失败")
+                        else:
+                            get_positions.clear()
+                            get_orders.clear()
+                            st.success(
+                                f"模拟盘执行完成！日期: {latest_date.date()} | "
+                                f"选股: {res['n_selected']}只 | "
+                                f"买单: {res['n_buy_orders']}笔 | "
+                                f"卖单: {res['n_sell_orders']}笔 | "
+                                f"总资产: {res['total_value']:,.0f}元"
+                            )
+                            if res.get("crash_warning"):
+                                st.warning("⚠️ 指数崩盘触发，已清仓")
+                            if res.get("stop_losses"):
+                                st.warning(f"⚠️ 止损触发: {res['stop_losses']}")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"模拟盘执行失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
 # ---- 主区域 ----
 accounts = get_accounts()
@@ -208,22 +297,14 @@ if accounts.empty:
     st.info("暂无模拟账户，请在左侧创建")
     st.stop()
 
-# 账户选择
-acc_ids = accounts["id"].tolist()
-acc_labels = [f"#{r['id']} {r['name']} (¥{r['initial_capital']:,.0f})" for _, r in accounts.iterrows()]
-if not acc_labels:
-    st.stop()
-
-default_idx = 0
-if "paper_account_idx" in st.session_state:
-    if st.session_state.paper_account_idx < len(acc_labels):
-        default_idx = st.session_state.paper_account_idx
-selected_label = st.selectbox("选择账户", acc_labels, index=default_idx)
-if selected_label is None or selected_label not in acc_labels:
-    selected_label = acc_labels[0]
-selected_idx = acc_labels.index(selected_label)
-st.session_state.paper_account_idx = selected_idx
-account = accounts.iloc[selected_idx]
+# 使用侧边栏选择的账户
+if "paper_run_account_idx" in st.session_state:
+    acc_idx = st.session_state.paper_run_account_idx
+    if acc_idx >= len(accounts):
+        acc_idx = 0
+else:
+    acc_idx = 0
+account = accounts.iloc[acc_idx]
 account_id = int(account["id"])
 
 # ---- 账户概览 ----
@@ -258,7 +339,76 @@ with col3:
     st.metric("持仓市值", f"{positions_value:,.0f} 元")
 with col4:
     st.metric("累计盈亏", f"{total_pnl:,.0f} 元",
-              delta=f"{total_pnl / float(account['initial_capital']) * 100:.2f}%")
+              delta=f"{total_pnl / max(float(account['initial_capital']), 1) * 100:.2f}%")
+
+# ---- 权益曲线 + 策略信息 ----
+st.divider()
+ecol1, ecol2 = st.columns([2, 1])
+
+with ecol1:
+    st.subheader("📈 权益曲线")
+    pnl_data = get_paper_daily_pnl(account_id)
+    if not pnl_data.empty:
+        import plotly.graph_objects as go
+        pnl_data["trade_date"] = pd.to_datetime(pnl_data["trade_date"])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=pnl_data["trade_date"], y=pnl_data["total_value"],
+            mode="lines", name="总资产",
+            fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
+            line=dict(color="#2196f3", width=2),
+        ))
+        fig.add_hline(y=float(account["initial_capital"]), line_dash="dash",
+                      line_color="gray", annotation_text="初始资金")
+        # 回撤填充
+        if "drawdown" in pnl_data.columns:
+            peak = pnl_data["total_value"].expanding().max()
+            dd_area = pnl_data.copy()
+            dd_area["drawdown_val"] = peak - pnl_data["total_value"]
+            fig.add_trace(go.Scatter(
+                x=pnl_data["trade_date"], y=peak,
+                mode="lines", name="峰值",
+                line=dict(width=0.5, color="rgba(255,0,0,0.3)"),
+                fill="tonexty", fillcolor="rgba(255,0,0,0.05)",
+            ))
+        fig.update_layout(
+            height=350, template="plotly_white",
+            margin=dict(l=0, r=0, t=10, b=0),
+            hovermode="x unified",
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("暂无净值记录，运行模拟盘后生成")
+
+with ecol2:
+    st.subheader("⚙️ 策略信息")
+    stype = account.get("strategy_type") or "ml"
+    sname = account.get("strategy_name") or ""
+    sp = account.get("strategy_params") or {}
+    if isinstance(sp, str):
+        try:
+            sp = json.loads(sp)
+        except Exception:
+            sp = {}
+
+    if stype == "static" and sname:
+        st.caption(f"**类型**: 静态策略")
+        st.caption(f"**策略**: {sname}")
+        if sp:
+            st.caption("**参数**:")
+            for k, v in sp.items():
+                st.caption(f"　{k}: {v}")
+    elif stype == "ml" or not sname:
+        st.caption("**类型**: ML 集成")
+        st.caption("**模型**: XGBoost + LightGBM")
+        st.caption("**选股**: Top-15 NDrop")
+        st.caption("**训练**: Walk-Forward 3+1年")
+
+    st.caption(f"**佣金**: {float(account.get('commission_rate', 0.00009))*10000:.1f}‱")
+    st.caption(f"**印花税**: {float(account.get('stamp_duty_rate', 0.0005))*10000:.1f}‱")
+    st.caption(f"**滑点**: {float(account.get('slippage', 0.01)):.2f} 元/股")
+    st.caption(f"**大盘过滤器**: {'开启' if account.get('use_market_filter', True) else '关闭'}")
 
 # ---- 持仓明细 ----
 st.subheader("当前持仓")
@@ -306,6 +456,76 @@ else:
         use_container_width=True,
         hide_index=True,
     )
+
+# ---- 持仓分布 ----
+if not pos.empty and price_map:
+    st.subheader("📊 持仓分布")
+    dcol1, dcol2 = st.columns(2)
+
+    with dcol1:
+        # 行业分布饼图
+        engine = get_engine()
+        try:
+            ind_df = pd.read_sql("SELECT code, industry_sw1 FROM stock_industry", engine)
+            ind_map = dict(zip(ind_df["code"], ind_df["industry_sw1"]))
+        except Exception:
+            ind_map = {}
+        engine.dispose()
+
+        pos_codes = pos["code"].tolist()
+        ind_dist: dict[str, float] = {}
+        for _, p_row in pos.iterrows():
+            pc = str(p_row["code"])
+            val = int(p_row["volume"]) * price_map.get(pc, float(p_row["avg_cost"]))
+            ind = ind_map.get(pc, "其他")
+            ind_dist[ind] = ind_dist.get(ind, 0) + val
+
+        if ind_dist:
+            import plotly.graph_objects as go
+            fig_pie = go.Figure(data=[go.Pie(
+                labels=list(ind_dist.keys()),
+                values=list(ind_dist.values()),
+                hole=0.4,
+                textinfo="label+percent",
+            )])
+            fig_pie.update_layout(
+                height=300, margin=dict(l=0, r=0, t=5, b=0),
+                showlegend=False,
+            )
+            st.caption("行业分布")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    with dcol2:
+        # 个股权重 Top-10
+        weights = []
+        total_mv = sum(
+            int(p_row["volume"]) * price_map.get(str(p_row["code"]), float(p_row["avg_cost"]))
+            for _, p_row in pos.iterrows()
+        )
+        for _, p_row in pos.iterrows():
+            pc = str(p_row["code"])
+            mv = int(p_row["volume"]) * price_map.get(pc, float(p_row["avg_cost"]))
+            if total_mv > 0:
+                weights.append({"code": pc, "weight": mv / total_mv * 100, "value": mv})
+        weights.sort(key=lambda x: x["weight"], reverse=True)
+        top10 = weights[:10]
+
+        if top10:
+            import plotly.graph_objects as go
+            fig_bar = go.Figure(data=[go.Bar(
+                x=[w["code"] for w in top10],
+                y=[w["weight"] for w in top10],
+                text=[f"{w['weight']:.1f}%" for w in top10],
+                textposition="outside",
+                marker_color="#2196f3",
+            )])
+            fig_bar.update_layout(
+                height=300, template="plotly_white",
+                margin=dict(l=0, r=0, t=5, b=0),
+                yaxis_title="权重 (%)",
+            )
+            st.caption("个股权重 Top-10")
+            st.plotly_chart(fig_bar, use_container_width=True)
 
 # ---- 委托历史 ----
 st.subheader("最近委托")

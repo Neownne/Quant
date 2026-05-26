@@ -97,8 +97,8 @@ def load_paper_positions(account_id: int) -> pd.DataFrame:
 
 # ── Tab 布局 ─────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["📈 因子IC看板", "🧠 模型表现", "🎯 当日信号", "💰 模拟盘净值"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📈 因子IC看板", "🧠 模型表现", "🎯 当日信号", "💰 模拟盘净值", "📡 数据健康"]
 )
 
 # ── Tab 1: 因子IC看板 ───────────────────────────────────
@@ -388,6 +388,15 @@ with tab4:
             )
             st.plotly_chart(fig, use_container_width=True)
 
+        # 策略信息
+        acc_row = accounts[accounts["id"] == acc_id].iloc[0]
+        stype = acc_row.get("strategy_type") or "ml"
+        sname = acc_row.get("strategy_name") or ""
+        if stype != "ml" and sname:
+            st.caption(f"📌 策略: {sname} ({stype})")
+        elif stype == "ml":
+            st.caption("📌 策略: ML 集成 (XGBoost + LightGBM)")
+
         # 当前持仓
         st.subheader("当前持仓")
         if positions.empty:
@@ -432,3 +441,99 @@ with tab4:
                 )
         finally:
             engine.dispose()
+
+# ── Tab 5: 数据健康 ─────────────────────────────────────
+
+with tab5:
+    st.subheader("📡 数据健康监控")
+
+    if st.button("🔍 检查数据质量", help="检查各表最新数据日期、覆盖度、缺失日期"):
+        with st.spinner("正在检查数据库..."):
+            engine = get_engine()
+            try:
+                tables = {
+                    "stock_basic": ("code", "list_date", None),
+                    "stock_daily": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '20 days'"),
+                    "index_daily": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '20 days'"),
+                    "stock_daily_extra": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '20 days'"),
+                    "stock_shareholder": ("code", "end_date", None),
+                    "stock_financial": ("code", "report_date", None),
+                    "stock_industry": ("code", None, None),
+                    "paper_account": ("id", None, None),
+                    "paper_orders": ("id", "order_time", "order_time >= CURRENT_DATE - INTERVAL '20 days'"),
+                    "paper_daily_pnl": ("account_id", "trade_date", None),
+                }
+
+                results = []
+                with engine.connect() as conn:
+                    for table, (id_col, date_col, recent_filter) in tables.items():
+                        # Check if table exists
+                        exists = conn.execute(text(
+                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=:t)"
+                        ), {"t": table}).scalar()
+                        if not exists:
+                            results.append({
+                                "表名": table, "记录数": 0, "覆盖代码数": 0,
+                                "最新日期": "-", "状态": "❌ 不存在",
+                            })
+                            continue
+
+                        n_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                        n_codes = conn.execute(text(f"SELECT COUNT(DISTINCT {id_col}) FROM {table}")).scalar()
+
+                        latest_str = "-"
+                        status = "✅"
+                        if date_col:
+                            latest = conn.execute(text(f"SELECT MAX({date_col}) FROM {table}")).scalar()
+                            if latest:
+                                latest_str = str(latest)[:10]
+                                # Check staleness
+                                try:
+                                    from datetime import date, timedelta
+                                    ld = date.fromisoformat(latest_str)
+                                    gap = (date.today() - ld).days
+                                    if table == "stock_financial" or table == "stock_shareholder":
+                                        status = "✅" if gap < 120 else "⚠️"
+                                    else:
+                                        status = "✅" if gap < 3 else ("⚠️" if gap < 7 else "❌")
+                                except Exception:
+                                    pass
+
+                            # Recent coverage
+                            if recent_filter:
+                                recent_n = conn.execute(text(
+                                    f"SELECT COUNT(DISTINCT {id_col}) FROM {table} WHERE {recent_filter}"
+                                )).scalar()
+                                if n_codes > 0 and recent_n < n_codes * 0.5:
+                                    status = "⚠️ 覆盖不足" if "✅" in str(status) else status
+
+                        results.append({
+                            "表名": table, "记录数": n_rows, "覆盖代码数": n_codes,
+                            "最新日期": latest_str, "状态": status,
+                        })
+                engine.dispose()
+
+                if results:
+                    df_health = pd.DataFrame(results)
+                    st.dataframe(df_health, use_container_width=True, hide_index=True)
+
+                    # Summary
+                    ok = sum(1 for r in results if "✅" in str(r["状态"]))
+                    warn = sum(1 for r in results if "⚠️" in str(r["状态"]))
+                    err = sum(1 for r in results if "❌" in str(r["状态"]))
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("✅ 正常", ok)
+                    with c2:
+                        st.metric("⚠️ 警告", warn)
+                    with c3:
+                        st.metric("❌ 异常", err)
+
+                    if err > 0:
+                        st.error(f"{err} 张表需要关注，请检查数据同步是否正常运行")
+                        st.info("在终端运行: `python -m data.sync --mode stock-daily`")
+            except Exception as e:
+                st.error(f"数据质量检查失败: {e}")
+            finally:
+                if 'engine' in dir():
+                    engine.dispose()

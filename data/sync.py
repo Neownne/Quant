@@ -53,6 +53,73 @@ def _latest_trading_day() -> date:
     return today
 
 
+def check_data_quality(engine: Engine | None = None) -> dict:
+    """检查所有表的数据质量。
+    返回: {table_name: {latest_date, n_records, n_codes, status, stale_days}}
+    """
+    _engine = engine or get_engine()
+    own_engine = engine is None
+
+    table_checks = {
+        "stock_basic": ("code", "list_date", None, 999),
+        "stock_daily": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '30 days'", 3),
+        "index_daily": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '30 days'", 3),
+        "stock_daily_extra": ("code", "trade_date", "trade_date >= CURRENT_DATE - INTERVAL '30 days'", 3),
+        "stock_shareholder": ("code", "end_date", None, 120),
+        "stock_financial": ("code", "report_date", None, 120),
+        "stock_industry": ("code", None, None, 999),
+        "stock_pledge": ("code", "trade_date", None, 7),
+        "paper_orders": ("id", "order_time", None, 999),
+        "paper_daily_pnl": ("account_id", "trade_date", None, 999),
+    }
+
+    results = {}
+    try:
+        with _engine.connect() as conn:
+            for table, (id_col, date_col, recent_filter, max_stale_days) in table_checks.items():
+                entry = {"latest_date": None, "n_records": 0, "n_codes": 0, "status": "ok", "stale_days": 0}
+                try:
+                    exists = conn.execute(text(
+                        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=:t)"
+                    ), {"t": table}).scalar()
+                    if not exists:
+                        entry["status"] = "missing"
+                        results[table] = entry
+                        continue
+
+                    entry["n_records"] = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                    entry["n_codes"] = conn.execute(text(f"SELECT COUNT(DISTINCT {id_col}) FROM {table}")).scalar()
+
+                    if date_col:
+                        latest = conn.execute(text(f"SELECT MAX({date_col}) FROM {table}")).scalar()
+                        if latest:
+                            entry["latest_date"] = str(latest)[:10]
+                            gap = (date.today() - latest if hasattr(latest, 'date') else
+                                   date.today() - date.fromisoformat(str(latest)[:10])).days if latest else 0
+                            if isinstance(gap, int):
+                                entry["stale_days"] = gap
+                                if gap > max_stale_days:
+                                    entry["status"] = "stale"
+                            else:
+                                entry["stale_days"] = 0
+
+                    if recent_filter and entry["n_codes"] > 0:
+                        recent_n = conn.execute(text(
+                            f"SELECT COUNT(DISTINCT {id_col}) FROM {table} WHERE {recent_filter}"
+                        )).scalar()
+                        if recent_n < entry["n_codes"] * 0.5:
+                            entry["status"] = "low_coverage" if entry["status"] == "ok" else entry["status"]
+
+                except Exception as e:
+                    entry["status"] = f"error: {e}"
+
+                results[table] = entry
+    finally:
+        if own_engine:
+            _engine.dispose()
+    return results
+
+
 # ============================================================
 #  股票
 # ============================================================

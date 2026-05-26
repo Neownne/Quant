@@ -1,14 +1,16 @@
 import hashlib
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 
 from app.utils.backtest_runner import load_index_data, run_backtest
 from app.utils.data_loader import get_stock_list, load_ohlcv
 from app.utils.stock_pools import list_pools, load_and_execute_pool, get_pool_data
+from app.utils.account_manager import promote_strategy_to_account
 from data.db import init_db, get_engine
 from strategies import get_all_strategies
 
@@ -16,6 +18,58 @@ st.set_page_config(page_title="策略回测", page_icon="🧪", layout="wide")
 st.title("🧪 策略回测")
 
 init_db()
+
+# ── 回测结果保存 ─────────────────────────────────────────
+
+def save_backtest_result(account_id, strategy_type, strategy_name, strategy_params,
+                         asset_mode, pool_name, start_date, end_date,
+                         n_stocks, avg_return, avg_sharpe, avg_drawdown, avg_win_rate,
+                         results_json):
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO backtest_results
+                    (account_id, strategy_type, strategy_name, strategy_params,
+                     asset_mode, pool_name, start_date, end_date,
+                     n_stocks, avg_return, avg_sharpe, avg_drawdown, avg_win_rate, results_json)
+                VALUES (:aid, :stype, :sname, CAST(:sparams AS jsonb),
+                     :amode, :pname, :sdate, :edate,
+                     :nstocks, :aret, :asharpe, :add, :awin, CAST(:rjson AS jsonb))
+            """), {
+                "aid": account_id,
+                "stype": strategy_type,
+                "sname": strategy_name,
+                "sparams": json.dumps(strategy_params),
+                "amode": asset_mode,
+                "pname": pool_name or "",
+                "sdate": start_date,
+                "edate": end_date,
+                "nstocks": n_stocks,
+                "aret": avg_return,
+                "asharpe": avg_sharpe,
+                "add": avg_drawdown,
+                "awin": avg_win_rate,
+                "rjson": json.dumps(results_json),
+            })
+    finally:
+        engine.dispose()
+
+
+@st.cache_data(ttl=30)
+def load_backtest_history() -> pd.DataFrame:
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql_query(text(
+                "SELECT id, strategy_type, strategy_name, strategy_params, "
+                "asset_mode, pool_name, start_date, end_date, n_stocks, "
+                "avg_return, avg_sharpe, avg_drawdown, avg_win_rate, results_json, created_at "
+                "FROM backtest_results ORDER BY created_at DESC LIMIT 50"
+            ), conn)
+    finally:
+        engine.dispose()
+    return df
 
 # ---- 侧边栏：回测参数 ----
 with st.sidebar:
@@ -260,6 +314,25 @@ if len(target_codes) == 1:
         total_pnl = trades_df[pnl_col].sum() if pnl_col in trades_df.columns else 0
         st.caption(f"总盈亏: {total_pnl:,.0f} 元  |  交易次数: {len(trades_df)}")
 
+    # ── 单只回测：保存结果 ──
+    cls_name = strategy_class.__name__
+    save_backtest_result(
+        account_id=0,
+        strategy_type="static",
+        strategy_name=cls_name,
+        strategy_params=strategy_params,
+        asset_mode="single",
+        pool_name="",
+        start_date=start_date,
+        end_date=end_date,
+        n_stocks=1,
+        avg_return=metrics.get("total_return", 0),
+        avg_sharpe=metrics.get("sharpe_ratio", 0),
+        avg_drawdown=metrics.get("max_drawdown", 0),
+        avg_win_rate=metrics.get("win_rate", 0),
+        results_json={"code": c, "name": metrics.get("_name", ""), "metrics": {k: v for k, v in metrics.items() if not k.startswith("_")}},
+    )
+
 # ---- 股票池模式：汇总统计 ----
 else:
     st.subheader(f"汇总统计（{len(results_df)} 只股票）")
@@ -367,3 +440,70 @@ else:
         file_name=f"backtest_{selected_pool}_{strategy_name}_{start_str}_{end_str}.csv",
         mime="text/csv",
     )
+
+    # ── 股票池回测：保存结果 ──
+    cls_name = strategy_class.__name__
+    save_backtest_result(
+        account_id=0,
+        strategy_type="static",
+        strategy_name=cls_name,
+        strategy_params=strategy_params,
+        asset_mode="pool",
+        pool_name=selected_pool,
+        start_date=start_date,
+        end_date=end_date,
+        n_stocks=len(results_df),
+        avg_return=float(results_df["total_return"].mean()),
+        avg_sharpe=float(results_df["sharpe_ratio"].mean()),
+        avg_drawdown=float(results_df["max_drawdown"].mean()),
+        avg_win_rate=float(results_df["win_rate"].mean()),
+        results_json=results_df.to_dict(orient="records"),
+    )
+
+
+# ── 历史回测记录 ─────────────────────────────────────────
+st.divider()
+st.subheader("📋 历史回测记录")
+
+history = load_backtest_history()
+if history.empty:
+    st.info("暂无保存的回测记录，运行一次回测后自动保存")
+else:
+    for _, row in history.iterrows():
+        sp = row["strategy_params"]
+        if isinstance(sp, str):
+            try:
+                sp = json.loads(sp)
+            except Exception:
+                sp = {}
+
+        with st.expander(
+            f"{row['created_at'].strftime('%m-%d %H:%M') if hasattr(row['created_at'], 'strftime') else str(row['created_at'])[:16]} | "
+            f"{row['strategy_name']} | "
+            f"{row['asset_mode']} | "
+            f"收益: {row['avg_return']*100:.2f}% | "
+            f"夏普: {row['avg_sharpe']:.2f} | "
+            f"回撤: {row['avg_drawdown']:.2f}%"
+        ):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"策略类型: {row['strategy_type']} | 模式: {row['asset_mode']}")
+                st.caption(f"区间: {row['start_date']} ~ {row['end_date']} | 股票数: {row['n_stocks']}")
+                if sp:
+                    st.caption(f"参数: {sp}")
+            with col2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("🚀 升级到模拟盘", key=f"promote_{row['id']}"):
+                        new_id = promote_strategy_to_account(
+                            strategy_type=row["strategy_type"],
+                            strategy_name=row["strategy_name"],
+                            strategy_params=sp,
+                        )
+                        st.success(f"已创建模拟账户 #{new_id}，请切换到「模拟盘」页面运行")
+                with c2:
+                    if st.button("📊 查看详情", key=f"detail_{row['id']}"):
+                        rj = row.get("results_json")
+                        if isinstance(rj, str):
+                            rj = json.loads(rj)
+                        st.json(rj if rj else {})
