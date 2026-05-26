@@ -12,7 +12,8 @@ from app.utils.data_loader import get_stock_list, load_ohlcv
 from app.utils.stock_pools import list_pools, load_and_execute_pool, get_pool_data
 from app.utils.account_manager import promote_strategy_to_account
 from data.db import init_db, get_engine
-from strategies import get_all_strategies
+from strategies import get_all_strategies, list_all_strategies, is_ml_strategy, is_static_strategy
+from app.utils.ml_backtest import run_ml_backtest
 
 st.set_page_config(page_title="策略回测", page_icon="🧪", layout="wide")
 st.title("🧪 策略回测")
@@ -75,36 +76,72 @@ def load_backtest_history() -> pd.DataFrame:
 with st.sidebar:
     st.header("回测设置")
 
-    all_strategies = get_all_strategies()
-    strategy_name = st.selectbox("策略", list(all_strategies.keys()))
-    strategy_class = all_strategies[strategy_name]
+    # ── 统一策略选择 ──
+    st.subheader("策略选择")
+    unified_strategies = list_all_strategies()
+    all_names = list(unified_strategies.keys())
+    static_names = [n for n in all_names if is_static_strategy(unified_strategies[n])]
+    ml_names = [n for n in all_names if is_ml_strategy(unified_strategies[n])]
 
-    # 动态策略参数
-    st.subheader("策略参数")
-    strategy_params = {}
+    strategy_type_filter = st.radio("策略类型", ["静态策略", "ML策略"], horizontal=True)
 
-    # 内置策略的参数定义
-    param_defs = {
-        "SMACross": {"fast": (5, 1, 120), "slow": (20, 1, 250)},
-        "MACDStrategy": {"fast": (12, 2, 50), "slow": (26, 5, 100), "signal": (9, 2, 30)},
-        "RSIStrategy": {"period": (14, 2, 50), "oversold": (30, 10, 40), "overbought": (70, 60, 90)},
-    }
-    cls_name = strategy_class.__name__
-
-    # 内置策略用预定义参数表，自定义策略从 params 推导
-    if cls_name in param_defs:
-        for pname, (default, pmin, pmax) in param_defs[cls_name].items():
-            strategy_params[pname] = st.number_input(
-                pname, min_value=pmin, max_value=pmax, value=default, step=1
-            )
+    if strategy_type_filter == "静态策略":
+        strategy_name = st.selectbox("策略", static_names if static_names else ["无可用策略"])
+        strategy_info = unified_strategies.get(strategy_name, {})
+        strategy_class = strategy_info.get("class") if strategy_info.get("type") == "static" else None
+        ml_config = {}
     else:
-        params = getattr(strategy_class, "params", ())
-        for pdef in params:
-            pname, default = pdef[0], pdef[1]
-            if isinstance(default, (int, float)):
+        strategy_name = st.selectbox("ML配置", ml_names if ml_names else ["无可用ML配置"])
+        strategy_info = unified_strategies.get(strategy_name, {})
+        strategy_class = None
+        ml_config = strategy_info.get("config", {}) if strategy_info.get("type") == "ml" else {}
+
+    # ── 策略参数 ──
+    if strategy_type_filter == "静态策略" and strategy_class is not None:
+        st.subheader("策略参数")
+        strategy_params = {}
+        cls_name = strategy_class.__name__
+
+        param_defs = {
+            "SMACross": {"fast": (5, 1, 120), "slow": (20, 1, 250)},
+            "MACDStrategy": {"fast": (12, 2, 50), "slow": (26, 5, 100), "signal": (9, 2, 30)},
+            "RSIStrategy": {"period": (14, 2, 50), "oversold": (30, 10, 40), "overbought": (70, 60, 90)},
+        }
+
+        if cls_name in param_defs:
+            for pname, (default, pmin, pmax) in param_defs[cls_name].items():
                 strategy_params[pname] = st.number_input(
-                    pname, value=default, step=1 if isinstance(default, int) else 1
+                    pname, min_value=pmin, max_value=pmax, value=default, step=1
                 )
+        else:
+            params = getattr(strategy_class, "params", ())
+            for pdef in params:
+                pname, default = pdef[0], pdef[1]
+                if isinstance(default, (int, float)):
+                    strategy_params[pname] = st.number_input(
+                        pname, value=default, step=1 if isinstance(default, int) else 1
+                    )
+    elif strategy_type_filter == "ML策略":
+        st.subheader("ML 策略参数")
+        if ml_config:
+            st.caption(f"**{ml_config.get('name', '')}** — {ml_config.get('description', '')}")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("模型", ml_config.get("model_type", "ensemble"))
+                tr = ml_config.get("train_years", 3)
+                vr = ml_config.get("val_years", 1)
+                st.metric("训练窗", f"{tr}+{vr}年")
+                st.metric("选股", f"Top-{ml_config.get('top_n', 15)} {ml_config.get('rebalance_mode', 'ndrop')}")
+            with col_b:
+                st.metric("IC阈值", f"{ml_config.get('ic_threshold', 0.02):.3f}")
+                st.metric("正交阈值", f"{ml_config.get('orthogonal_threshold', 0.7):.2f}")
+                st.metric("止损", f"{float(ml_config.get('stop_loss_pct', 0.08))*100:.0f}%")
+            strategy_params = ml_config
+        else:
+            st.warning("请先在「策略编辑器」中创建 ML 策略配置")
+            strategy_params = {}
+    else:
+        strategy_params = {}
 
     st.divider()
     st.subheader("资金 & 费用 (A股实盘)")
@@ -198,41 +235,79 @@ if use_market_filter:
 all_results: list[dict] = []
 progress = st.progress(0, text=f"0/{len(target_codes)}")
 
-for i, c in enumerate(target_codes):
-    progress.progress((i + 1) / len(target_codes), text=f"{i + 1}/{len(target_codes)}: {c}")
+if strategy_type_filter == "静态策略":
+    for i, c in enumerate(target_codes):
+        progress.progress((i + 1) / len(target_codes), text=f"{i + 1}/{len(target_codes)}: {c}")
 
-    df = load_ohlcv(c, start_str, end_str)
-    if df.empty or len(df) < 50:
-        continue
+        df = load_ohlcv(c, start_str, end_str)
+        if df.empty or len(df) < 50:
+            continue
 
-    try:
-        result = run_backtest(
-            strategy_class=strategy_class,
-            df=df,
-            strategy_params=strategy_params,
+        try:
+            result = run_backtest(
+                strategy_class=strategy_class,
+                df=df,
+                strategy_params=strategy_params,
+                initial_cash=initial_cash,
+                commission=commission,
+                stamp_duty=stamp_duty,
+                slippage=slippage,
+                index_df=index_df,
+            )
+        except Exception:
+            continue
+
+        m = result["metrics"]
+        all_results.append({
+            "code": c,
+            "name": m.get("_name", ""),
+            "total_return": m.get("total_return", 0),
+            "annual_return": m.get("annual_return", 0),
+            "max_drawdown": m.get("max_drawdown", 0),
+            "sharpe_ratio": m.get("sharpe_ratio", 0),
+            "win_rate": m.get("win_rate", 0),
+            "final_value": m.get("final_value", 0),
+            "n_trades": len(result.get("trades", pd.DataFrame())),
+        })
+
+    progress.empty()
+else:
+    # ML 回测：一次性在所有标的上运行
+    progress.empty()
+    with st.spinner("运行 ML 回测（因子计算+训练+模拟交易，约需3-5分钟）..."):
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        def ml_progress(stage, pct):
+            progress_text.text(f"⏳ {stage}")
+            progress_bar.progress(min(pct, 1.0))
+
+        ml_result = run_ml_backtest(
+            config=ml_config,
+            codes=target_codes,
+            start_date=start_str,
+            end_date=end_str,
             initial_cash=initial_cash,
-            commission=commission,
-            stamp_duty=stamp_duty,
-            slippage=slippage,
-            index_df=index_df,
+            progress_callback=ml_progress,
         )
-    except Exception:
-        continue
+        progress_text.empty()
+        progress_bar.empty()
 
-    m = result["metrics"]
+    if "error" in ml_result:
+        st.error(f"ML 回测失败: {ml_result['error']}")
+        st.stop()
+
     all_results.append({
-        "code": c,
-        "name": m.get("_name", ""),
-        "total_return": m.get("total_return", 0),
-        "annual_return": m.get("annual_return", 0),
-        "max_drawdown": m.get("max_drawdown", 0),
-        "sharpe_ratio": m.get("sharpe_ratio", 0),
-        "win_rate": m.get("win_rate", 0),
-        "final_value": m.get("final_value", 0),
-        "n_trades": len(result.get("trades", pd.DataFrame())),
+        "code": "ML组合",
+        "name": ml_config.get("name", "ML策略"),
+        "total_return": ml_result["metrics"]["total_return"],
+        "annual_return": ml_result["metrics"]["annual_return"],
+        "max_drawdown": ml_result["metrics"]["max_drawdown"],
+        "sharpe_ratio": ml_result["metrics"]["sharpe_ratio"],
+        "win_rate": ml_result["metrics"]["win_rate"],
+        "final_value": ml_result["metrics"]["final_value"],
+        "n_trades": ml_result["metrics"]["n_trades"],
     })
-
-progress.empty()
+    ml_single_result = ml_result
 
 if not all_results:
     st.error("所有股票均无足够数据或回测失败")
@@ -241,7 +316,7 @@ if not all_results:
 results_df = pd.DataFrame(all_results)
 
 # ---- 单只模式：展示原有详情 ----
-if len(target_codes) == 1:
+if len(target_codes) == 1 and strategy_type_filter == "静态策略":
     # Re-run with full detail for single stock
     c = target_codes[0]
     df = load_ohlcv(c, start_str, end_str)
@@ -333,6 +408,63 @@ if len(target_codes) == 1:
         results_json={"code": c, "name": metrics.get("_name", ""), "metrics": {k: v for k, v in metrics.items() if not k.startswith("_")}},
     )
 
+elif len(target_codes) == 1:
+    # ML single result display
+    m = ml_single_result["metrics"]
+
+    st.subheader("核心指标")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("总收益率", f"{m.get('total_return', 0) * 100:.2f}%")
+    with col2:
+        st.metric("年化收益", f"{m.get('annual_return', 0) * 100:.2f}%")
+    with col3:
+        st.metric("最大回撤", f"{m.get('max_drawdown', 0):.2f}%")
+    with col4:
+        st.metric("夏普比率", f"{m.get('sharpe_ratio', 0):.2f}")
+    with col5:
+        st.metric("胜率", f"{m.get('win_rate', 0) * 100:.1f}%")
+    st.metric("最终权益", f"{m.get('final_value', 0):,.0f} 元")
+
+    eq = ml_single_result["equity_curve"]
+    if not eq.empty:
+        st.subheader("权益曲线")
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=eq["date"], y=eq["equity"], mode="lines", name="权益",
+            fill="tozeroy", fillcolor="rgba(33,150,243,0.1)",
+            line=dict(color="#2196f3", width=2),
+        ))
+        fig.add_hline(y=initial_cash, line_dash="dash", line_color="gray",
+                      annotation_text=f"初始 {initial_cash:,.0f}")
+        fig.update_layout(height=400, template="plotly_white",
+                          margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+
+    trades = ml_single_result["trades"]
+    if not trades.empty:
+        st.subheader("交易明细")
+        st.dataframe(trades, use_container_width=True, hide_index=True)
+        total_pnl = float(trades[trades["direction"] == "SELL"]["pnl"].sum()) if "pnl" in trades.columns else 0
+        st.caption(f"总盈亏: {total_pnl:,.0f} 元  |  交易次数: {len(trades)}")
+
+    # Save ML result
+    save_backtest_result(
+        account_id=0, strategy_type="ml",
+        strategy_name=ml_config.get("name", "unknown"),
+        strategy_params=ml_config,
+        asset_mode="single",
+        pool_name="",
+        start_date=start_date, end_date=end_date,
+        n_stocks=len(target_codes),
+        avg_return=m.get("total_return", 0),
+        avg_sharpe=m.get("sharpe_ratio", 0),
+        avg_drawdown=m.get("max_drawdown", 0),
+        avg_win_rate=m.get("win_rate", 0),
+        results_json=ml_single_result.get("results_json", {}),
+    )
+
 # ---- 股票池模式：汇总统计 ----
 else:
     st.subheader(f"汇总统计（{len(results_df)} 只股票）")
@@ -382,8 +514,11 @@ else:
     st.dataframe(display, use_container_width=True, hide_index=True)
 
     # 查看单只股票交易明细
-    st.subheader("交易明细（选择股票查看）")
-    detail_code = st.selectbox("选择股票", [""] + [r["code"] for r in all_results])
+    if strategy_type_filter == "静态策略" and strategy_class is not None:
+        st.subheader("交易明细（选择股票查看）")
+        detail_code = st.selectbox("选择股票", [""] + [r["code"] for r in all_results])
+    else:
+        detail_code = ""
     if detail_code:
         df_detail = load_ohlcv(detail_code, start_str, end_str)
         if not df_detail.empty:
@@ -442,23 +577,41 @@ else:
     )
 
     # ── 股票池回测：保存结果 ──
-    cls_name = strategy_class.__name__
-    save_backtest_result(
-        account_id=0,
-        strategy_type="static",
-        strategy_name=cls_name,
-        strategy_params=strategy_params,
-        asset_mode="pool",
-        pool_name=selected_pool,
-        start_date=start_date,
-        end_date=end_date,
-        n_stocks=len(results_df),
-        avg_return=float(results_df["total_return"].mean()),
-        avg_sharpe=float(results_df["sharpe_ratio"].mean()),
-        avg_drawdown=float(results_df["max_drawdown"].mean()),
-        avg_win_rate=float(results_df["win_rate"].mean()),
-        results_json=results_df.to_dict(orient="records"),
-    )
+    if strategy_type_filter == "静态策略" and strategy_class is not None:
+        cls_name = strategy_class.__name__
+        save_backtest_result(
+            account_id=0,
+            strategy_type="static",
+            strategy_name=cls_name,
+            strategy_params=strategy_params,
+            asset_mode="pool",
+            pool_name=selected_pool,
+            start_date=start_date,
+            end_date=end_date,
+            n_stocks=len(results_df),
+            avg_return=float(results_df["total_return"].mean()),
+            avg_sharpe=float(results_df["sharpe_ratio"].mean()),
+            avg_drawdown=float(results_df["max_drawdown"].mean()),
+            avg_win_rate=float(results_df["win_rate"].mean()),
+            results_json=results_df.to_dict(orient="records"),
+        )
+    elif strategy_type_filter == "ML策略":
+        save_backtest_result(
+            account_id=0,
+            strategy_type="ml",
+            strategy_name=ml_config.get("name", "unknown"),
+            strategy_params=ml_config,
+            asset_mode="pool",
+            pool_name=selected_pool,
+            start_date=start_date,
+            end_date=end_date,
+            n_stocks=len(results_df),
+            avg_return=float(results_df["total_return"].mean()),
+            avg_sharpe=float(results_df["sharpe_ratio"].mean()),
+            avg_drawdown=float(results_df["max_drawdown"].mean()),
+            avg_win_rate=float(results_df["win_rate"].mean()),
+            results_json=ml_single_result.get("results_json", {}),
+        )
 
 
 # ── 历史回测记录 ─────────────────────────────────────────
@@ -507,3 +660,36 @@ else:
                         if isinstance(rj, str):
                             rj = json.loads(rj)
                         st.json(rj if rj else {})
+
+# ── 策略对比 ──
+st.divider()
+st.subheader("📊 策略对比")
+history_df = load_backtest_history()
+if not history_df.empty:
+    history_opts = []
+    for _, r in history_df.iterrows():
+        label = f"#{r['id']} {r['strategy_name']} ({r['strategy_type']}) - {str(r['start_date'])[:10]}"
+        history_opts.append(label)
+
+    selected_for_compare = st.multiselect(
+        "选择要对比的回测记录（最多5条）", history_opts,
+        max_selections=5, key="compare_select"
+    )
+
+    if selected_for_compare:
+        selected_ids = [int(opt.split()[0][1:]) for opt in selected_for_compare]
+        compare_rows = history_df[history_df["id"].isin(selected_ids)]
+
+        compare_data = []
+        for _, row in compare_rows.iterrows():
+            compare_data.append({
+                "策略名": row["strategy_name"],
+                "类型": row["strategy_type"],
+                "收益率%": f"{float(row['avg_return']) * 100:.2f}",
+                "夏普": f"{float(row['avg_sharpe']):.2f}",
+                "回撤%": f"{float(row['avg_drawdown']):.2f}",
+                "胜率%": f"{float(row['avg_win_rate']) * 100:.1f}",
+                "股票数": int(row["n_stocks"]),
+                "日期": f"{str(row['start_date'])[:10]}~{str(row['end_date'])[:10]}",
+            })
+        st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
