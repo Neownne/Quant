@@ -302,6 +302,13 @@ st.divider()
 st.subheader("📊 策略对比")
 history_df = load_backtest_history()
 if not history_df.empty:
+    history_df["start_dt"] = pd.to_datetime(history_df["start_date"])
+    history_df["end_dt"] = pd.to_datetime(history_df["end_date"])
+    history_df = history_df[
+        (history_df["start_dt"] <= pd.Timestamp(end_date)) &
+        (history_df["end_dt"] >= pd.Timestamp(start_date))
+    ]
+if not history_df.empty:
     history_opts = []
     for _, r in history_df.iterrows():
         label = f"#{r['id']} {r['strategy_name']} ({r['strategy_type']}) - {str(r['start_date'])[:10]}"
@@ -428,6 +435,7 @@ if not history_df.empty:
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             yaxis_title="归一化净值 (1.0 = 0%收益)",
         )
+        fig_compare.update_xaxes(range=[start_date, end_date])
         if len(fig_compare.data) > 0:
             st.plotly_chart(fig_compare, use_container_width=True)
         else:
@@ -651,6 +659,7 @@ if len(target_codes) == 1 and strategy_type_filter == "静态策略":
             hovermode="x unified",
             yaxis_title="归一化净值 (1.0 = 0%收益)",
         )
+        fig.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("交易明细")
@@ -774,6 +783,7 @@ elif len(target_codes) == 1:
         fig.update_layout(height=400, template="plotly_white",
                           margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
                           yaxis_title="归一化净值 (1.0 = 0%收益)")
+        fig.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig, use_container_width=True)
 
     trades = ml_single_result["trades"]
