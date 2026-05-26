@@ -40,7 +40,7 @@ def _get_minute_ohlcv(codes: list[str], start_date: str, end_date: str, period: 
             f"SELECT code, trade_time, trade_time::date AS trade_date, "
             f"open, high, low, close, volume, amount "
             f"FROM stock_minute WHERE code IN ({code_list}) "
-            f"AND trade_time >= '{start_date}' AND trade_time < '{end_date}235959' "
+            f"AND trade_time::date >= '{start_date}' AND trade_time::date <= '{end_date}' "
             f"AND period = '{period}' "
             f"ORDER BY code, trade_time",
             engine,
