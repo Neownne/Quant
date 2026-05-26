@@ -65,12 +65,30 @@ with st.sidebar:
     with st.form("new_account"):
         acc_name = st.text_input("账户名称", placeholder="我的模拟盘")
         acc_capital = st.number_input("初始资金", min_value=10000, value=100000, step=10000)
+        # 策略绑定（可选）
+        use_ml = st.checkbox("绑定 ML 策略", value=False)
+        if use_ml:
+            from app.utils.ml_config_manager import list_ml_configs
+            ml_configs = list_ml_configs()
+            if not ml_configs.empty:
+                ml_config_names = ml_configs["name"].tolist()
+                selected_ml = st.selectbox("选择 ML 配置", ml_config_names)
+                acc_strategy_type = "ml"
+                acc_strategy_name = selected_ml
+                acc_strategy_params = json.dumps({"ml_config_name": selected_ml})
+            else:
+                st.caption("暂无 ML 配置")
+        else:
+            acc_strategy_type = ""
+            acc_strategy_name = ""
+            acc_strategy_params = ""
         if st.form_submit_button("创建账户"):
             engine = get_engine()
             with engine.begin() as conn:
                 conn.execute(
-                    text("INSERT INTO paper_account (name, initial_capital, cash) VALUES (:n, :c, :c)"),
-                    {"n": acc_name, "c": acc_capital},
+                    text("INSERT INTO paper_account (name, initial_capital, cash, strategy_type, strategy_name, strategy_params) "
+                         "VALUES (:n, :cap, :cap, :stype, :sname, CAST(:sparams AS jsonb))"),
+                    {"n": acc_name, "cap": acc_capital, "stype": acc_strategy_type, "sname": acc_strategy_name, "sparams": acc_strategy_params},
                 )
             engine.dispose()
             get_accounts.clear()
@@ -221,6 +239,10 @@ with st.sidebar:
                             st.error("无行情数据，请先同步股票日线")
                             st.stop()
 
+                        ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"])
+                        if not index_ohlcv.empty:
+                            index_ohlcv["trade_date"] = pd.to_datetime(index_ohlcv["trade_date"])
+
                         factor_names = list(ALL_FACTORS.keys())
                         dataset = build_factor_dataset(ohlcv, factor_names, label_mode="binary")
                         pv_names = [f for f in factor_names if not f.startswith("fin_")]
@@ -237,13 +259,32 @@ with st.sidebar:
                         latest_result = results[-1]
                         predictor = latest_result["ensemble"]
 
+                        # 尝试从账户配置加载 ML 参数
+                        acc_cfg = sel_account.get("strategy_params", {})
+                        if isinstance(acc_cfg, str):
+                            import json as _json
+                            acc_cfg = _json.loads(acc_cfg) if acc_cfg else {}
+
+                        ml_config_name = acc_cfg.get("ml_config_name", "") if isinstance(acc_cfg, dict) else ""
+                        top_n_val = 15
+                        reb_mode = "ndrop"
+                        ndrop_val = 2
+
+                        if ml_config_name:
+                            from app.utils.ml_config_manager import get_ml_config_by_name
+                            ml_cfg = get_ml_config_by_name(ml_config_name)
+                            if ml_cfg:
+                                top_n_val = int(ml_cfg.get("top_n", 15))
+                                reb_mode = ml_cfg.get("rebalance_mode", "ndrop")
+                                ndrop_val = int(ml_cfg.get("ndrop_n", 2))
+
                         paper = PaperEngine(
                             account_id=run_account_id,
                             predictor=predictor,
                             factor_names=selected,
-                            top_n=15,
-                            rebalance_mode="ndrop",
-                            ndrop_n=2,
+                            top_n=top_n_val,
+                            rebalance_mode=reb_mode,
+                            ndrop_n=ndrop_val,
                         )
                         latest_date = dataset["trade_date"].max()
                         today_factors = dataset[dataset["trade_date"] == latest_date]
@@ -341,6 +382,48 @@ with col4:
     st.metric("累计盈亏", f"{total_pnl:,.0f} 元",
               delta=f"{total_pnl / max(float(account['initial_capital']), 1) * 100:.2f}%")
 
+# ---- 多策略对比（所有账户归一化权益叠加） ----
+st.divider()
+st.subheader("📊 多策略对比")
+
+all_accounts = get_accounts()
+if len(all_accounts) > 1:
+    import plotly.graph_objects as go
+    fig_multi = go.Figure()
+    colors = ["#2196f3", "#ff9800", "#4caf50", "#f44336", "#9c27b0", "#00bcd4"]
+
+    for ai, (_, acct) in enumerate(all_accounts.iterrows()):
+        aid = int(acct["id"])
+        pnl = get_paper_daily_pnl(aid)
+        if not pnl.empty and len(pnl) > 1:
+            pnl["trade_date"] = pd.to_datetime(pnl["trade_date"])
+            initial = float(acct["initial_capital"])
+            if initial > 0:
+                normalized = pnl["total_value"].values / initial
+            else:
+                normalized = pnl["total_value"].values
+            strategy_label = str(acct.get("strategy_name") or acct.get("strategy_type") or "")
+            label = f"#{aid} {acct['name']} ({strategy_label})"
+            color = colors[ai % len(colors)]
+            fig_multi.add_trace(go.Scatter(
+                x=pnl["trade_date"], y=normalized,
+                mode="lines", name=label,
+                line=dict(color=color, width=1.5),
+            ))
+
+    fig_multi.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                         annotation_text="基准线 (1.0)")
+    fig_multi.update_layout(
+        height=350, template="plotly_white",
+        margin=dict(l=0, r=0, t=10, b=0),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        yaxis_title="归一化净值",
+    )
+    st.plotly_chart(fig_multi, use_container_width=True)
+else:
+    st.caption("创建多个账户后可在此对比各策略归一化净值曲线")
+
 # ---- 权益曲线 + 策略信息 ----
 st.divider()
 ecol1, ecol2 = st.columns([2, 1])
@@ -402,8 +485,29 @@ with ecol2:
     elif stype == "ml" or not sname:
         st.caption("**类型**: ML 集成")
         st.caption("**模型**: XGBoost + LightGBM")
-        st.caption("**选股**: Top-15 NDrop")
-        st.caption("**训练**: Walk-Forward 3+1年")
+
+        # 显示 ML 配置详情
+        ml_config_name = sp.get("ml_config_name", "") if isinstance(sp, dict) else ""
+        if ml_config_name:
+            st.caption(f"**ML 配置**: {ml_config_name}")
+            try:
+                from app.utils.ml_config_manager import get_ml_config_by_name
+                ml_cfg = get_ml_config_by_name(ml_config_name)
+                if ml_cfg:
+                    st.caption(f"**选股**: Top-{ml_cfg.get('top_n', 15)} {ml_cfg.get('rebalance_mode', 'ndrop').upper()}")
+                    if ml_cfg.get("rebalance_mode") == "ndrop":
+                        st.caption(f"**NDrop**: N={ml_cfg.get('ndrop_n', 2)}")
+                    st.caption(f"**训练**: Walk-Forward {ml_cfg.get('train_years', 3)}+{ml_cfg.get('val_years', 1)}年")
+                    st.caption(f"**标签**: {ml_cfg.get('label_mode', 'binary')} / Forward {ml_cfg.get('forward_days', 1)}d")
+                    if ml_cfg.get("factor_names"):
+                        n_factors = len(ml_cfg["factor_names"]) if isinstance(ml_cfg["factor_names"], list) else 0
+                        st.caption(f"**因子数**: {n_factors}（自定义）")
+            except Exception:
+                st.caption("**选股**: Top-15 NDrop")
+                st.caption("**训练**: Walk-Forward 3+1年")
+        else:
+            st.caption("**选股**: Top-15 NDrop")
+            st.caption("**训练**: Walk-Forward 3+1年")
 
     st.caption(f"**佣金**: {float(account.get('commission_rate', 0.00009))*10000:.1f}‱")
     st.caption(f"**印花税**: {float(account.get('stamp_duty_rate', 0.0005))*10000:.1f}‱")
