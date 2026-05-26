@@ -47,3 +47,37 @@ def get_all_strategies() -> dict[str, type]:
     all_s = dict(STRATEGY_REGISTRY)
     all_s.update(load_custom_strategies())
     return all_s
+
+
+def list_all_strategies() -> dict[str, dict]:
+    """统一策略列表：静态策略 + ML 策略。
+
+    返回格式: {display_name: {"type": "static"|"ml", ...}}
+    - 静态: {"type": "static", "class": StrategyClass}
+    - ML:   {"type": "ml", "config": {...config_dict...}}
+    """
+    unified = {}
+
+    # 静态策略
+    for name, cls in get_all_strategies().items():
+        unified[name] = {"type": "static", "class": cls}
+
+    # ML 策略
+    try:
+        from app.utils.ml_config_manager import list_ml_configs
+        for _, row in list_ml_configs().iterrows():
+            unified[f"ML: {row['name']}"] = {"type": "ml", "config": row.to_dict()}
+    except Exception:
+        pass  # DB 不可用时跳过
+
+    return unified
+
+
+def is_ml_strategy(item: dict) -> bool:
+    """判断策略是否为 ML 类型。"""
+    return isinstance(item, dict) and item.get("type") == "ml"
+
+
+def is_static_strategy(item: dict) -> bool:
+    """判断策略是否为静态类型。"""
+    return isinstance(item, dict) and item.get("type") == "static"
