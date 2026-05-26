@@ -49,7 +49,7 @@ def _get_minute_ohlcv(codes: list[str], start_date: str, end_date: str, period: 
         engine.dispose()
     if not df.empty:
         df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df["turnover"] = None
+        df["turnover"] = np.nan
     return df
 
 
