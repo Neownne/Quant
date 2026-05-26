@@ -92,6 +92,13 @@ class PaperEngine:
         if factor_df.empty:
             return None
 
+        # 防御性类型转换：DB 加载的 trade_date 可能是 date 对象
+        ohlcv_data = ohlcv_data.copy()
+        ohlcv_data["trade_date"] = pd.to_datetime(ohlcv_data["trade_date"])
+        if index_ohlcv is not None and not index_ohlcv.empty:
+            index_ohlcv = index_ohlcv.copy()
+            index_ohlcv["trade_date"] = pd.to_datetime(index_ohlcv["trade_date"])
+
         # 0. 指数大跌检查
         crash_warning = False
         if index_ohlcv is not None and not index_ohlcv.empty:
