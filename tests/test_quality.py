@@ -3,7 +3,7 @@ import pandas as pd
 from data.quality import DataQualityChecker
 
 
-class TestCoverageCheck:
+class TestDataQualityChecker:
     def test_coverage_pass_when_all_stocks_present(self):
         checker = DataQualityChecker(expected_stock_count=5000)
         df = pd.DataFrame({
@@ -47,3 +47,21 @@ class TestCoverageCheck:
         })
         result = checker.check_frozen(df, "2024-01-15")
         assert not result["passed"]
+
+    def test_jumps_detected(self):
+        checker = DataQualityChecker(expected_stock_count=100)
+        df = pd.DataFrame({
+            "code": [f"00000{i}" for i in range(100)],
+            "close": [10.0] * 100,
+            "volume": [1e6] * 100,
+            "change_pct": [0.5] * 99 + [25.0],
+        })
+        result = checker.check_jumps(df, "2024-01-15")
+        assert not result["passed"]
+
+    def test_jumps_missing_column(self):
+        checker = DataQualityChecker(expected_stock_count=100)
+        df = pd.DataFrame({"close": [10.0], "volume": [1e6]})
+        result = checker.check_jumps(df, "2024-01-15")
+        assert not result["passed"]
+        assert "缺失" in result["detail"]
