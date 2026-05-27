@@ -10,13 +10,14 @@ import pandas as pd
 from sqlalchemy import text
 
 from data.db import get_engine, init_db
-from app.utils.backtest_runner import (
-    run_backtest, load_index_data, load_benchmark_indices, compute_benchmark_returns,
-)
-from app.utils.data_loader import load_ohlcv
+# [架构重构] app.utils 已移除，此处需要重构
+# from app.utils.backtest_runner import (
+#     run_backtest, load_index_data, load_benchmark_indices, compute_benchmark_returns,
+# )
+# from app.utils.data_loader import load_ohlcv
 from strategies import get_all_strategies, list_all_strategies
-from app.utils.ml_config_manager import list_ml_configs
-from app.utils.ml_backtest import run_ml_backtest
+# from app.utils.ml_config_manager import list_ml_configs
+# from app.utils.ml_backtest import run_ml_backtest
 
 init_db()
 

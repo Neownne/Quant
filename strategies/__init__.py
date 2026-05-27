@@ -65,8 +65,9 @@ def list_all_strategies() -> dict[str, dict]:
         unified[name] = {"type": "static", "class": cls}
 
     # ML 策略
+    # [架构重构] app.utils 已移除，ML 策略列表暂不可用
     try:
-        from app.utils.ml_config_manager import list_ml_configs
+        from app.utils.ml_config_manager import list_ml_configs  # noqa: F401 (removed in v2.0)
         for _, row in list_ml_configs().iterrows():
             unified[f"ML: {row['name']}"] = {"type": "ml", "config": row.to_dict()}
     except Exception:

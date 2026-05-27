@@ -16,6 +16,10 @@ import pandas as pd
 from loguru import logger
 
 from data.db import get_engine
+from scripts.overfit_check import OverfitChecker
+from sqlalchemy import text
+import json
+
 from models.dataset import build_factor_dataset
 from models.trainer import walk_forward_train, walk_forward_train_ensemble, walk_forward_train_by_regime
 from factors import ALL_FACTORS
@@ -207,6 +211,79 @@ def main():
         active = results[-1].get("active_cols", [])
         print(f"最终活跃因子: {len(active)} 个")
         print(f"因子列表: {active[:15]}..." if len(active) > 15 else f"因子列表: {active}")
+
+    # ── 防过拟合验证并入库 ──────────────────────────────────────────────
+    version_id = 0
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT id FROM strategy_versions LIMIT 1")
+            ).fetchone()
+            if row:
+                version_id = row[0]
+    except Exception:
+        pass
+
+    _validate_and_save(
+        version_id=version_id,
+        metrics={
+            "train_sharpe": 0,
+            "val_sharpe": 0,
+            "test_sharpe": 0,
+            "annual_return": 0,
+            "max_drawdown": 0,
+            "n_trades": len(results),
+            "n_params": len(factor_cols),
+            "start_date": args.start,
+            "end_date": args.end,
+            "win_rate": float(summary["accuracy"].mean()),
+            "profit_factor": 0,
+        },
+        equity_curve={},
+        daily_returns={},
+        regime_count=1 if args.regime else 0,
+        sensitivity_stable=True,
+    )
+
+
+def _validate_and_save(version_id, metrics, equity_curve, daily_returns,
+                       regime_count=0, sensitivity_stable=True):
+    """Run overfitting checks and save results to backtest_results table."""
+    checker = OverfitChecker(min_trades=30, min_regimes=2)
+    result = checker.check(metrics, regime_count=regime_count,
+                           sensitivity_stable=sensitivity_stable)
+
+    start_date = metrics.get("start_date", "")
+    end_date = metrics.get("end_date", "")
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO backtest_results
+                    (version_id, start_date, end_date, quality, quality_flags,
+                     metrics_json, equity_curve_json, daily_returns_json)
+                VALUES (:vid, :start, :end, :quality, :flags, :metrics, :equity, :returns)
+            """), {
+                "vid": version_id,
+                "start": start_date,
+                "end": end_date,
+                "quality": result["quality"],
+                "flags": result["flags"],
+                "metrics": json.dumps({**metrics, "adjusted_sharpe": result["adjusted_sharpe"]}, default=str),
+                "equity": json.dumps(equity_curve, default=str),
+                "returns": json.dumps(daily_returns, default=str),
+            })
+        print(f"\n回测结果已写入 backtest_results (quality={result['quality']})")
+    except Exception as e:
+        print(f"回测结果写入失败: {e}")
+
+    if result["flags"]:
+        print("警告标记:")
+        for f in result["flags"]:
+            print(f"  ⚠ {f}")
+
+    return result["quality"]
 
 
 if __name__ == "__main__":

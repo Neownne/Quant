@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Quant Monitor{% endblock %}</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+    <script src="/static/app.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1923; color: #e0e0e0; }
+        .nav { display: flex; gap: 0; background: #1a2a3a; border-bottom: 1px solid #2a3a4a; padding: 0 20px; }
+        .nav a { color: #8899aa; text-decoration: none; padding: 14px 20px; font-size: 14px; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .nav a:hover, .nav a.active { color: #4fc3f7; border-bottom-color: #4fc3f7; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #1a2a3a; }
+        th { color: #8899aa; font-weight: 600; font-size: 12px; text-transform: uppercase; }
+        tr:hover { background: rgba(79,195,247,0.05); }
+        .card { background: #1a2a3a; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #2a3a4a; }
+        .card h3 { font-size: 16px; margin-bottom: 12px; color: #ccc; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-valid { background: #1b5e20; color: #66bb6a; }
+        .badge-suspect { background: #e65100; color: #ffb74d; }
+        .badge-invalid { background: #b71c1c; color: #ef5350; }
+        .badge-normal { background: #1b5e20; color: #66bb6a; }
+        .badge-warning { background: #e65100; color: #ffb74d; }
+        .badge-critical { background: #b71c1c; color: #ef5350; }
+        .up { color: #ef5350; }
+        .down { color: #26a69a; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="nav">
+        <a href="/" {% if active_page == 'dashboard' %}class="active"{% endif %}>行情看板</a>
+        <a href="/backtest" {% if active_page == 'backtest' %}class="active"{% endif %}>回测对比</a>
+        <a href="/paper" {% if active_page == 'paper' %}class="active"{% endif %}>模拟盘</a>
+        <a href="/data" {% if active_page == 'data' %}class="active"{% endif %}>数据状态</a>
+        <a href="/factors" {% if active_page == 'factors' %}class="active"{% endif %}>因子监控</a>
+    </nav>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

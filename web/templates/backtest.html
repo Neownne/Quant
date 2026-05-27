@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h3>回测对比</h3>
+    <div style="display:flex; gap:12px; margin-bottom:16px;">
+        <input placeholder="策略名称筛选" name="strategy"
+               hx-get="/api/backtest-list" hx-trigger="keyup changed delay:500ms"
+               hx-target="#bt-table" hx-swap="innerHTML"
+               style="background:#0f1923;border:1px solid #2a3a4a;color:#e0e0e0;padding:6px 12px;border-radius:4px;">
+        <select name="quality"
+                hx-get="/api/backtest-list" hx-trigger="change"
+                hx-target="#bt-table" hx-swap="innerHTML"
+                style="background:#0f1923;border:1px solid #2a3a4a;color:#e0e0e0;padding:6px 12px;border-radius:4px;">
+            <option value="">全部质量</option>
+            <option value="valid">有效</option>
+            <option value="suspect">可疑</option>
+            <option value="invalid">无效</option>
+        </select>
+    </div>
+
+    <div id="bt-table" hx-get="/api/backtest-list" hx-trigger="load">
+        <p>加载中...</p>
+    </div>
+
+    <div id="equity-panel" class="card" style="margin-top:20px;min-height:200px;">
+        <p style="color:#889;">点击"权益曲线"查看详情</p>
+    </div>
+</div>
+{% endblock %}
