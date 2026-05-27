@@ -46,15 +46,42 @@ class DataConfig:
     }
 
 
+class TradingConfig:
+    """A股交易成本 & 风控参数（所有回测统一引用）"""
+    # 账户
+    INITIAL_CASH = 1_000_000           # 100万本金
+
+    # 交易成本
+    COMMISSION = 0.00009               # 万0.9 佣金（买卖双向）
+    STAMP_DUTY = 0.0005                # 万5 印花税（卖出单向）
+    SLIPPAGE = 0.001                   # 0.1% 滑点
+
+    # 组合
+    TOP_N = 15                         # 持仓股数
+    MAX_SINGLE_WEIGHT = 0.10           # 单只上限10%
+    MAX_INDUSTRY_WEIGHT = 0.30         # 行业上限30%
+
+    # 风控
+    STOP_LOSS_PCT = 0.08               # 个股止损-8%
+    PORTFOLIO_DD_THRESHOLD = 0.20      # 组合回撤-20%减仓
+    MAX_DD_LIMIT = 0.25                # 最大回撤-25%清仓
+    INDEX_CRASH_LOOKBACK = 15          # 指数大跌检测窗口（天）
+    INDEX_CRASH_THRESHOLD = -0.12      # 指数15日跌超12%空仓
+
+    # 调仓
+    REBALANCE_FREQ = 5                 # 默认周度调仓（交易日）
+    NDROP_N = 2                        # NDrop: 每次替换最差2只
+
+
 class AccountConfig:
-    """模拟账户默认配置"""
-    DEFAULT_CASH = 1_000_000
-    DEFAULT_COMMISSION = 0.00009       # 万0.9
-    DEFAULT_STAMP_DUTY = 0.0005        # 万5
-    DEFAULT_SLIPPAGE = 0.01
-    DEFAULT_TOP_N = 15
-    DEFAULT_MAX_SINGLE = 0.10          # 单只上限10%
-    DEFAULT_MAX_INDUSTRY = 0.30        # 行业上限30%
-    DEFAULT_STOP_LOSS = 0.08           # 个股止损-8%
-    DEFAULT_PORTFOLIO_DD = 0.20        # 组合回撤-20%减仓
-    DEFAULT_MAX_DD = 0.25              # 最大回撤-25%清仓
+    """模拟账户默认配置（兼容旧代码，引用 TradingConfig）"""
+    DEFAULT_CASH = TradingConfig.INITIAL_CASH
+    DEFAULT_COMMISSION = TradingConfig.COMMISSION
+    DEFAULT_STAMP_DUTY = TradingConfig.STAMP_DUTY
+    DEFAULT_SLIPPAGE = TradingConfig.SLIPPAGE
+    DEFAULT_TOP_N = TradingConfig.TOP_N
+    DEFAULT_MAX_SINGLE = TradingConfig.MAX_SINGLE_WEIGHT
+    DEFAULT_MAX_INDUSTRY = TradingConfig.MAX_INDUSTRY_WEIGHT
+    DEFAULT_STOP_LOSS = TradingConfig.STOP_LOSS_PCT
+    DEFAULT_PORTFOLIO_DD = TradingConfig.PORTFOLIO_DD_THRESHOLD
+    DEFAULT_MAX_DD = TradingConfig.MAX_DD_LIMIT

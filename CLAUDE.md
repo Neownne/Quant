@@ -20,3 +20,34 @@
 ## Skill 加载指令
 
 当需要加载 skill 时，使用 Skill 工具调用对应的 skill 名称。
+
+## 回测统一参数
+
+所有回测必须引用 `config/settings.py:TradingConfig`，不得硬编码：
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| INITIAL_CASH | 1,000,000 | 100万本金 |
+| COMMISSION | 0.00009 | 万0.9 佣金（买卖双向） |
+| STAMP_DUTY | 0.0005 | 万5 印花税（卖出单向） |
+| SLIPPAGE | 0.001 | 0.1% 滑点 |
+| REBALANCE_FREQ | 5 | 默认周度调仓 |
+| NDROP_N | 2 | NDrop 每次替换最差2只 |
+| STOP_LOSS_PCT | 0.08 | 个股止损-8% |
+| MAX_DD_LIMIT | 0.25 | 组合最大回撤-25%清仓 |
+
+选股管线：预测打分 → 排雷过滤(8项检查，允许≤3项违规) → NDrop剔除最差(保留K-N，替换N) → Top-N选股 → 等权持有
+
+风控管线：每日检查持仓 → 个股止损-8%(硬止损) → 组合回撤-20%减仓 → 组合回撤-25%清仓(10天冷静期+重置peak) → 指数15日跌超12%空仓
+
+## 版本历史
+
+### v1.10 (2026-05-28)
+- 股票池从 `ORDER BY code LIMIT 200` 改为全市场非ST选股（修复仅选深市股票偏差）
+- 新增 `--universe-size N` 参数控制候选池大小（0=全市场，默认）
+- 集成组合级风控：-20%减仓、-25%清仓（含10天冷静期）、指数大跌空仓
+- 指数数据无条件加载，不再依赖 `--regime` 开关
+- 排雷过滤（8项检查，允许≤3项违规）
+- NDrop 增量调仓（K=15, N=2）
+- 止损事件和风控事件记录到 backtest_results.metrics_json
+- 修复 run_all_backtests.py 和 verify_paper_trading.py 中相同的股票池偏差

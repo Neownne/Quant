@@ -1,157 +1,71 @@
-# 内置策略文档
+# 策略文档 (v1.10)
 
 ## 策略架构
 
-所有策略继承 `backtrader.Strategy`，通过 `strategies/__init__.py` 中的 `STRATEGY_REGISTRY` 注册后在 Web 界面可用。
+所有策略通过 `strategies/__init__.py` 中的 `get_all_strategies()` 注册，支持静态策略（backtrader）和 ML 策略（XGBoost/LightGBM 集成）。
 
-回测引擎（`app/utils/backtest_runner.py`）统一提供：
-- **资金管理**：每次买入使用可用资金的 95%（`PercentSizer(95)`）
-- **佣金**：默认万分之 0.85（0.000085），可在回测页调整
-- **滑点**：固定 0.01 元/股
-- **输出指标**：总收益率、年化收益、最大回撤、夏普比率、胜率、权益曲线、逐笔交易明细
-
----
-
-## 1. 双均线交叉（SMACross）
-
-### 策略逻辑
-
-计算两条不同周期的简单移动平均线（SMA），当短期均线**上穿**长期均线时买入，**下穿**时卖出。
-
-```
-信号生成：
-  金叉（买入）： fast_MA 从下方穿越 slow_MA 到上方
-  死叉（卖出）： fast_MA 从上方穿越 slow_MA 到下方
-```
-
-### 参数
-
-| 参数 | 默认值 | 范围 | 说明 |
-|---|---|---|---|
-| `fast` | 5 | 1–120 | 短期均线周期（交易日） |
-| `slow` | 20 | 1–250 | 长期均线周期（交易日） |
-
-### 适用场景
-
-- 趋势市效果好，盘整市频繁假信号
-- fast 越小越敏感（信号多但噪音大），slow 越大越滞后（信号少但可靠）
-- 经典组合：5/20（短线）、10/50（中线）、20/60（中长线）
-
-### 风险提示
-
-均线交叉天然滞后于价格，在震荡市中可能产生连续亏损。建议配合趋势过滤（如 ADX）或止损使用。
+回测引擎统一配置（`config/settings.py:TradingConfig`）：
+- **初始资金**：100 万
+- **佣金**：万 0.9（买卖双向）
+- **印花税**：万 5（卖出单向）
+- **滑点**：0.1%
 
 ---
 
-## 2. MACD 金叉死叉（MACDStrategy）
+## 当前策略
 
-### 策略逻辑
+### 静态策略（1 个）
 
-MACD 由三部分构成：
-- **DIF**（快线）= 12 周期 EMA − 26 周期 EMA
-- **DEA**（慢线）= DIF 的 9 周期 EMA
-- **柱状图** = 2 × (DIF − DEA)
+#### 震荡网格 (高抛低吸)
+- **文件**：`grid_shock.py`
+- **引擎**：backtrader Cerebro + 等权聚合
+- **逻辑**：基于均线偏离的网格交易，高抛低吸
+- **参数**：size=500, buy_step=0.02, sell_step=0.02, ma_period=30, max_positions=5
 
-当 DIF **上穿** DEA（柱状图由负转正）时买入，DIF **下穿** DEA（柱状图由正转负）时卖出。
+### ML 策略（5 个）
 
+所有 ML 策略共享 v1.10 管线：
 ```
-信号生成：
-  金叉（买入）： DIF 从下方穿越 DEA 到上方
-  死叉（卖出）： DIF 从上方穿越 DEA 到下方
+全市场非ST (5238只) → 因子计算 → IC门禁 → 正交筛选 → Walk-forward训练
+→ ML打分 → 排雷过滤(8项,≤3违规) → NDrop调仓(K=15,N=2) → 等权持有
+→ 每日止损(-8%) → 组合回撤(-20%减仓,-25%清仓) → 指数大跌空仓
 ```
 
-### 参数
+| 策略 | 因子池 | 模型 | 标签 | 特点 |
+|---|---|---|---|---|
+| ML-默认集成 | 动量+反转 | XGB+LGBM 集成 | ret_1d | 双模型集成，更稳健 |
+| ML-动量精选 | 动量/趋势(17个) | XGBoost | ret_5d | 周度标签，换手低 |
+| ML-反转精选 | 反转(20个) | LightGBM | ret_1d | 日频反转信号 |
+| ML-全量因子测试 | 全部 76 因子 | XGB+LGBM 集成 | ret_1d | 最大因子覆盖 |
+| ML-动态多因子 | 全部 76 因子 | XGB+LGBM 集成 | ret_1d | 动态反馈闭环 |
 
-| 参数 | 默认值 | 范围 | 说明 |
-|---|---|---|---|
-| `fast` | 12 | 2–50 | 快线 EMA 周期 |
-| `slow` | 26 | 5–100 | 慢线 EMA 周期 |
-| `signal` | 9 | 2–30 | DEA（信号线）周期 |
-
-### 适用场景
-
-- 比双均线更灵敏（使用 EMA 而非 SMA），对近期价格变化反应更快
-- MACD 柱状图的收窄/扩张可辅助判断趋势强弱
-- 默认 (12, 26, 9) 是市场标准参数，适合日线级别
-
-### 风险提示
-
-在横盘市场中 MACD 会在零轴附近反复交叉，产生频繁假信号。当 MACD 远离零轴时信号可靠性更高。
+运行：
+```bash
+bash scripts/run_all_backtests.sh    # 一键运行全部 6 个策略
+# 或单独运行
+python scripts/run_ml_backtest.py --strategy "ML-默认集成" --factor-preset "+momentum+reversal"
+python scripts/run_static_backtest.py --strategy "震荡网格(高抛低吸)" --top-n 30
+```
 
 ---
 
-## 3. RSI 超买超卖（RSIStrategy）
+## 已废弃策略
 
-### 策略逻辑
-
-RSI（相对强弱指数）衡量价格变动的速度和幅度，震荡于 0–100：
-
-```
-RSI = 100 − [100 / (1 + RS)]
-其中 RS = 平均涨幅 / 平均跌幅（Wilder 平滑）
-```
-
-当 RSI 跌破**超卖线**时买入（市场过度悲观），升破**超买线**时卖出（市场过度乐观）。
-
-```
-信号生成：
-  买入： RSI 从上方跌破 oversold 线
-  卖出： RSI 从下方升破 overbought 线
-```
-
-注意：策略只持有单一方向（买入→卖出→空仓），不会反向做空。
-
-### 参数
-
-| 参数 | 默认值 | 范围 | 说明 |
-|---|---|---|---|
-| `period` | 14 | 2–50 | RSI 计算周期（传统值 14） |
-| `oversold` | 30 | 10–40 | 超卖阈值，低于此值买入 |
-| `overbought` | 70 | 60–90 | 超买阈值，高于此值卖出 |
-
-### 适用场景
-
-- 震荡市/区间市效果最好，单边趋势市可能过早离场或抄底过早
-- period 越小 RSI 越敏感，适合短线；越大越平滑，适合中长线
-- 保守组合：(20, 80)；激进组合：(25, 75)；默认：(30, 70)
-
-### 风险提示
-
-在强单边市场中 RSI 可长时间维持在超买/超卖区（"钝化"），此时机械执行会导致踏空或逆势亏损。建议配合趋势判断使用。
+以下策略已移除（收益趋近于零，不适合 A 股市场）：
+- ~~双均线交叉 (SMACross)~~ — `sma_cross.py`
+- ~~MACD 金叉死叉 (MACDStrategy)~~ — `macd_strategy.py`
+- ~~RSI 超买超卖 (RSIStrategy)~~ — `rsi_strategy.py`
 
 ---
 
-## 自定义策略（Web 编辑器）
+## 版本历史
 
-通过「策略编辑器」页面可在线编写自定义 backtrader 策略，保存后自动注册到回测页面的策略列表中。
+### v1.10 (2026-05-28)
+- 全市场选股（修复仅选深市股票偏差）
+- 排雷过滤 + NDrop 增量调仓
+- 组合级风控（回撤减仓/清仓/指数空仓）
+- 全部策略版本统一为 v1.10
 
-**策略模板：**
-```python
-import backtrader as bt
-
-class MyStrategy(bt.Strategy):
-    params = (
-        ("param1", 10),
-        ("param2", 20),
-    )
-
-    def __init__(self):
-        # 在这里计算指标
-        self.ind1 = bt.ind.SMA(period=self.params.param1)
-        self.ind2 = bt.ind.SMA(period=self.params.param2)
-        self.crossover = bt.ind.CrossOver(self.ind1, self.ind2)
-
-    def next(self):
-        # 在这里写交易逻辑
-        if not self.position:
-            if self.crossover > 0:
-                self.buy()
-        elif self.crossover < 0:
-            self.close()
-```
-
-**要求**：
-- 类名必须为 `MyStrategy`
-- 必须继承 `bt.Strategy`
-- 使用 `self.buy()` / `self.sell()` / `self.close()` 交易
-- 参数通过 `params` 元组定义，格式：`(("参数名", 默认值), ...)`
+### v1.00 (2026-05)
+- 初始 ML 管线：因子→IC→正交→训练→Top-N 选股
+- RSI/MACD/双均线策略移除

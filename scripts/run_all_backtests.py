@@ -70,7 +70,7 @@ engine = get_engine()
 codes_df = pd.read_sql(
     "SELECT code FROM stock_basic WHERE is_st = FALSE "
     "AND list_date <= CURRENT_DATE - INTERVAL '365 days' "
-    "ORDER BY code LIMIT 50",
+    "ORDER BY code",
     engine,
 )
 all_codes = codes_df["code"].tolist()

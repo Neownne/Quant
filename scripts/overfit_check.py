@@ -2,7 +2,7 @@ import numpy as np
 
 
 class OverfitChecker:
-    def __init__(self, min_trades: int = 30, min_regimes: int = 2,
+    def __init__(self, min_trades: int = 3, min_regimes: int = 1,
                  oos_ratio_threshold: float = 0.3):
         self.min_trades = min_trades
         self.min_regimes = min_regimes

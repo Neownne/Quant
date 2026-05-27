@@ -147,6 +147,16 @@ def build_factor_dataset(
         ret_parts.append(group)
     result = pd.concat(ret_parts, ignore_index=True)
 
+    # 如果前瞻天数 > 1，同时计算对应周期的收益率
+    if forward_days > 1:
+        ret_col = f"ret_{forward_days}d"
+        ret_parts = []
+        for code, group in result.groupby("code"):
+            group = group.sort_values("trade_date")
+            group[ret_col] = group["close"].pct_change(periods=forward_days).shift(-forward_days)
+            ret_parts.append(group)
+        result = pd.concat(ret_parts, ignore_index=True)
+
     result = result.drop(columns=["close"])
     logger.info(f"数据集: {len(result)} 行, {len(result.dropna())} 有效")
     return result

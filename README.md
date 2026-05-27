@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-05-26  
+> 最后更新：2026-05-28 (v1.10)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
@@ -16,19 +16,21 @@
 ## 架构概览
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Web 监控层 (FastAPI + HTMX)           │
-│  行情看板 │ 回测对比 │ 模拟盘 │ 数据状态 │ 因子监控  │
-└──────────────────────┬──────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│           Web 监控层 (FastAPI + HTMX + Alpine.js)         │
+│  行情看板 │ 回测对比 │ 模拟盘 │ 数据状态 │ 因子监控        │
+│  routes/api.py (主API) + dashboard/backtest/paper 路由   │
+│  templates/ (Jinja2 + ECharts 图表)                      │
+└──────────────────────┬──────────────────────────────────┘
                        │ 只读查询
-┌──────────────────────┴──────────────────────────┐
-│              PostgreSQL (29张表)                  │
-└──────────────────────┬──────────────────────────┘
+┌──────────────────────┴──────────────────────────────────┐
+│                  PostgreSQL (31张表)                      │
+└──────────────────────┬──────────────────────────────────┘
                        │ 读写
-┌──────────────────────┴──────────────────────────┐
-│         后台研究引擎 (脚本/定时任务)                │
-│  数据同步→质量校验→因子计算→训练→回测→归因→调参     │
-└─────────────────────────────────────────────────┘
+┌──────────────────────┴──────────────────────────────────┐
+│              后台研究引擎 (脚本/定时任务)                    │
+│  数据同步→质量校验→因子计算→训练→回测→归因→调参            │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -59,9 +61,9 @@ quant/
 ├── strategies/               # 策略层
 │   ├── README.md             # 策略文档（逻辑、参数、风险提示）
 │   ├── __init__.py           # STRATEGY_REGISTRY + 自定义策略加载
-│   ├── sma_cross.py          # 双均线交叉策略
-│   ├── macd_strategy.py      # MACD 金叉死叉策略
-│   ├── rsi_strategy.py       # RSI 超买超卖策略
+│   ├── sma_cross.py          # [已废弃] 双均线交叉策略
+│   ├── macd_strategy.py      # [已废弃] MACD 金叉死叉策略
+│   ├── rsi_strategy.py       # [已废弃] RSI 超买超卖策略
 │   └── grid_shock.py         # 震荡网格(高抛低吸)策略
 │
 ├── factors/                    # 因子层（76 个因子）
@@ -103,31 +105,42 @@ quant/
 │   ├── test_screening.py       # 正交筛选测试
 │   └── test_portfolio.py       # 组合优化测试（选股+仓位+风控）
 │
-├── web/                      # Web 界面层 (FastAPI + HTMX)
-│   ├── main.py               # FastAPI 入口 + 路由注册
-│   ├── routers/
-│   │   ├── dashboard.py      # 行情看板
-│   │   ├── backtest.py       # 回测对比
-│   │   ├── paper.py          # 模拟盘
-│   │   ├── data_status.py    # 数据状态监控
-│   │   └── factor_monitor.py # 因子监控
+├── web/                      # Web 界面层 (FastAPI + HTMX + Alpine.js + ECharts)
+│   ├── main.py               # FastAPI 入口 + 路由注册 + 静态文件
+│   ├── routes/
+│   │   ├── api.py            # 主 API 路由（行情/K线/回测详情/数据状态/模拟盘）
+│   │   ├── dashboard.py      # 行情看板路由
+│   │   ├── backtest.py       # 回测对比路由
+│   │   ├── paper.py          # 模拟盘路由
+│   │   ├── data_status.py    # 数据状态监控路由
+│   │   └── factors.py        # 因子监控路由
+│   ├── static/
+│   │   └── app.js            # 前端 JS（ECharts 图表管理）
 │   └── templates/
-│       └── ...               # HTMX 模板文件
+│       ├── base.html         # 基础布局（导航栏 + HTMX + Alpine.js + ECharts CDN）
+│       ├── dashboard.html    # 行情看板（自选列表 + K线图）
+│       ├── backtest.html     # 回测对比（列表 + 详情面板 + 双线权益曲线）
+│       ├── paper.html        # 模拟盘管理
+│       ├── data.html         # 数据状态监控
+│       └── factors.html      # 因子就绪状态 + 血缘追踪
 │
-├── scripts/                  # 批量工具
+├── scripts/                  # 批量工具（16个脚本）
+│   ├── run_all_backtests.sh      # 一键运行全部 6 个策略（1静态+5ML，含动态反馈闭环）
+│   ├── run_static_backtest.py    # 静态策略回测（backtrader Cerebro+等权聚合）
+│   ├── run_ml_backtest.py        # ML 选股端到端评估（因子预设+算法选择+Optuna调优）
+│   ├── run_simulation.py         # ML 每日模拟回测（选股→分配→止损→P&L）
 │   ├── batch_backtest.py         # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
 │   ├── grid_backtest.py          # 全市场回测 + 参数网格搜索 + 过拟合检测
-│   ├── run_ml_backtest.py        # ML 选股端到端评估（因子→筛选→训练→汇总）
-│   ├── run_simulation.py         # ML 每日模拟回测（选股→分配→止损→P&L）
-│   ├── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
 │   ├── sync_minute_data.py       # 60 分钟 K 线批量同步（Sina 直连，超时+续传）
 │   ├── compare_freq.py           # 日频 vs 分钟频 ML 回测对比
 │   ├── validate_minute_data.py   # 分钟线日收益 vs 日线收益一致性校验
+│   ├── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
 │   ├── overfit_check.py          # 过拟合检测（样本内 vs 样本外 Sharpe 对比）
 │   ├── attribution.py            # 收益归因分析（因子/行业/风格归因）
 │   ├── auto_adjust.py            # 自动调参（基于归因结果调整模型参数）
 │   ├── health_check.py           # 系统健康检查（DB/数据/因子/模型全链路）
-│   └── command_worker.py         # 后台命令执行 worker
+│   ├── command_worker.py         # 后台命令执行 worker
+│   └── run_all_backtests.py      # [已废弃] 旧版批量回测（依赖已移除的app.utils）
 │
 ├── docs/                     # 文档 & 研究报告
 │   ├── quant-strategy-research.md  # 量化策略研究报告（技术指标+学术前沿）
@@ -200,38 +213,64 @@ data/availability.py  ─── 数据可用性
   └── 实时数据可用性查询（某股票在某日期是否有数据）
 ```
 
-## ML 选股回测结果
+## 回测结果（2026-05-28, v1.10）
 
-> 详见 [docs/strategy-interpretability.md](docs/strategy-interpretability.md)
+> 6 个策略（1 静态 + 5 ML），v1.10 管线：全市场选股 → ML打分 → 排雷过滤 → NDrop调仓 → 等权持有 + 组合风控。
+> 统一参数：100 万本金、佣金万 0.9（买卖双向）、印花税万 5（卖出单向）、滑点 0.1%。
+> ```bash
+> bash scripts/run_all_backtests.sh          # 一键运行全部 6 个策略
+> ```
 
-| 指标 | 800-Stock 全市场 | 说明 |
-|------|:---:|------|
-| Sharpe | **1.01** | 经无风险利率调整 |
-| 年化收益 | **26.3%** | 2021-2026 区间 |
-| 最大回撤 | -36.7% | 主要发生在 2022 年熊市 |
-| 胜率 | 53.7% | 日频预测准确率 |
-| Walk-forward 窗口 | 4 | 滚动训练+验证 |
+### v1.10 核心改进
+- **全市场选股**：修复 `ORDER BY code LIMIT 200` 仅选深市股偏差，默认5238只非ST
+- **排雷过滤**：8项质量检查（调整后净利润/负债率/商誉/质押/现金流/ROE/净利率），允许≤3项违规
+- **NDrop 增量调仓**：每次最多替换2只最差持仓，换手率~4%（vs 旧版~16%）
+- **组合风控**：-20%减半仓 / -25%清仓(10天冷静期) / 指数15日跌超12%空仓
 
-**参数优化**（50-stock 网格搜索，12 组）：
-- 最优参数：`top_n=15, ndrop=True, ndrop_n=2`
-- NDrop 增量调仓在所有参数级别均优于每日全换仓
-- top_n=15 是甜点区（10 太集中，20 太分散）
+### ML 策略（5个，周度调仓 + A股真实成本 + 200只候选池）
 
-**过拟合检测**：样本外 (2024-2026) Sharpe=2.27 > 样本内 (2019-2022) Sharpe=1.09，衰减比 208.1%，**无过拟合**。
+> 统一参数：100 万本金、佣金万 0.9（买卖双向）、印花税万 5（卖出单向）、滑点 0.1%。
 
-**因子筛选链**：76 个因子 → IC 门禁 (65→20, \|IC\|>0.02, \|t\|>2.0) → 正交筛选 (20→8, Spearman<0.7) → XGBoost+LightGBM 概率平均集成
+| 策略 | 因子池 | 模型 | 标签 | 年化收益 | Sharpe | 最大回撤 | 日均换手 | 年化成本 |
+|---|---|---|---|---|---|---|---|---|
+| ML-默认集成 | 动量+反转 | XGB+LGBM集成 | ret_1d | 39.25% | 1.27 | -36.03% | 1.7% | 1.6% |
+| ML-动量精选 | 动量/趋势(17个) | XGBoost | ret_5d | — | — | — | — | — |
+| ML-反转精选 | 反转(20个) | LightGBM | ret_1d | 40.00% | 1.23 | -41.09% | — | — |
+| ML-全量因子测试 | 全部76因子 | XGB+LGBM集成 | ret_1d | 35.26% | 1.17 | -36.94% | — | — |
+| ML-动态多因子 | 全部76因子 | XGB+LGBM集成 | ret_1d | 35.56% | 1.22 | -36.32% | — | — |
 
-**基本面排雷**（月频）：8 项排雷综合评分 (audit_score ≥ -3) + 三项硬排除（商誉>27%/质押>72%/负债>105%），每月约 330-390/800 只通过。
+> **ML-动量精选**：17 个动量因子对 5 日标签(ret_5d)的 IC 均低于 0.02 门禁（|IC| 0.003~0.017），IC 门禁后无可用因子，0 个有效 walk-forward 窗口。
+> 
+> 回测区间：2020-01-01 ~ 2026-05-01，200 只候选池，周度调仓。
+
+### 静态策略（1个，backtrader Cerebro + 等权聚合）
+
+| 策略 | 年化收益 | Sharpe | 最大回撤 | 参数 |
+|---|---|---|---|---|
+| 震荡网格(高抛低吸) | 4.23% | 0.58 | -16.36% | size=500, buy_step=0.02, ma_period=30 |
+
+**防过拟合检查**：`scripts/overfit_check.py`，检查项：样本外一致性、交易次数、市场状态覆盖、参数敏感性
 
 ---
 
-## 分钟频 ML 回测（NEW）
+## 分钟频 ML 回测
 
 > 对比日频(daily) vs 60 分钟频(60min) ML 策略表现。
 
-**数据**：1004 只股票（深市主板+创业板+沪市主板），新浪财经 `money.finance.sina.com.cn` 直连 API（akshare `stock_zh_a_minute` 的 `quotes.sina.cn` 已被 Sina 封锁返回 HTTP 456）。
+**当前状态**（2026-05-27）：已同步 **1,309 / 4,909** 只股票（26.7%），区间 2024-03 ~ 2026-05-27。新浪 API 有 ~75 次/IP 封堵，需分批冷却。
+
+**同步命令**：
+```bash
+python scripts/sync_minute_data.py --limit 50                    # 测试
+python scripts/sync_minute_data.py --skip 1309                   # 续传
+python scripts/sync_minute_data.py --batch-size 70 --cooldown 2100  # 每70只冷却35分钟
+```
+
+**数据**：新浪财经 `money.finance.sina.com.cn` 直连 API（akshare 的 Sina 端点返回 HTTP 456 已废弃）。
 
 **因子聚合**：分钟 K 线因子按 (code, trade_date) groupby last，标签仍为日频 ret_1d，bar_per_day=4。
+
+### 前期对比结果（1,004 只股票，2026-05-26）
 
 | 指标 | 日频(daily) | 分钟频(60min) | 差异 |
 |------|:---:|:---:|:---:|
@@ -279,71 +318,40 @@ app/pages/6_📦_Stock_Pools.py  (编辑器)
 
 **筛选范式示例**：小盘股（流通市值 10-200 亿）、高散户参与度（股东户数 > 20000）、排除特定行业、排除 ST/新股、低 PE 价值股。
 
-### 3. Web 界面数据流
+### 3. Web 界面数据流 (FastAPI + HTMX + ECharts)
 
 ```
-app/main.py (入口)
+web/main.py (FastAPI 入口)
   │
-  ├── 后台线程：每日 18:00 自动运行 5 种同步模式
-  │   (index / stock-daily / daily-extra / shareholder / financial)
+  ├── 路由注册: routes/api.py (主API) + dashboard/backtest/paper/data_status/factors
   │
   └── 页面导航
         │
-        ├── Watchlist ──> data_loader.get_realtime_quotes()
-        │                  └── AKShare stock_zh_a_spot_em()（5s 缓存）
-        │                  非交易时段回退：
-        │                  └── data_loader.get_latest_daily_batch()
-        │                      └── stock_daily 表最近交易日数据
+        ├── 行情看板 (/dashboard)
+        │   ├── GET /api/quotes/{group} → stock_daily JOIN stock_basic (代码+名称+现价)
+        │   └── GET /api/kline/{code} → ECharts K线图 + 成交量柱 (dataZoom缩放, 近1年默认)
         │
-        ├── Charts ──> data_loader.load_ohlcv()     ──> stock_daily
-        │              data_loader.build_kline_chart() ──> Plotly Figure
-        │              data_loader.calc_ma/ema/macd/rsi/bollinger()
+        ├── 回测对比 (/backtest)
+        │   ├── GET /api/backtest-list → 8策略列表 (年化收益/最大回撤/Sharpe/质量)
+        │   └── GET /api/backtest-detail/{id} → 双线权益曲线(策略+上证指数) + 完整指标表 + 因子构成
         │
-        ├── Backtest ──> backtest_runner.run_backtest()
-        │                 │
-        │                 ├── 单只模式：K 线图 + 权益曲线 + 交易明细
-        │                 ├── 股票池模式：逐只回测 → 汇总统计 + 排名表 + 分布直方图
-        │                 ├── 结果持久化 → backtest_results 表（历史对比/CSV 导出）
-        │                 ├── 🚀 升级到模拟盘 → account_manager.promote_strategy_to_account()
-        │                 ├── PgDataFeed：DataFrame → backtrader 数据源
-        │                 ├── AShareCommission：A股真实费用
-        │                 │   ├── 佣金 万0.9（买卖双向）
-        │                 │   └── 印花税 万5（仅卖出）
-        │                 └── MarketAwareSizer：动态仓位管理
-        │                     ├── 牛市（指数 ≥ 200MA）→ 95% 仓位
-        │                     └── 熊市（指数 < 200MA）→ 自动降至 40%
+        ├── 模拟盘 (/paper)
+        │   └── GET /api/paper-runs → 模拟盘运行列表 + 持仓/信号详情
         │
-        ├── Paper Trade ──> portfolio/paper_engine
-        │                    │
-        │                    ├── ML 策略 → PaperEngine.run_daily()
-        │                    ├── 静态策略 → StaticPaperEngine.run_replay()
-        │                    ├── 权益曲线 + 回撤阴影（Plotly）
-        │                    ├── 行业分布饼图 + 个股权重柱状图
-        │                    └── 策略信息卡片（类型/名称/参数/费率）
+        ├── 数据状态 (/data)
+        │   ├── GET /api/data-status → 31张表最新日期+行数
+        │   └── POST /api/sync/trigger → 触发后台数据同步
         │
-        ├── Stock Pools ──> stock_pools 引擎
-        │                    └── filter_stocks() 编译/测试/保存/预览
-        │
-        ├── ML Monitor ──> portfolio/paper_engine + factors/monitor
-        │                  ├── IC 看板：因子 RankIC 柱状图 + 时序 + 衰减
-        │                  ├── 模型表现：Walk-forward 指标表 + 特征重要性
-        │                  ├── 当日信号：最新截面预测 Top-20 + 行业分布
-        │                  ├── 模拟盘净值：权益曲线 + 回撤图 + 策略信息
-        │                  └── 数据健康：各表最新日期/覆盖度/缺失检测
-        │
-        ├── Data Monitor ──> sync.check_data_quality()
-        │                    ├── 数据质量概览（10 张表状态）
-        │                    ├── 最近交易日覆盖度进度条
-        │                    └── 手动同步触发（7 种模式独立触发）
-        │
-        └── Strategy Editor ──> ~/.quant_strategies/（保存 .py 文件）
-                                │
-                                └── strategies/__init__.py 动态加载
+        └── 因子监控 (/factors)
+            ├── GET /api/factor-overview → 因子就绪状态 + 交易日/因子数/最早就绪
+            └── 因子血缘: 因子名 → 上游字段 → 上次校验时间
 ```
+
+**前后端交互模式**：HTMX 属性触发 AJAX 请求 (`hx-get/hx-post/hx-trigger`)，服务端返回 HTML 片段直接替换 DOM。ECharts 图表通过 API 响应中的内联 `<script>` 标签初始化，避免事件监听器的时机问题。
 
 ---
 
-## 数据库表结构（16 张表）
+## 数据库表结构（31 张表）
 
 ### 行情数据（5 张）
 
@@ -388,9 +396,7 @@ app/main.py (入口)
 strategies/__init__.py
   │
   ├── STRATEGY_REGISTRY（内置策略）
-  │   ├── "双均线交叉"  → SMACross
-  │   ├── "MACD金叉死叉" → MACDStrategy
-  │   └── "RSI超买超卖"  → RSIStrategy
+  │   └── "震荡网格(高抛低吸)" → GridShockStrategy
   │
   └── get_all_strategies() → 内置 + ~/.quant_strategies/ 自定义策略
         │
@@ -403,9 +409,6 @@ strategies/__init__.py
 
 | 策略 | 信号 | 默认参数 | 适用场景 |
 |---|---|---|---|
-| 双均线交叉 | 快线上穿买入，下穿卖出 | (5, 20) | 趋势市 |
-| MACD 金叉死叉 | DIF 上穿 DEA 买入，下穿卖出 | (12, 26, 9) | 趋势转折 |
-| RSI 超买超卖 | RSI<30 买入，RSI>70 卖出 | (14, 30, 70) | 震荡市 |
 | 震荡网格(高抛低吸) | 价格触及网格下沿买入、上沿卖出 | (20, 0.05) | 震荡市 |
 
 ### 自定义策略（Web 编辑器）
@@ -456,14 +459,7 @@ strategies/__init__.py
 
 ### 回测结果
 
-| 策略 | 平均收益率% | 平均胜率% | 平均回撤% |
-|---|---|---|---|
-| RSI超买超卖 | 11.6 | 47.2 | 19.1 |
-| MACD金叉死叉 | 4.8 | 33.1 | 34.1 |
-| 双均线交叉 | 2.6 | 28.3 | 34.1 |
-
-- RSI(7, 20, 80) 在全周期上有大量 100% 胜率案例（交易次数 ≥ 10）
-- 熊市（慢熊2021-24）平均收益 -7.3%，反弹期（2024-26）平均 15.4%
+> 批量回测结果请查看 `output/batch_summary.md`。
 
 ---
 
@@ -565,62 +561,43 @@ strategies/__init__.py
 cd /Users/chenwan/Documents/quant
 source .venv/bin/activate
 
-# 数据同步（首次使用）
-python -m data.sync --mode stock           # 股票基本信息
-python -m data.sync --mode stock-daily     # 日线行情
-python -m data.sync --mode daily-extra     # 估值指标
-python -m data.sync --mode shareholder     # 股东户数
+# 启动 Web 界面 (FastAPI + HTMX)
+uvicorn web.main:app --host 0.0.0.0 --port 8000 --reload
+# 浏览器打开 http://localhost:8000
 
-# 启动 Web 界面 (v2.0 FastAPI)
-uvicorn web.main:app --reload              # 浏览器打开 http://localhost:8000
+# 运行全部策略回测
+bash scripts/run_all_backtests.sh
 
-# 启动 Web 界面 (v1.0 Streamlit, 旧版)
-streamlit run app/main.py                  # 浏览器打开 http://localhost:8501
+# 单独运行某个 ML 策略
+python scripts/run_ml_backtest.py --strategy "ML-动量精选" \
+    --factor-preset momentum --forward-days 5 --model xgboost \
+    --no-ensemble --optuna --optuna-trials 20
+
+# 单独运行某个静态策略
+python scripts/run_static_backtest.py --strategy "震荡网格(高抛低吸)" --top-n 30
 ```
 
 ---
 
 ## v2.0 架构说明
 
-v2.0 是一次重大架构升级，从 Streamlit 单体应用迁移到 FastAPI + HTMX 分层架构。
+v2.0 完成了从 Streamlit 单体应用到 FastAPI + HTMX 分层架构的迁移。Web 端使用服务端渲染 HTML 片段 + ECharts 内联脚本初始化图表。
 
 **核心变更**：
 
 | 维度 | v1.0 (Streamlit) | v2.0 (FastAPI + HTMX) |
 |------|------------------|----------------------|
 | Web 框架 | Streamlit (`app/`) | FastAPI (`web/`) |
-| 前端 | Streamlit 自动渲染 | HTMX 服务端渲染 |
-| 目录 | `app/pages/`, `app/utils/` | `web/routers/`, `web/templates/` |
-| 数据库表 | 16 张 | 29 张（新增数据质量、信号归因、任务调度等） |
-| 数据质量 | sync 内嵌检查 | 独立 `data/quality.py` + `data/lineage.py` |
-| 策略编辑器 | Web 内嵌编辑器 | 移除（改为本地开发 + 策略注册） |
-| 回测执行 | 页面内同步/异步 | 独立脚本 + command_worker |
-| 过拟合检测 | grid_backtest 内嵌 | 独立 `scripts/overfit_check.py` |
-| 归因分析 | 无 | 新增 `scripts/attribution.py` (因子/行业/风格归因) |
-| 自动调参 | 无 | 新增 `scripts/auto_adjust.py` (基于归因结果) |
-| 系统监控 | 无 | 独立 `scripts/health_check.py` |
-| 定时任务 | app/main.py 后台线程 | macOS launchd plist (`config/com.quant.sync.plist`) |
+| 前端 | Streamlit 自动渲染 | HTMX + Alpine.js + ECharts |
+| 图表 | Plotly | ECharts (内联 script 初始化) |
+| 目录 | `app/pages/`, `app/utils/` | `web/routes/`, `web/templates/`, `web/static/` |
+| 数据库表 | 16 张 | 31 张（新增策略管理、信号归因、因子权重等） |
+| 回测运行器 | `backtest_runner.py` | `run_static_backtest.py` + `run_ml_backtest.py` |
+| ML 策略差异化 | 全部使用相同因子池 | 因子预设 + 算法选择 + 标签周期 + Optuna |
 
-**新增模块**：
-- `data/quality.py` -- 数据质量门禁（覆盖度/缺失/异常检测）
-- `data/lineage.py` -- 数据血缘追踪（来源→转换→消费者）
-- `data/availability.py` -- 交易日历 + 数据可用性查询
-- `scripts/overfit_check.py` -- 过拟合检测（样本内 vs 样本外）
-- `scripts/attribution.py` -- 收益归因分析
-- `scripts/auto_adjust.py` -- 自动调参
-- `scripts/health_check.py` -- 系统健康检查
-- `scripts/command_worker.py` -- 后台命令执行 worker
-- `config/com.quant.sync.plist` -- macOS 定时同步任务
-
-**移除内容**：
-- `app/utils/` -- 全部移除（`backtest_runner.py`, `data_loader.py`, `account_manager.py`, `stock_pools.py`, `ml_config_manager.py`, `ml_backtest.py`）
-- `app/pages/5_📝_Strategy_Editor.py` -- 在线策略编辑器
-- `app/pages/6_📦_Stock_Pools.py` -- 自定义股票池编辑器
-
-**工作流升级**：
+**工作流**：
 ```
-v1.0: 因子研究 → 策略构建 → 历史回测 → 保存对比 → 升级模拟盘 → 模拟盘交易
-v2.0: 因子计算(定时) → 模型训练 → 历史回测(防过拟合检查) → 模拟盘验证 → 归因反馈闭环
+因子计算(定时) → 模型训练 → 历史回测(防过拟合检查) → 模拟盘验证 → 归因反馈闭环
 ```
 
 ---
@@ -629,6 +606,10 @@ v2.0: 因子计算(定时) → 模型训练 → 历史回测(防过拟合检查)
 
 | 日期 | 变更内容 |
 |---|---|
+
+| 2026-05-27 | **交易成本修正 + 策略精简**：ML 回测新增 A 股真实交易成本（佣金万 0.9 + 印花税万 5 + 滑点 0.1%，基于每日换手率扣除）。静态回测确认 100 万本金 + 万 0.9 佣金 + 万 5 印花税 + 0.1% 滑点。删除 RSI/MACD/双均线三种零收益静态策略，策略总数从 9 降至 6（1 静态 + 5 ML）。README 全面更新。 |
+| 2026-05-27 | **动态反馈闭环 + 日度信号追踪**：新增 ML-动态多因子策略（`--dynamic` 标志），两级联动。窗口级 `BacktestFeedbackLoop`：因子重要性归因 → Sharpe 趋势/t 检验衰退 → 衰减因子×0.8 → 权重<0.3 淘汰。日度级 `DailySignalTracker`：每日 Rank IC → 滚动 20 日 IC → 连续 5 日衰减警告 → 连续 10 日触发重训。数据写入 `strategy_health` + `strategy_commands`。6 策略全 valid，年化 7.69%~28.70%。 |
+| 2026-05-27 | **Web 增强 + ML 策略差异化 + 分钟数据同步优化**：行情看板显示股票名称（JOIN stock_basic）；K线图新增 dataZoom 缩放（默认展示近1年，可拖动扩展）；回测列表新增年化收益/最大回撤/Sharpe 列。ML 策略全面差异化：因子预设系统（momentum/reversal/volatility/liquidity/fundamental 五组+联合预设）、`--forward-days` 标签周期切换、单模型/集成可选、Optuna 贝叶斯超参优化，4个 ML 策略年化 19.10%~31.82%。新增 `run_static_backtest.py`（backtrader Cerebro + 等权聚合）和 `run_all_backtests.sh`。`sync_minute_data.py` 新增 `--batch-size`/`--cooldown` 分批冷却机制适配新浪 ~75 次封 IP 限制，`--skip` 改为在 missing-only 过滤后计数，新增 `missing_only` 参数只同步无分钟数据的股票。分钟数据已覆盖 1,309/4,909 只。修复单模型 equity curve、regime_count 默认值、dataset 多周期收益列等 bug。全部 6 策略 quality=valid。 |
 | 2026-05-26 | **分钟频 ML 回测 + API 换源**：`data/fetcher.py` 分钟数据从 akshare(`quotes.sina.cn`)切换到新浪直连 API(`money.finance.sina.com.cn`)，旧 JSONP 端点被 Sina 封锁(HTTP 456)。1004 只股票分钟数据（000/001/002/300/600 五个板块），日频 vs 60 分钟频对比回测完成（分钟频胜率+6%、夏普翻倍）。新增 `scripts/sync_minute_data.py`(批量同步)、`scripts/compare_freq.py`(频率对比)、`scripts/validate_minute_data.py`(数据校验)。`ml_backtest.py` 支持 `freq="daily"|"60min"`，因子引擎支持 `bar_per_day`。新增 `GridShockStrategy`(震荡网格)。数据库 15→16 张表(新增 `ml_strategy_config`)。`ml_config_manager.py` 实现 ML 策略配置 CRUD+内置预设。回测页新增日期区间筛选+权益曲线 x 轴限制 |
 | 2026-05-26 | **架构重构：统一量化工作流**：统一账户配置系统 `account_manager.py`（策略类型/名称/参数/费率绑定到 paper_account）；回测结果持久化 `backtest_results` 表（历史对比/查看详情/CSV 导出）；策略→模拟盘无缝衔接（回测页"🚀 升级到模拟盘"→账户选择→跳转）；模拟盘页面全面升级（权益曲线+回撤阴影/行业分布饼图/个股权重柱状图/策略信息卡片）；StaticPaperEngine 支持静态策略模拟盘（backtrader 信号回放）；ML Monitor 新增"数据健康"Tab（5 页签）；新建 `app/pages/9_📡_Data_Monitor.py` 数据监控页面（质量概览+手动同步+覆盖度追踪）；数据同步调度扩展为 5 种模式（index/stock-daily/daily-extra/shareholder/financial）；数据库 14→15 张表；所有 11 个 Python 文件 AST 解析通过 |
 | 2026-05-26 | **全市场回测+参数优化+过拟合检测**：`scripts/grid_backtest.py` 新增参数网格搜索（12组合）+ 过拟合检测（样本内2019-2022 vs 样本外2024-2026）。800只股票（沪深300+中证500成分股）全市场回测完成：Sharpe=1.01, 年化收益26.3%, 最大回撤-36.7%, 4个Walk-forward窗口。最优参数：top_n=15, NDrop(ndrop_n=2)。因子筛选链：76因子→IC门禁(65→20, |IC|>0.02, |t|>2.0)→正交筛选(20→8, Spearman<0.7)。过拟合诊断：无（样本外Sharpe 2.27 > 样本内 1.09, 衰减比208.1%）。`docs/strategy-interpretability.md` 策略可解释性分析文档（因子经济学含义+IC门禁+正交筛选+双周期设计+NDrop逻辑+特征重要性+失效场景+改进方向）。行业数据补充（沪市/北交所）因东方财富API不可用暂时跳过 |

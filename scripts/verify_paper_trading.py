@@ -46,7 +46,7 @@ def main():
         codes = pd.read_sql(
             "SELECT code FROM stock_basic WHERE is_st = FALSE "
             "AND list_date <= CURRENT_DATE - INTERVAL '60 days' "
-            "ORDER BY code LIMIT 100",
+            "ORDER BY code",
             engine,
         )["code"].tolist()
     code_list = ",".join([f"'{c}'" for c in codes])

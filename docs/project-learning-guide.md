@@ -1,12 +1,15 @@
 # Quant 项目学习指南
 
 > 帮助你快速消化理解整个项目的架构、数据流和关键设计决策。
+> 最后更新：2026-05-28 (v1.10)
 
 ---
 
 ## 一、项目是什么？
 
-一个 **A 股量化交易系统**，核心是一条 ML 选股管线：每天用机器学习模型对全市场股票打分排序，选出最可能上涨的 Top-N 只股票，模拟实盘买卖。
+一个 **A 股量化交易系统**，核心是一条 ML 选股管线：每天用机器学习模型对全市场股票打分排序，经过排雷过滤和 NDrop 增量调仓，选出最可能上涨的 Top-N 只股票，配合组合级风控（回撤减仓/清仓/指数大跌空仓），模拟实盘买卖。
+
+当前版本：**v1.10**
 
 技术栈：Python + PostgreSQL + FastAPI + HTMX + AKShare + backtrader + XGBoost/LightGBM
 
@@ -79,7 +82,11 @@
 | [factors/screening.py](../factors/screening.py) | `filter_factors_by_ic()` IC 门禁 + `select_orthogonal_factors()` 正交筛选 |
 | [factors/fundamental.py](../factors/fundamental.py) | 11 个基本面质量因子（九项排雷体系） |
 
-**关键理解**：因子 = 对股票某个维度的量化描述。IC（Information Coefficient）= 因子值与未来收益的相关性。筛选链：76 因子 → IC 门禁 → ~20 因子 → 正交去冗余 → ~8 因子 → 模型。
+**关键理解**：因子 = 对股票某个维度的量化描述。IC（Information Coefficient）= 因子值与未来收益的相关性。筛选链：76 因子 → IC 门禁 → ~20 因子 → 正交去冗余 → ~8-16 因子 → 模型。
+
+**v1.10 完整选股管线**：全市场非ST股票 → 因子计算 → ML 打分排序 → 排雷过滤（8项检查，允许≤3项违规）→ NDrop 增量调仓（K=15, N=2）→ 等权持有
+
+**v1.10 风控管线**：每日检查 → 个股-8%硬止损 → 组合回撤-20%减半仓 → 组合回撤-25%清仓（10天冷静期+重置peak）→ 指数15日跌超12%空仓
 
 ### 第四站：ML 模型层（20分钟）
 
@@ -243,3 +250,25 @@ python scripts/grid_backtest.py
 - **每周**：跑 `overfit_check.py` + `attribution.py` 归因分析
 - **每周末**：跑 `grid_backtest.py` 做参数优化和过拟合检测，根据归因结果运行 `auto_adjust.py`
 - **每月**：跑 `financial` 和 `pledge` 同步更新基本面数据
+
+---
+
+## 七、版本历史
+
+### v1.10 (2026-05-28) — 全市场选股 + 组合风控
+
+**重大修复**：股票池 `ORDER BY code LIMIT 200` 导致只选深市(0xxxxx)股票，VARCHAR字母序将沪市(6xxxxx)排在后面永不被选中。
+修复为全市场非ST选股（默认5238只），可选 `--universe-size N` 按成交额取前N只。
+
+**新增功能**：
+- 排雷过滤：加载 stock_financial + stock_pledge，对8项质量检查允许≤3项违规
+- NDrop 增量调仓：`select_topk_ndrop()` 每次最多替换2只最差持仓，换手率从~16%降至~4%
+- 组合回撤风控：-20%减半仓 / -25%清仓(10天冷静期+peak_nav重置) / 指数15日跌超12%空仓
+- 指数数据无条件加载（不再依赖 `--regime` 开关）
+- 止损/风控事件记录到 backtest_results.metrics_json
+
+**策略版本**：全部6个策略统一升级至 v1.10
+
+### v1.00 (2026-05) — 基础ML选股管线
+
+初始版本：因子计算 → IC门禁 → 正交筛选 → Walk-forward训练 → Top-N选股 → 等权持有。
