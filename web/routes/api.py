@@ -89,3 +89,82 @@ async def get_kline(code: str):
 
     html = f"""<div id="kline-chart" style="width:100%;height:500px;" data-chart='{json.dumps(option)}'></div>"""
     return HTMLResponse(html)
+
+
+@router.get("/backtest-list")
+async def list_backtests(strategy: str = "", quality: str = ""):
+    """Return HTML table of backtest results. When DB is unavailable, show empty state."""
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            where = ["1=1"]
+            params = {}
+            if strategy:
+                where.append("sc.name = :strategy")
+                params["strategy"] = strategy
+            if quality:
+                where.append("br.quality = :quality")
+                params["quality"] = quality
+            rows = conn.execute(text(f"""
+                SELECT sc.name, sv.version, br.start_date, br.end_date, br.quality,
+                       br.quality_flags, br.id
+                FROM backtest_results br
+                JOIN strategy_versions sv ON br.version_id = sv.id
+                JOIN strategy_configs sc ON sv.strategy_id = sc.id
+                WHERE {' AND '.join(where)}
+                ORDER BY br.created_at DESC LIMIT 50
+            """), params).fetchall()
+    except Exception:
+        rows = []
+
+    if not rows:
+        return HTMLResponse("""<div style="padding:40px;text-align:center;color:#889;">
+            <p>暂无回测数据</p><p style="font-size:12px;">运行 scripts/run_ml_backtest.py 生成回测结果</p>
+        </div>""")
+
+    rows_html = ""
+    for r in rows:
+        name, version, start, end, quality, flags, bt_id = r
+        badge_class = f"badge-{quality}"
+        rows_html += f"""<tr>
+            <td>{name}</td><td>{version}</td><td>{start} ~ {end}</td>
+            <td><span class="badge {badge_class}">{quality}</span></td>
+            <td><button class="mock-button" hx-get="/api/backtest-equity/{bt_id}" hx-target="#equity-panel" hx-swap="innerHTML">权益曲线</button></td>
+        </tr>"""
+
+    html = f"""<table>
+    <thead><tr><th>策略</th><th>版本</th><th>区间</th><th>质量</th><th>操作</th></tr></thead>
+    <tbody>{rows_html}</tbody></table>"""
+    return HTMLResponse(html)
+
+
+@router.get("/backtest-equity/{backtest_id}")
+async def get_equity_curve(backtest_id: int):
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT equity_curve_json FROM backtest_results WHERE id = :id"
+            ), {"id": backtest_id}).fetchone()
+    except Exception:
+        row = None
+
+    if not row or not row[0]:
+        return HTMLResponse("<p style='color:#889;padding:20px;'>无权益曲线数据</p>")
+
+    curve = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+    # curve is {date_str: nav, ...}
+    dates = list(curve.keys()) if isinstance(curve, dict) else []
+    values = list(curve.values()) if isinstance(curve, dict) else []
+
+    option = {
+        "xAxis": {"data": dates, "axisLabel": {"color": "#889", "rotate": 30}},
+        "yAxis": {"scale": True, "axisLabel": {"color": "#889"}},
+        "series": [{"type": "line", "data": values, "smooth": True,
+                     "lineStyle": {"color": "#4fc3f7"}, "areaStyle": {"color": "rgba(79,195,247,0.1)"}}],
+        "tooltip": {"trigger": "axis"},
+        "grid": {"left": "10%", "right": "5%", "top": "5%", "bottom": "15%"},
+    }
+
+    html = f"""<div id="equity-chart" style="width:100%;height:400px;" data-chart='{json.dumps(option)}'></div>"""
+    return HTMLResponse(html)
