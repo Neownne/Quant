@@ -235,17 +235,24 @@ CREATE TABLE IF NOT EXISTS paper_orders (
 );
 """
 
-# DDL —— 模拟盘持仓
+# DDL —— 模拟盘持仓（V2：脱钩 paper_account，挂钩 paper_runs）
 DDL_PAPER_POSITIONS = """
 CREATE TABLE IF NOT EXISTS paper_positions (
-    id         SERIAL PRIMARY KEY,
-    account_id INT,
-    code       VARCHAR(10),
-    volume     INT,
-    avg_cost   DOUBLE PRECISION,
-    UNIQUE (account_id, code)
+    id SERIAL PRIMARY KEY,
+    run_id INT NOT NULL REFERENCES paper_runs(id),
+    signal_id INT REFERENCES paper_signals(id),
+    stock_code VARCHAR(10) NOT NULL,
+    entry_date DATE NOT NULL,
+    entry_price DOUBLE PRECISION NOT NULL,
+    exit_date DATE,
+    exit_price DOUBLE PRECISION,
+    quantity INT NOT NULL DEFAULT 100,
+    pnl DOUBLE PRECISION DEFAULT 0,
+    pnl_pct DOUBLE PRECISION DEFAULT 0
 );
 """
+
+DDL_PAPER_POSITIONS_IDX = "CREATE INDEX IF NOT EXISTS idx_pp_run ON paper_positions (run_id);"
 
 # DDL —— 模拟盘每日净值
 DDL_PAPER_DAILY_PNL = """
@@ -273,27 +280,24 @@ ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS slippage DOUBLE PRECISION DEF
 ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS use_market_filter BOOLEAN DEFAULT TRUE;
 """
 
-# DDL —— 回测结果持久化
+# DDL —— 回测结果持久化（V2：脱钩 paper_account，挂钩 strategy_versions）
 DDL_BACKTEST_RESULTS = """
 CREATE TABLE IF NOT EXISTS backtest_results (
-    id              SERIAL PRIMARY KEY,
-    account_id      INTEGER,
-    strategy_type   VARCHAR(20),
-    strategy_name   VARCHAR(100),
-    strategy_params JSONB,
-    asset_mode      VARCHAR(20),
-    pool_name       VARCHAR(100),
-    start_date      DATE,
-    end_date        DATE,
-    n_stocks        INTEGER,
-    avg_return      DOUBLE PRECISION,
-    avg_sharpe      DOUBLE PRECISION,
-    avg_drawdown    DOUBLE PRECISION,
-    avg_win_rate    DOUBLE PRECISION,
-    results_json    JSONB,
-    created_at      TIMESTAMP DEFAULT NOW()
+    id SERIAL PRIMARY KEY,
+    version_id INT NOT NULL REFERENCES strategy_versions(id),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    quality VARCHAR(10) NOT NULL DEFAULT 'valid'
+        CHECK (quality IN ('valid', 'suspect', 'invalid')),
+    quality_flags TEXT[] DEFAULT '{}',
+    metrics_json JSONB NOT NULL DEFAULT '{}',
+    equity_curve_json JSONB NOT NULL DEFAULT '{}',
+    daily_returns_json JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
+
+DDL_BACKTEST_RESULTS_IDX = "CREATE INDEX IF NOT EXISTS idx_br_version ON backtest_results (version_id);"
 
 DDL_ML_STRATEGY_CONFIG = """
 CREATE TABLE IF NOT EXISTS ml_strategy_config (
@@ -326,6 +330,203 @@ CREATE TABLE IF NOT EXISTS ml_strategy_config (
     updated_at      TIMESTAMP DEFAULT NOW()
 );
 """
+
+# ========== 策略管理 ==========
+
+DDL_STRATEGY_CONFIGS = """
+CREATE TABLE IF NOT EXISTS strategy_configs (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('ml', 'static')),
+    description TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_STRATEGY_VERSIONS = """
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    version VARCHAR(20) NOT NULL,
+    algorithm_type VARCHAR(50) NOT NULL,
+    feature_list_version VARCHAR(20) NOT NULL,
+    model_file_path TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (strategy_id, version)
+);
+"""
+
+DDL_FACTOR_WEIGHTS_HISTORY = """
+CREATE TABLE IF NOT EXISTS factor_weights_history (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    factor_name VARCHAR(100) NOT NULL,
+    weight DOUBLE PRECISION NOT NULL,
+    effective_date DATE NOT NULL,
+    source VARCHAR(10) NOT NULL CHECK (source IN ('auto', 'manual')),
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_FACTOR_WEIGHTS_HISTORY_IDX = "CREATE INDEX IF NOT EXISTS idx_fwh_strategy_date ON factor_weights_history (strategy_id, effective_date);"
+
+# ========== 因子元数据 ==========
+
+DDL_FACTOR_LINEAGE = """
+CREATE TABLE IF NOT EXISTS factor_lineage (
+    id SERIAL PRIMARY KEY,
+    factor_name VARCHAR(100) NOT NULL UNIQUE,
+    source_fields TEXT[] NOT NULL,
+    computation_formula_hash VARCHAR(64) NOT NULL,
+    upstream_factors TEXT[] DEFAULT '{}',
+    last_validated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_FACTOR_AVAILABILITY = """
+CREATE TABLE IF NOT EXISTS factor_availability (
+    id SERIAL PRIMARY KEY,
+    trade_date DATE NOT NULL,
+    factor_name VARCHAR(100) NOT NULL,
+    data_ready_at TIMESTAMP NOT NULL,
+    data_source VARCHAR(50) DEFAULT '',
+    latency_ms INT DEFAULT 0,
+    UNIQUE (trade_date, factor_name)
+);
+"""
+
+DDL_FACTOR_AVAILABILITY_IDX = "CREATE INDEX IF NOT EXISTS idx_fa_date ON factor_availability (trade_date);"
+
+# ========== 模拟盘运行记录 ==========
+
+DDL_PAPER_RUNS = """
+CREATE TABLE IF NOT EXISTS paper_runs (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    version_id INT NOT NULL REFERENCES strategy_versions(id),
+    start_date DATE NOT NULL,
+    end_date DATE,
+    initial_capital DOUBLE PRECISION NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'paused', 'stopped')),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_PAPER_SIGNALS = """
+CREATE TABLE IF NOT EXISTS paper_signals (
+    id SERIAL PRIMARY KEY,
+    run_id INT NOT NULL REFERENCES paper_runs(id),
+    signal_date DATE NOT NULL,
+    stock_code VARCHAR(10) NOT NULL,
+    predicted_score DOUBLE PRECISION,
+    rank INT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_PAPER_SIGNALS_IDX = "CREATE INDEX IF NOT EXISTS idx_ps_run_date ON paper_signals (run_id, signal_date);"
+
+DDL_SIGNAL_FACTORS = """
+CREATE TABLE IF NOT EXISTS signal_factors (
+    id SERIAL PRIMARY KEY,
+    signal_id INT NOT NULL REFERENCES paper_signals(id) ON DELETE CASCADE,
+    factor_name VARCHAR(100) NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    UNIQUE (signal_id, factor_name)
+);
+"""
+
+DDL_SIGNAL_FACTORS_IDX_SIGNAL = "CREATE INDEX IF NOT EXISTS idx_sf_signal ON signal_factors (signal_id);"
+DDL_SIGNAL_FACTORS_IDX_FACTOR = "CREATE INDEX IF NOT EXISTS idx_sf_factor ON signal_factors (factor_name);"
+
+# ========== 归因分析 ==========
+
+DDL_SIGNAL_ATTRIBUTION = """
+CREATE TABLE IF NOT EXISTS signal_attribution (
+    id SERIAL PRIMARY KEY,
+    signal_id INT NOT NULL REFERENCES paper_signals(id),
+    eval_date DATE NOT NULL,
+    days_held INT NOT NULL DEFAULT 1,
+    pnl DOUBLE PRECISION DEFAULT 0,
+    pnl_pct DOUBLE PRECISION DEFAULT 0,
+    factor_contrib_json JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_SIGNAL_ATTRIBUTION_IDX = "CREATE INDEX IF NOT EXISTS idx_sa_signal ON signal_attribution (signal_id);"
+
+# ========== 权重调整记录 ==========
+
+DDL_WEIGHT_ADJUSTMENTS = """
+CREATE TABLE IF NOT EXISTS weight_adjustments (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    factor_name VARCHAR(100) NOT NULL,
+    old_weight DOUBLE PRECISION NOT NULL,
+    new_weight DOUBLE PRECISION NOT NULL,
+    confidence_level DOUBLE PRECISION DEFAULT 0.95,
+    source VARCHAR(10) NOT NULL CHECK (source IN ('auto', 'manual')),
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+# ========== 策略健康 ==========
+
+DDL_STRATEGY_HEALTH = """
+CREATE TABLE IF NOT EXISTS strategy_health (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    date DATE NOT NULL DEFAULT CURRENT_DATE,
+    overall_ic DOUBLE PRECISION,
+    max_drawdown_7d DOUBLE PRECISION,
+    regime_tag VARCHAR(10) DEFAULT 'unknown'
+        CHECK (regime_tag IN ('bull', 'bear', 'range', 'unknown')),
+    status VARCHAR(10) NOT NULL DEFAULT 'normal'
+        CHECK (status IN ('normal', 'warning', 'critical')),
+    action_required VARCHAR(20) DEFAULT 'none',
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (strategy_id, date)
+);
+"""
+
+# ========== 指令队列 ==========
+
+DDL_STRATEGY_COMMANDS = """
+CREATE TABLE IF NOT EXISTS strategy_commands (
+    id SERIAL PRIMARY KEY,
+    strategy_id INT NOT NULL REFERENCES strategy_configs(id),
+    command_type VARCHAR(30) NOT NULL
+        CHECK (command_type IN ('adjust_weight', 'pause', 'resume', 'rollback', 'retrain')),
+    payload_json JSONB NOT NULL DEFAULT '{}',
+    requested_by VARCHAR(50) DEFAULT 'user',
+    requested_at TIMESTAMP DEFAULT NOW(),
+    executed_at TIMESTAMP,
+    execution_result TEXT DEFAULT '',
+    rolled_back_by INT REFERENCES strategy_commands(id)
+);
+"""
+
+# ========== 数据质量 ==========
+
+DDL_DATA_QUALITY_LOG = """
+CREATE TABLE IF NOT EXISTS data_quality_log (
+    id SERIAL PRIMARY KEY,
+    trade_date DATE NOT NULL,
+    check_name VARCHAR(50) NOT NULL,
+    expected_value TEXT,
+    actual_value TEXT,
+    passed BOOLEAN NOT NULL DEFAULT FALSE,
+    detail TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_DATA_QUALITY_LOG_IDX = "CREATE INDEX IF NOT EXISTS idx_dql_date ON data_quality_log (trade_date);"
 
 
 # ========== 策略管理 ==========
@@ -599,10 +800,8 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_PLEDGE))
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
-        conn.execute(text(DDL_PAPER_POSITIONS))
         conn.execute(text(DDL_PAPER_DAILY_PNL))
         conn.execute(text(DDL_PAPER_ACCOUNT_V2))
-        conn.execute(text(DDL_BACKTEST_RESULTS))
         conn.execute(text(DDL_ML_STRATEGY_CONFIG))
         # ========== 策略管理 ==========
         conn.execute(text(DDL_STRATEGY_CONFIGS))
@@ -613,18 +812,19 @@ def init_db() -> None:
         conn.execute(text(DDL_FACTOR_LINEAGE))
         conn.execute(text(DDL_FACTOR_AVAILABILITY))
         conn.execute(text(DDL_FACTOR_AVAILABILITY_IDX))
-        # ========== 回测结果（扩展） ==========
-        conn.execute(text(DDL_BACKTEST_RESULTS_V2))
-        conn.execute(text(DDL_BACKTEST_RESULTS_V2_IDX))
-        # ========== 模拟盘 ==========
+        # ========== 回测结果（新版：挂钩 strategy_versions） ==========
+        conn.execute(text(DDL_BACKTEST_RESULTS))
+        conn.execute(text(DDL_BACKTEST_RESULTS_IDX))
+        # ========== 模拟盘运行记录 ==========
         conn.execute(text(DDL_PAPER_RUNS))
         conn.execute(text(DDL_PAPER_SIGNALS))
         conn.execute(text(DDL_PAPER_SIGNALS_IDX))
         conn.execute(text(DDL_SIGNAL_FACTORS))
         conn.execute(text(DDL_SIGNAL_FACTORS_IDX_SIGNAL))
         conn.execute(text(DDL_SIGNAL_FACTORS_IDX_FACTOR))
-        conn.execute(text(DDL_PAPER_POSITIONS_V2))
-        conn.execute(text(DDL_PAPER_POSITIONS_V2_IDX))
+        # ========== 模拟盘持仓（新版：挂钩 paper_runs） ==========
+        conn.execute(text(DDL_PAPER_POSITIONS))
+        conn.execute(text(DDL_PAPER_POSITIONS_IDX))
         # ========== 归因分析 ==========
         conn.execute(text(DDL_SIGNAL_ATTRIBUTION))
         conn.execute(text(DDL_SIGNAL_ATTRIBUTION_IDX))
@@ -644,14 +844,7 @@ def init_db() -> None:
             ))
         except Exception:
             pass
-        # migration: drop FK constraint on backtest_results (account_id)
-        try:
-            conn.execute(text(
-                "ALTER TABLE backtest_results DROP CONSTRAINT IF EXISTS backtest_results_account_id_fkey"
-            ))
-        except Exception:
-            pass
-    logger.info("数据库表初始化完成（16张表）")
+    logger.info("数据库表初始化完成")
     engine.dispose()
 
 

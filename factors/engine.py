@@ -125,7 +125,43 @@ class FactorEngine:
         set_window_scale(1.0)
 
         result = pd.concat(result_parts, ignore_index=True)
+
+        # 记录因子血缘和可用性
+        _record_lineage_and_availability(self.factor_names, result)
+
         return result
+
+
+def _record_lineage_and_availability(
+    factor_names: list[str],
+    result: pd.DataFrame,
+) -> None:
+    """因子计算后记录血缘与可用性时间戳（失败不影响计算流程）。"""
+    try:
+        from datetime import date
+
+        from data.availability import mark_ready
+        from data.lineage import register_lineage
+
+        max_ts = result["trade_date"].max()
+        trade_date: date = max_ts.date() if hasattr(max_ts, "date") else max_ts
+
+        for name in factor_names:
+            fn = factors.ALL_FACTORS.get(name)
+            src_fields = getattr(fn, "source_fields", [])
+            formula = getattr(fn, "formula", "")
+            upstream = getattr(fn, "upstream_factors", [])
+
+            if src_fields:
+                register_lineage(name, src_fields, formula or name, upstream)
+
+            mark_ready(
+                trade_date=trade_date,
+                factor_name=name,
+                data_source="computed",
+            )
+    except Exception:
+        pass
 
 
 def neutralize(

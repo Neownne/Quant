@@ -24,6 +24,7 @@ from tqdm import tqdm
 
 from config.settings import DataConfig
 from data.db import init_db, upsert_df, get_engine, get_existing_dates
+from data.quality import DataQualityChecker
 from data.fetcher import (
     enrich_stock_basic,
     fetch_stock_daily,
@@ -118,6 +119,41 @@ def check_data_quality(engine: Engine | None = None) -> dict:
         if own_engine:
             _engine.dispose()
     return results
+
+
+def _run_quality_gate(trade_date: date):
+    """同步后质量校验，不通过则记录告警"""
+    checker = DataQualityChecker(expected_stock_count=5000)
+    engine = get_engine()
+    try:
+        df = pd.read_sql(
+            "SELECT code, close, volume FROM stock_daily WHERE trade_date = %(trade_date)s",
+            engine,
+            params={"trade_date": trade_date},
+        )
+
+        if df.empty:
+            print(f"[QUALITY] 无数据，跳过校验")
+            return False
+
+        results = checker.run_all(df, trade_date)
+        all_pass = True
+        with engine.begin() as conn:
+            for r in results:
+                conn.execute(text("""
+                    INSERT INTO data_quality_log (trade_date, check_name, expected_value, actual_value, passed, detail)
+                    VALUES (:trade_date, :check_name, :expected, :actual, :passed, :detail)
+                """), r)
+                status = "PASS" if r["passed"] else "FAIL"
+                if not r["passed"]:
+                    all_pass = False
+                print(f"[QUALITY] {r['check_name']}: {status} — {r['detail']}")
+
+        if not all_pass:
+            print("[QUALITY] 质量校验未通过，下游因子计算已阻断。请检查数据源后手动重跑。")
+        return all_pass
+    finally:
+        engine.dispose()
 
 
 # ============================================================
@@ -577,6 +613,12 @@ def main():
         engine.dispose()
 
     logger.success("全部同步任务完成")
+
+    # 同步完成后执行质量校验，不通过则阻断下游因子计算
+    today = date.today()
+    passed = _run_quality_gate(today)
+    if not passed:
+        logger.warning("质量校验未通过！下游因子计算应暂停，待数据问题修复后重跑。")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h3>模拟盘监控</h3>
+    <div id="paper-runs" hx-get="/api/paper-runs" hx-trigger="load" hx-swap="innerHTML">
+        <p>加载中...</p>
+    </div>
+</div>
+<div id="paper-detail"></div>
+{% endblock %}

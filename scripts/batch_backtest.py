@@ -132,7 +132,8 @@ def _run_single_combo(args: tuple) -> dict[str, Any] | None:
     if strategy_class is None:
         return None
 
-    from app.utils.backtest_runner import run_backtest
+    # [架构重构] app.utils.backtest_runner 已移除，此处需要重构
+    from app.utils.backtest_runner import run_backtest  # noqa: F401 (removed in v2.0)
 
     try:
         result = run_backtest(
@@ -217,7 +218,8 @@ def run_batch(workers: int = 8, limit: int | None = None, resume: bool = False):
     engine.dispose()
 
     # 加载上证指数数据，序列化为 bytes（跨进程传递）
-    from app.utils.backtest_runner import load_index_data
+    # [架构重构] app.utils.backtest_runner 已移除，此处需要重构
+    from app.utils.backtest_runner import load_index_data  # noqa: F401 (removed in v2.0)
     print("加载上证指数数据 ...")
     index_df = load_index_data("20150101", "20300101")
     print(f"  上证指数: {len(index_df)} 条")

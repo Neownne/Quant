@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}行情看板 - Quant Monitor{% endblock %}
+{% block content %}
+<div x-data="{ group: 'default' }">
+    <div class="card" style="display:flex; gap:12px; align-items:center;">
+        <h3 style="margin:0;">行情看板</h3>
+        <select x-model="group" @change="window.location.href='/' + (group === 'default' ? '' : '?group=' + group)">
+            <option value="default">默认自选</option>
+            <option value="tech">科技</option>
+        </select>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+        <div class="card" hx-get="/api/quotes/default" hx-trigger="load" hx-swap="innerHTML">
+            <p>加载中...</p>
+        </div>
+
+        <div class="card" id="kline-panel">
+            <p style="color:#889;">选择股票查看K线图</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

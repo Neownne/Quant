@@ -588,6 +588,11 @@ class PaperEngine:
                 conn.execute(text(
                     "UPDATE paper_account SET cash = cash + :sell - :buy WHERE id = :aid"
                 ), {"sell": sell_total, "buy": buy_total, "aid": self.account_id})
+
+                # TODO: 在此处写入 paper_signals + 调用 _save_signal_factors()
+                # 当 `run_daily` 中的 factor_df（因子值）和 predicted_score 可传入时，
+                # 为每个买入信号插入 paper_signals 记录，然后调用 _save_signal_factors(signal_id, factor_values)。
+                # factor_values 应从 factor_df 中提取当前 stock_code 对应的因子列值。
         finally:
             engine.dispose()
 
@@ -675,8 +680,9 @@ class StaticPaperEngine:
         """对每只股票运行 backtrader 回测，将交易信号写入 paper 表。
 
         返回汇总 dict。"""
-        from app.utils.backtest_runner import run_backtest, load_index_data
-        from app.utils.data_loader import load_ohlcv
+        # [架构重构] app.utils 已移除，此处需要重构
+        from app.utils.backtest_runner import run_backtest, load_index_data  # noqa: F401 (removed in v2.0)
+        from app.utils.data_loader import load_ohlcv  # noqa: F401 (removed in v2.0)
 
         engine = get_engine()
 
@@ -816,3 +822,33 @@ class StaticPaperEngine:
 # ══════════════════════════════════════════════════════════
 # PaperEngine batch-mode skip (restored)
 # ══════════════════════════════════════════════════════════
+
+
+# ── 信号因子写入 ──────────────────────────────────────────
+
+
+def _save_signal_factors(signal_id: int, factor_values: dict):
+    """Write per-signal factor values for attribution analysis.
+
+    Parameters
+    ----------
+    signal_id : paper_signals 表的主键 ID
+    factor_values : {factor_name: value} 字典，来自 run_daily 中的 factor_df
+
+    调用时机：在 paper_signals 行写入后立即调用。
+    在 PaperEngine._execute_orders() 中集成，
+    传入从 factor_df 提取的对应股票因子值。
+    """
+    if not factor_values:
+        return
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            for factor_name, value in factor_values.items():
+                conn.execute(text("""
+                    INSERT INTO signal_factors (signal_id, factor_name, value)
+                    VALUES (:sid, :name, :val)
+                    ON CONFLICT (signal_id, factor_name) DO NOTHING
+                """), {"sid": signal_id, "name": factor_name, "val": float(value)})
+    except Exception:
+        pass
