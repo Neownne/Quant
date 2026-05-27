@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     metrics_json JSONB NOT NULL DEFAULT '{}',
     equity_curve_json JSONB NOT NULL DEFAULT '{}',
     daily_returns_json JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -339,8 +339,8 @@ CREATE TABLE IF NOT EXISTS strategy_configs (
     name VARCHAR(100) NOT NULL UNIQUE,
     type VARCHAR(20) NOT NULL CHECK (type IN ('ml', 'static')),
     description TEXT DEFAULT '',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -352,7 +352,7 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     algorithm_type VARCHAR(50) NOT NULL,
     feature_list_version VARCHAR(20) NOT NULL,
     model_file_path TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE (strategy_id, version)
 );
 """
@@ -366,7 +366,7 @@ CREATE TABLE IF NOT EXISTS factor_weights_history (
     effective_date DATE NOT NULL,
     source VARCHAR(10) NOT NULL CHECK (source IN ('auto', 'manual')),
     reason TEXT DEFAULT '',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -381,7 +381,7 @@ CREATE TABLE IF NOT EXISTS factor_lineage (
     source_fields TEXT[] NOT NULL,
     computation_formula_hash VARCHAR(64) NOT NULL,
     upstream_factors TEXT[] DEFAULT '{}',
-    last_validated_at TIMESTAMPTZ DEFAULT NOW()
+    last_validated_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -390,7 +390,7 @@ CREATE TABLE IF NOT EXISTS factor_availability (
     id SERIAL PRIMARY KEY,
     trade_date DATE NOT NULL,
     factor_name VARCHAR(100) NOT NULL,
-    data_ready_at TIMESTAMPTZ NOT NULL,
+    data_ready_at TIMESTAMP NOT NULL,
     data_source VARCHAR(50) DEFAULT '',
     latency_ms INT DEFAULT 0,
     UNIQUE (trade_date, factor_name)
@@ -411,7 +411,7 @@ CREATE TABLE IF NOT EXISTS paper_runs (
     initial_capital DOUBLE PRECISION NOT NULL,
     status VARCHAR(10) NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'paused', 'stopped')),
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -423,7 +423,7 @@ CREATE TABLE IF NOT EXISTS paper_signals (
     stock_code VARCHAR(10) NOT NULL,
     predicted_score DOUBLE PRECISION,
     rank INT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -440,7 +440,7 @@ CREATE TABLE IF NOT EXISTS signal_factors (
 """
 
 DDL_SIGNAL_FACTORS_IDX_SIGNAL = "CREATE INDEX IF NOT EXISTS idx_sf_signal ON signal_factors (signal_id);"
-DDL_SIGNAL_FACTORS_IDX_FACTOR = "CREATE INDEX IF NOT EXISTS idx_sf_factor_date ON signal_factors (factor_name);"
+DDL_SIGNAL_FACTORS_IDX_FACTOR = "CREATE INDEX IF NOT EXISTS idx_sf_factor ON signal_factors (factor_name);"
 
 # ========== 归因分析 ==========
 
@@ -453,7 +453,7 @@ CREATE TABLE IF NOT EXISTS signal_attribution (
     pnl DOUBLE PRECISION DEFAULT 0,
     pnl_pct DOUBLE PRECISION DEFAULT 0,
     factor_contrib_json JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -471,7 +471,7 @@ CREATE TABLE IF NOT EXISTS weight_adjustments (
     confidence_level DOUBLE PRECISION DEFAULT 0.95,
     source VARCHAR(10) NOT NULL CHECK (source IN ('auto', 'manual')),
     reason TEXT DEFAULT '',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -489,7 +489,7 @@ CREATE TABLE IF NOT EXISTS strategy_health (
     status VARCHAR(10) NOT NULL DEFAULT 'normal'
         CHECK (status IN ('normal', 'warning', 'critical')),
     action_required VARCHAR(20) DEFAULT 'none',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE (strategy_id, date)
 );
 """
@@ -504,8 +504,8 @@ CREATE TABLE IF NOT EXISTS strategy_commands (
         CHECK (command_type IN ('adjust_weight', 'pause', 'resume', 'rollback', 'retrain')),
     payload_json JSONB NOT NULL DEFAULT '{}',
     requested_by VARCHAR(50) DEFAULT 'user',
-    requested_at TIMESTAMPTZ DEFAULT NOW(),
-    executed_at TIMESTAMPTZ,
+    requested_at TIMESTAMP DEFAULT NOW(),
+    executed_at TIMESTAMP,
     execution_result TEXT DEFAULT '',
     rolled_back_by INT REFERENCES strategy_commands(id)
 );
@@ -522,7 +522,7 @@ CREATE TABLE IF NOT EXISTS data_quality_log (
     actual_value TEXT,
     passed BOOLEAN NOT NULL DEFAULT FALSE,
     detail TEXT DEFAULT '',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 """
 
