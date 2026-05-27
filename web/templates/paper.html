@@ -1,5 +1,10 @@
 {% extends "base.html" %}
-{% block title %}模拟盘 - Quant Monitor{% endblock %}
 {% block content %}
-<div class="card"><h3>开发中...</h3><p>此页面即将实现</p></div>
+<div class="card">
+    <h3>模拟盘监控</h3>
+    <div id="paper-runs" hx-get="/api/paper-runs" hx-trigger="load" hx-swap="innerHTML">
+        <p>加载中...</p>
+    </div>
+</div>
+<div id="paper-detail"></div>
 {% endblock %}

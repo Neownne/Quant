@@ -1,4 +1,5 @@
 import json
+import os
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -168,3 +169,127 @@ async def get_equity_curve(backtest_id: int):
 
     html = f"""<div id="equity-chart" style="width:100%;height:400px;" data-chart='{json.dumps(option)}'></div>"""
     return HTMLResponse(html)
+
+
+@router.get("/paper-runs")
+async def list_paper_runs():
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT pr.id, sc.name, sv.version, pr.start_date, pr.end_date,
+                       pr.initial_capital, pr.status
+                FROM paper_runs pr
+                JOIN strategy_configs sc ON pr.strategy_id = sc.id
+                JOIN strategy_versions sv ON pr.version_id = sv.id
+                ORDER BY pr.created_at DESC LIMIT 20
+            """)).fetchall()
+    except Exception:
+        rows = []
+
+    if not rows:
+        return HTMLResponse("""<div style="padding:40px;text-align:center;color:#889;">
+            <p>暂无模拟盘运行记录</p><p style="font-size:12px;">通过后台脚本启动模拟盘</p>
+        </div>""")
+
+    html = "<table><thead><tr><th>策略</th><th>版本</th><th>起始日</th><th>结束日</th><th>初始资金</th><th>状态</th><th>操作</th></tr></thead><tbody>"
+    for r in rows:
+        rid, name, ver, start, end, cap, status = r
+        status_badge = {"running": "badge-valid", "paused": "badge-suspect", "stopped": "badge-invalid"}.get(status, "")
+        html += f"""<tr>
+            <td>{name}</td><td>{ver}</td><td>{start}</td><td>{end or '进行中'}</td>
+            <td>{cap:,.0f}</td>
+            <td><span class="badge {status_badge}">{status}</span></td>
+            <td><button class="mock-button" hx-get="/api/paper-run/{rid}" hx-target="#paper-detail" hx-swap="innerHTML">查看</button></td>
+        </tr>"""
+    html += "</tbody></table>"
+    return HTMLResponse(html)
+
+
+@router.get("/paper-run/{run_id}")
+async def get_paper_run_detail(run_id: int):
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            positions = conn.execute(text("""
+                SELECT stock_code, entry_date, entry_price, exit_date, exit_price, quantity, pnl, pnl_pct
+                FROM paper_positions WHERE run_id = :rid ORDER BY entry_date DESC LIMIT 50
+            """), {"rid": run_id}).fetchall()
+            signals = conn.execute(text("""
+                SELECT signal_date, stock_code, predicted_score, rank
+                FROM paper_signals WHERE run_id = :rid ORDER BY signal_date DESC LIMIT 30
+            """), {"rid": run_id}).fetchall()
+    except Exception:
+        positions = []
+        signals = []
+
+    pos_html = "<table><thead><tr><th>代码</th><th>入场日</th><th>入场价</th><th>出场日</th><th>出场价</th><th>数量</th><th>盈亏</th><th>盈亏%</th></tr></thead><tbody>"
+    for p in positions:
+        code, ed, ep, xd, xp, qty, pnl, pct = p
+        pnl_class = "up" if (pnl or 0) > 0 else "down"
+        pos_html += f"""<tr>
+            <td>{code}</td><td>{ed}</td><td>{ep:.2f}</td><td>{xd or '-'}</td><td>{xp or '-'}</td>
+            <td>{qty}</td>
+            <td class="{pnl_class}">{pnl:,.0f}</td>
+            <td class="{pnl_class}">{pct:+.2f}%</td>
+        </tr>"""
+    pos_html += "</tbody></table>"
+
+    sig_html = "<table><thead><tr><th>日期</th><th>代码</th><th>评分</th><th>排名</th></tr></thead><tbody>"
+    for s in signals:
+        sd, sc, score, rank = s
+        sig_html += f"<tr><td>{sd}</td><td>{sc}</td><td>{score:.4f}</td><td>{rank}</td></tr>"
+    sig_html += "</tbody></table>"
+
+    total_pnl = sum((p[6] or 0) for p in positions)
+    wins = sum(1 for p in positions if (p[7] or 0) > 0)
+
+    html = f"""<div class="card"><h3>持仓明细 ({len(positions)}笔)</h3>{pos_html}</div>
+    <div class="card"><h3>信号记录</h3>{sig_html}</div>
+    <div class="card"><h3>汇总</h3><p>总盈亏: <span class="{'up' if total_pnl > 0 else 'down'}">{total_pnl:+,.0f}</span></p><p>胜率: {wins}/{len([p for p in positions if p[6] is not None])}</p></div>"""
+    return HTMLResponse(html)
+
+
+@router.get("/data-status")
+async def get_data_status():
+    engine = get_engine()
+    tables = ["stock_daily", "stock_basic", "index_daily", "stock_daily_extra",
+              "stock_shareholder", "stock_financial"]
+
+    html = "<table><thead><tr><th>表名</th><th>最新日期</th><th>行数</th></tr></thead><tbody>"
+    for t in tables:
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text(
+                    f"SELECT COALESCE(MAX(trade_date)::text, '无数据'), COUNT(*) FROM {t}" if t != "stock_basic"
+                    else f"SELECT 'N/A', COUNT(*) FROM {t}"
+                )).fetchone()
+            html += f"<tr><td>{t}</td><td>{row[0]}</td><td>{row[1]:,}</td></tr>"
+        except Exception:
+            html += f"<tr><td>{t}</td><td style='color:#ef5350;'>查询失败</td><td>-</td></tr>"
+    html += "</tbody></table>"
+
+    # Add recent quality checks
+    try:
+        with engine.connect() as conn:
+            qrows = conn.execute(text(
+                "SELECT trade_date, check_name, CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END, detail FROM data_quality_log ORDER BY trade_date DESC LIMIT 10"
+            )).fetchall()
+    except Exception:
+        qrows = []
+
+    qhtml = "<h4 style='margin-top:20px;'>最近质量校验</h4><table><thead><tr><th>日期</th><th>检查项</th><th>结果</th><th>详情</th></tr></thead><tbody>"
+    for qr in qrows:
+        td, cn, st, detail = qr
+        qhtml += f"<tr><td>{td}</td><td>{cn}</td><td>{st}</td><td style='font-size:11px;'>{detail}</td></tr>"
+    qhtml += "</tbody></table>" if qrows else "<p style='color:#889;'>暂无质量校验记录</p>"
+
+    return HTMLResponse(html + qhtml)
+
+
+@router.post("/sync/trigger")
+async def trigger_sync():
+    import subprocess, sys
+    subprocess.Popen([sys.executable, "-m", "data.sync"],
+                     cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
+    return HTMLResponse("<p style='color:#4fc3f7;'>同步已触发，正在后台运行... 刷新页面查看结果</p>")

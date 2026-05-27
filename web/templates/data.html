@@ -1,5 +1,14 @@
 {% extends "base.html" %}
-{% block title %}数据状态 - Quant Monitor{% endblock %}
 {% block content %}
-<div class="card"><h3>开发中...</h3><p>此页面即将实现</p></div>
+<div class="card">
+    <h3>数据状态</h3>
+    <button class="mock-button" hx-post="/api/sync/trigger" hx-target="#sync-log" hx-swap="innerHTML"
+            style="background:#1b5e20;color:#66bb6a;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;margin-bottom:16px;">
+        手动触发同步
+    </button>
+    <div id="sync-log"></div>
+</div>
+<div class="card" hx-get="/api/data-status" hx-trigger="load" hx-swap="innerHTML">
+    <p>加载中...</p>
+</div>
 {% endblock %}
