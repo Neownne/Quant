@@ -108,6 +108,10 @@ class FactorEngine:
                     how="left",
                 )
 
+        # 设置窗口缩放：分钟频 bar_per_day=4，因子 lookback ×4 匹配日历时间
+        from factors._scaling import set_window_scale
+        set_window_scale(self.bar_per_day)
+
         result_parts = []
 
         for code, group in df.groupby("code"):
@@ -116,6 +120,9 @@ class FactorEngine:
                 fn = factors.ALL_FACTORS[name]
                 part[name] = fn(group)
             result_parts.append(part)
+
+        # 恢复默认
+        set_window_scale(1.0)
 
         result = pd.concat(result_parts, ignore_index=True)
         return result

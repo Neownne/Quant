@@ -1,6 +1,7 @@
 """Alpha191 资金流向类因子。"""
 import numpy as np
 import pandas as pd
+from factors._scaling import w
 
 
 def money_flow(df: pd.DataFrame) -> pd.Series:
@@ -8,7 +9,7 @@ def money_flow(df: pd.DataFrame) -> pd.Series:
     h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
     mf = ((c - l) - (h - c)) / (h - l).replace(0, np.nan)
     raw_mf = mf * v
-    return raw_mf.rolling(10).sum() / v.rolling(10).sum().replace(0, np.nan)
+    return raw_mf.rolling(w(10)).sum() / v.rolling(w(10)).sum().replace(0, np.nan)
 
 
 def obv_roc(df: pd.DataFrame) -> pd.Series:
@@ -16,15 +17,15 @@ def obv_roc(df: pd.DataFrame) -> pd.Series:
     c, v = df["close"], df["volume"]
     direction = np.sign(c.diff())
     obv = (direction * v).fillna(0).cumsum()
-    lag = obv.shift(20).abs().replace(0, np.nan)
-    return (obv - obv.shift(20)) / lag
+    lag = obv.shift(w(20)).abs().replace(0, np.nan)
+    return (obv - obv.shift(w(20))) / lag
 
 
 def force_index(df: pd.DataFrame) -> pd.Series:
     """强力指数：EMA(ΔC × V, 2)。"""
     c, v = df["close"], df["volume"]
     fi_raw = c.diff() * v
-    return fi_raw.ewm(span=2, adjust=False).mean()
+    return fi_raw.ewm(span=w(2), adjust=False).mean()
 
 
 def cwt(df: pd.DataFrame) -> pd.Series:
@@ -32,14 +33,14 @@ def cwt(df: pd.DataFrame) -> pd.Series:
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
     raw = df["close"] * df["volume"] * df["turnover"]
-    lag = raw.shift(5).abs().replace(0, np.nan)
-    return (raw - raw.shift(5)) / lag
+    lag = raw.shift(w(5)).abs().replace(0, np.nan)
+    return (raw - raw.shift(w(5))) / lag
 
 
 def volume_climax(df: pd.DataFrame) -> pd.Series:
     """天量见顶：(V_t - max_{t-20..t-1}) / max_{t-20..t-1}，取负。"""
     v = df["volume"]
-    rolling_max = v.shift(1).rolling(20).max()
+    rolling_max = v.shift(1).rolling(w(20)).max()
     climax = (v - rolling_max) / rolling_max.replace(0, np.nan)
     return -climax
 
@@ -49,8 +50,8 @@ def vwap_momentum(df: pd.DataFrame) -> pd.Series:
     h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
     typ = (h + l + c) / 3
     tv = typ * v
-    vwap5 = tv.rolling(5).sum() / v.rolling(5).sum().replace(0, np.nan)
-    vwap20 = tv.rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)
+    vwap5 = tv.rolling(w(5)).sum() / v.rolling(w(5)).sum().replace(0, np.nan)
+    vwap20 = tv.rolling(w(20)).sum() / v.rolling(w(20)).sum().replace(0, np.nan)
     return vwap5 / vwap20.replace(0, np.nan) - 1
 
 

@@ -6,6 +6,7 @@ df 可能包含额外列: turnover, log_mcap, pb, shareholder_count 等。
 
 import numpy as np
 import pandas as pd
+from factors._scaling import w
 
 
 def log_mcap(df: pd.DataFrame) -> pd.Series:
@@ -19,8 +20,8 @@ def turnover_mom(df: pd.DataFrame) -> pd.Series:
     """换手率动量: 5日换手率变化 / 20日换手率标准差。"""
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
-    chg = df["turnover"].diff(5)
-    std = df["turnover"].rolling(20).std()
+    chg = df["turnover"].diff(w(5))
+    std = df["turnover"].rolling(w(20)).std()
     return chg / std.replace(0, np.nan)
 
 
@@ -28,7 +29,7 @@ def pb_pct(df: pd.DataFrame) -> pd.Series:
     """PB 历史分位（负值 = 低估值）: PB在500日中的分位数取负。"""
     if "pb" not in df.columns:
         return pd.Series(np.nan, index=df.index)
-    rank = df["pb"].rolling(500, min_periods=60).apply(
+    rank = df["pb"].rolling(w(500), min_periods=w(60)).apply(
         lambda x: pd.Series(x).rank().iloc[-1] / len(x) if len(x) > 0 else np.nan,
         raw=False,
     )
@@ -40,21 +41,21 @@ def shareholder_change(df: pd.DataFrame) -> pd.Series:
     if "shareholder_count" not in df.columns:
         return pd.Series(np.nan, index=df.index)
     sc = df["shareholder_count"].ffill()
-    return -sc.pct_change(60)  # ~一个季度
+    return -sc.pct_change(w(60))  # ~一个季度
 
 
 def vol_conv(df: pd.DataFrame) -> pd.Series:
     """量能聚拢: -|vol/MA(vol,5) - vol/MA(vol,20)|（量缩等变盘）。"""
     v = df["volume"].replace(0, np.nan)
-    r5 = v / v.rolling(5).mean()
-    r20 = v / v.rolling(20).mean()
+    r5 = v / v.rolling(w(5)).mean()
+    r20 = v / v.rolling(w(20)).mean()
     return -(r5 - r20).abs()
 
 
 def intra_vol(df: pd.DataFrame) -> pd.Series:
     """日内波动: (High - Low) / Open 的 5日 EMA。"""
     iv = (df["high"] - df["low"]) / df["open"].replace(0, np.nan)
-    return iv.ewm(span=5, adjust=False).mean()
+    return iv.ewm(span=w(5), adjust=False).mean()
 
 
 def gap_ratio(df: pd.DataFrame) -> pd.Series:

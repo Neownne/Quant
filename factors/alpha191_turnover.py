@@ -1,13 +1,14 @@
 """Alpha191 换手率类因子。"""
 import numpy as np
 import pandas as pd
+from factors._scaling import w
 
 
 def turnover_skew(df: pd.DataFrame) -> pd.Series:
     """换手率偏度：skew(turnover, 20)，右偏=资金进场。"""
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
-    return df["turnover"].rolling(20).skew()
+    return df["turnover"].rolling(w(20)).skew()
 
 
 def turnover_cv(df: pd.DataFrame) -> pd.Series:
@@ -15,7 +16,7 @@ def turnover_cv(df: pd.DataFrame) -> pd.Series:
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
     t = df["turnover"]
-    cv = t.rolling(20).std() / t.rolling(20).mean().replace(0, np.nan)
+    cv = t.rolling(w(20)).std() / t.rolling(w(20)).mean().replace(0, np.nan)
     return -cv
 
 
@@ -24,7 +25,7 @@ def turnover_ma_dev(df: pd.DataFrame) -> pd.Series:
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
     t = df["turnover"]
-    return t / t.rolling(60).mean().replace(0, np.nan) - 1
+    return t / t.rolling(w(60)).mean().replace(0, np.nan) - 1
 
 
 def turnover_ret_corr(df: pd.DataFrame) -> pd.Series:
@@ -32,7 +33,7 @@ def turnover_ret_corr(df: pd.DataFrame) -> pd.Series:
     if "turnover" not in df.columns:
         return pd.Series(np.nan, index=df.index)
     ret = df["close"].pct_change()
-    return df["turnover"].rolling(20).corr(ret)
+    return df["turnover"].rolling(w(20)).corr(ret)
 
 
 def free_turnover_ratio(df: pd.DataFrame) -> pd.Series:

@@ -1,6 +1,7 @@
 """Alpha191 隔夜效应类因子。"""
 import numpy as np
 import pandas as pd
+from factors._scaling import w
 
 
 def overnight_ret(df: pd.DataFrame) -> pd.Series:
@@ -15,13 +16,13 @@ def overnight_ret_std(df: pd.DataFrame) -> pd.Series:
     o, c = df["open"], df["close"]
     prev_c = c.shift(1).replace(0, np.nan)
     on_ret = (o - prev_c) / prev_c
-    return -on_ret.rolling(10).std()
+    return -on_ret.rolling(w(10)).std()
 
 
 def open_auction_jump(df: pd.DataFrame) -> pd.Series:
     """开盘跳空偏离：(O_t - MA(O,5)) / MA(O,5)。"""
     o = df["open"]
-    ma5 = o.rolling(5).mean().replace(0, np.nan)
+    ma5 = o.rolling(w(5)).mean().replace(0, np.nan)
     return (o - ma5) / ma5
 
 
@@ -30,7 +31,7 @@ def gap_ma_dev(df: pd.DataFrame) -> pd.Series:
     o, c = df["open"], df["close"]
     prev_c = c.shift(1).replace(0, np.nan)
     gap = (o - prev_c) / prev_c
-    return gap - gap.rolling(20).mean()
+    return gap - gap.rolling(w(20)).mean()
 
 
 ALPHA191_GAP: dict = {
