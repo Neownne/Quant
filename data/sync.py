@@ -127,7 +127,7 @@ def _run_quality_gate(trade_date: date):
     engine = get_engine()
     try:
         df = pd.read_sql(
-            "SELECT code, close, volume, change_pct FROM stock_daily WHERE trade_date = %(trade_date)s",
+            "SELECT code, close, volume FROM stock_daily WHERE trade_date = %(trade_date)s",
             engine,
             params={"trade_date": trade_date},
         )
