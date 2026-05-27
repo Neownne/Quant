@@ -680,8 +680,9 @@ class StaticPaperEngine:
         """对每只股票运行 backtrader 回测，将交易信号写入 paper 表。
 
         返回汇总 dict。"""
-        from app.utils.backtest_runner import run_backtest, load_index_data
-        from app.utils.data_loader import load_ohlcv
+        # [架构重构] app.utils 已移除，此处需要重构
+        from app.utils.backtest_runner import run_backtest, load_index_data  # noqa: F401 (removed in v2.0)
+        from app.utils.data_loader import load_ohlcv  # noqa: F401 (removed in v2.0)
 
         engine = get_engine()
 

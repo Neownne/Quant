@@ -7,7 +7,8 @@ sys.path.insert(0, ".")
 import pandas as pd
 from data.db import get_engine
 from sqlalchemy import text
-from app.utils.ml_backtest import run_ml_backtest
+# [架构重构] app.utils 已移除，此处需要重构
+from app.utils.ml_backtest import run_ml_backtest  # noqa: F401 (removed in v2.0)
 
 
 def get_codes(n: int | None = None) -> list[str]:

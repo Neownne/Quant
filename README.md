@@ -8,23 +8,7 @@
 ## 核心工作流
 
 ```
-因子研究 (ML Monitor)  →  策略构建 (Strategy Editor)  →  历史回测 (Backtest)
-                                                              │
-                                                    保存结果 / 对比历史
-                                                              │
-                                                     🚀 升级到模拟盘
-                                                              │
-                                                              ▼
-                                                      模拟盘交易 (Paper Trade)
-                                                      ├── ML 策略: PaperEngine
-                                                      └── 静态策略: StaticPaperEngine
-                                                              │
-                                               ┌──────────────┴──────────────┐
-                                               │  权益曲线 / 持仓分布 / P&L  │
-                                               │  委托历史 / 已平仓交易 / 策略信息 │
-                                               └─────────────────────────────┘
-
-数据监控 (Data Monitor)  ←── 自动同步调度 + 质量检查（5 种模式每日 18:00）
+因子计算(定时任务) → 模型训练 → 历史回测(防过拟合检查) → 模拟盘验证 → 归因反馈闭环
 ```
 
 ---
@@ -32,29 +16,19 @@
 ## 架构概览
 
 ```
-                    ┌──────────────────────────────────────────────────────────┐
-                    │               Streamlit Web UI (app/)                     │
-                    │  ┌──────┐ ┌──────┐ ┌───────┐ ┌──────┐ ┌─────┐ ┌──────┐ ┌──────┐│
-                    │  │实时报价│ │K线图 │ │策略回测│ │模拟盘│ │股票池│ │ML监控│ │数据监控││
-                    │  └──┬───┘ └──┬───┘ └───┬───┘ └──┬───┘ └──┬──┘ └──┬───┘ └──┬───┘│
-                    │     └────────┼──────────┼────────┼────────┘       │        │    │
-                    │   data_loader / backtest_runner / account_manager /        │    │
-                    │   stock_pools / paper_engine / sync.check_data_quality     │    │
-                    └──────────────┼──────────────────────────────────────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              │            data/ 数据层                  │
-              │  ┌──────────┐  ┌──────┐  ┌───────────┐  │
-              │  │fetcher.py│  │db.py │  │sync.py     │  │
-              │  │ AKShare  │  │ PG   │  │数据同步     │  │
-              │  └────┬─────┘  └──┬───┘  └─────┬─────┘  │
-              │       └───────────┼─────────────┘        │
-              └───────────────────┼──────────────────────┘
-                                  │
-                    ┌─────────────┴─────────────┐
-                    │     PostgreSQL 数据库       │
-                    │  16 张表（行情 + 基本面 + 回测 + 模拟盘 + 策略配置）│
-                    └───────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│              Web 监控层 (FastAPI + HTMX)           │
+│  行情看板 │ 回测对比 │ 模拟盘 │ 数据状态 │ 因子监控  │
+└──────────────────────┬──────────────────────────┘
+                       │ 只读查询
+┌──────────────────────┴──────────────────────────┐
+│              PostgreSQL (29张表)                  │
+└──────────────────────┬──────────────────────────┘
+                       │ 读写
+┌──────────────────────┴──────────────────────────┐
+│         后台研究引擎 (脚本/定时任务)                │
+│  数据同步→质量校验→因子计算→训练→回测→归因→调参     │
+└─────────────────────────────────────────────────┘
 ```
 
 ---
@@ -70,13 +44,17 @@ quant/
 ├── README.md                 # 本文件
 │
 ├── config/
-│   └── settings.py           # 集中配置（数据库、数据参数）
+│   ├── settings.py           # 集中配置（数据库、数据参数）
+│   └── com.quant.sync.plist  # macOS 定时同步任务配置
 │
 ├── data/                     # 数据层
-│   ├── db.py                 # 16 张表 DDL + 连接池 + upsert
+│   ├── db.py                 # 29 张表 DDL + 连接池 + upsert
 │   ├── fetcher.py            # 数据获取（日线:AKShare/腾讯, 分钟:新浪直连API）
 │   ├── sync.py               # 历史数据批量同步（多进程增量，10 种模式 + 质量检查）
-│   └── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
+│   ├── recorder.py           # 实盘数据录制（分钟K线 + 逐笔）
+│   ├── quality.py            # 数据质量校验（覆盖度/缺失/异常检测）
+│   ├── lineage.py            # 数据血缘追踪（来源→转换→消费者）
+│   └── availability.py       # 交易日历 + 数据可用性检查
 │
 ├── strategies/               # 策略层
 │   ├── README.md             # 策略文档（逻辑、参数、风险提示）
@@ -125,23 +103,16 @@ quant/
 │   ├── test_screening.py       # 正交筛选测试
 │   └── test_portfolio.py       # 组合优化测试（选股+仓位+风控）
 │
-├── app/                      # Web 界面层
-│   ├── main.py               # 入口：导航 + sys.path + 每日同步调度
-│   ├── pages/
-│   │   ├── 1_📈_Watchlist.py     # 自选股实时报价
-│   │   ├── 2_📊_Charts.py        # K线图 + 技术指标 + 自选分组
-│   │   ├── 3_🧪_Backtest.py      # 策略回测（单只 / 股票池批量）
-│   │   ├── 4_📋_Paper_Trade.py   # 模拟盘账户/持仓/委托
-│   │   ├── 5_📝_Strategy_Editor.py # 在线策略编辑器
-│   │   ├── 6_📦_Stock_Pools.py   # 自定义股票池（代码编写筛选规则）
-│   │   ├── 7_🔴_Recorder.py      # 数据录制（分钟K线 + 逐笔交易）
-│   │   ├── 8_📊_ML_Monitor.py    # ML策略监控（IC看板/模型表现/当日信号/模拟盘净值/数据健康）
-│   │   └── 9_📡_Data_Monitor.py  # 数据同步监控（质量概览 + 手动同步 + 覆盖度追踪）
-│   └── utils/
-│       ├── account_manager.py # 统一账户 CRUD（创建/查询/更新/策略绑定）
-│       ├── data_loader.py    # DB查询 + 指标计算 + K线图构建 + 实时行情
-│       ├── backtest_runner.py # backtrader 回测封装 + A股费用 + 大盘过滤器
-│       └── stock_pools.py    # 股票池引擎（加载/编译/执行筛选规则）
+├── web/                      # Web 界面层 (FastAPI + HTMX)
+│   ├── main.py               # FastAPI 入口 + 路由注册
+│   ├── routers/
+│   │   ├── dashboard.py      # 行情看板
+│   │   ├── backtest.py       # 回测对比
+│   │   ├── paper.py          # 模拟盘
+│   │   ├── data_status.py    # 数据状态监控
+│   │   └── factor_monitor.py # 因子监控
+│   └── templates/
+│       └── ...               # HTMX 模板文件
 │
 ├── scripts/                  # 批量工具
 │   ├── batch_backtest.py         # 全量回测：所有股票 × 策略 × 参数 × 牛熊市
@@ -151,7 +122,12 @@ quant/
 │   ├── verify_paper_trading.py   # 端到端验证（simulation vs PaperEngine 对比）
 │   ├── sync_minute_data.py       # 60 分钟 K 线批量同步（Sina 直连，超时+续传）
 │   ├── compare_freq.py           # 日频 vs 分钟频 ML 回测对比
-│   └── validate_minute_data.py   # 分钟线日收益 vs 日线收益一致性校验
+│   ├── validate_minute_data.py   # 分钟线日收益 vs 日线收益一致性校验
+│   ├── overfit_check.py          # 过拟合检测（样本内 vs 样本外 Sharpe 对比）
+│   ├── attribution.py            # 收益归因分析（因子/行业/风格归因）
+│   ├── auto_adjust.py            # 自动调参（基于归因结果调整模型参数）
+│   ├── health_check.py           # 系统健康检查（DB/数据/因子/模型全链路）
+│   └── command_worker.py         # 后台命令执行 worker
 │
 ├── docs/                     # 文档 & 研究报告
 │   ├── quant-strategy-research.md  # 量化策略研究报告（技术指标+学术前沿）
@@ -200,6 +176,29 @@ data/sync.py
 | `all` | 全量同步 | — |
 
 **特性**：多进程并发（ProcessPoolExecutor）、增量同步（跳过已覆盖股票）、单股 60s 超时、tqdm 进度条。
+
+### 2. 数据质量校验
+
+```
+data/quality.py  ─── 质量门禁
+  │
+  ├── 覆盖度检查（每只股票最后交易日是否在 N 天内）
+  ├── 缺失值检测（OHLCV 字段空值率）
+  ├── 异常值检测（涨跌幅 > 11% 或 OHLC 逻辑矛盾）
+  ├── 交易日对齐（与交易日历对比，标记缺失交易日）
+  └── 质量评分 → 质量报告 → 阻断不达标的因子计算
+
+data/lineage.py  ─── 数据血缘追踪
+  │
+  ├── 记录每条数据的来源（API/文件/手动）
+  ├── 记录转换步骤（复权/合并/聚合）
+  └── 追溯消费方（因子/模型/回测）
+
+data/availability.py  ─── 数据可用性
+  │
+  ├── 交易日历（沪深交易所）
+  └── 实时数据可用性查询（某股票在某日期是否有数据）
+```
 
 ## ML 选股回测结果
 
@@ -572,8 +571,56 @@ python -m data.sync --mode stock-daily     # 日线行情
 python -m data.sync --mode daily-extra     # 估值指标
 python -m data.sync --mode shareholder     # 股东户数
 
-# 启动 Web 界面
+# 启动 Web 界面 (v2.0 FastAPI)
+uvicorn web.main:app --reload              # 浏览器打开 http://localhost:8000
+
+# 启动 Web 界面 (v1.0 Streamlit, 旧版)
 streamlit run app/main.py                  # 浏览器打开 http://localhost:8501
+```
+
+---
+
+## v2.0 架构说明
+
+v2.0 是一次重大架构升级，从 Streamlit 单体应用迁移到 FastAPI + HTMX 分层架构。
+
+**核心变更**：
+
+| 维度 | v1.0 (Streamlit) | v2.0 (FastAPI + HTMX) |
+|------|------------------|----------------------|
+| Web 框架 | Streamlit (`app/`) | FastAPI (`web/`) |
+| 前端 | Streamlit 自动渲染 | HTMX 服务端渲染 |
+| 目录 | `app/pages/`, `app/utils/` | `web/routers/`, `web/templates/` |
+| 数据库表 | 16 张 | 29 张（新增数据质量、信号归因、任务调度等） |
+| 数据质量 | sync 内嵌检查 | 独立 `data/quality.py` + `data/lineage.py` |
+| 策略编辑器 | Web 内嵌编辑器 | 移除（改为本地开发 + 策略注册） |
+| 回测执行 | 页面内同步/异步 | 独立脚本 + command_worker |
+| 过拟合检测 | grid_backtest 内嵌 | 独立 `scripts/overfit_check.py` |
+| 归因分析 | 无 | 新增 `scripts/attribution.py` (因子/行业/风格归因) |
+| 自动调参 | 无 | 新增 `scripts/auto_adjust.py` (基于归因结果) |
+| 系统监控 | 无 | 独立 `scripts/health_check.py` |
+| 定时任务 | app/main.py 后台线程 | macOS launchd plist (`config/com.quant.sync.plist`) |
+
+**新增模块**：
+- `data/quality.py` -- 数据质量门禁（覆盖度/缺失/异常检测）
+- `data/lineage.py` -- 数据血缘追踪（来源→转换→消费者）
+- `data/availability.py` -- 交易日历 + 数据可用性查询
+- `scripts/overfit_check.py` -- 过拟合检测（样本内 vs 样本外）
+- `scripts/attribution.py` -- 收益归因分析
+- `scripts/auto_adjust.py` -- 自动调参
+- `scripts/health_check.py` -- 系统健康检查
+- `scripts/command_worker.py` -- 后台命令执行 worker
+- `config/com.quant.sync.plist` -- macOS 定时同步任务
+
+**移除内容**：
+- `app/utils/` -- 全部移除（`backtest_runner.py`, `data_loader.py`, `account_manager.py`, `stock_pools.py`, `ml_config_manager.py`, `ml_backtest.py`）
+- `app/pages/5_📝_Strategy_Editor.py` -- 在线策略编辑器
+- `app/pages/6_📦_Stock_Pools.py` -- 自定义股票池编辑器
+
+**工作流升级**：
+```
+v1.0: 因子研究 → 策略构建 → 历史回测 → 保存对比 → 升级模拟盘 → 模拟盘交易
+v2.0: 因子计算(定时) → 模型训练 → 历史回测(防过拟合检查) → 模拟盘验证 → 归因反馈闭环
 ```
 
 ---

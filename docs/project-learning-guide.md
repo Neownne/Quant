@@ -8,7 +8,7 @@
 
 一个 **A 股量化交易系统**，核心是一条 ML 选股管线：每天用机器学习模型对全市场股票打分排序，选出最可能上涨的 Top-N 只股票，模拟实盘买卖。
 
-技术栈：Python + PostgreSQL + Streamlit + AKShare + backtrader + XGBoost/LightGBM
+技术栈：Python + PostgreSQL + FastAPI + HTMX + AKShare + backtrader + XGBoost/LightGBM
 
 ---
 
@@ -43,8 +43,8 @@
                            │
                            ▼
               ┌───────────────────────┐
-              │  Streamlit Web UI     │
-              │  8 个功能页面          │
+              │  FastAPI + HTMX Web UI │
+              │  5 个功能模块          │
               └───────────────────────┘
 ```
 
@@ -107,19 +107,57 @@
 
 | 文件 | 看什么 |
 |------|-------|
-| [app/utils/backtest_runner.py](../app/utils/backtest_runner.py) | `run_backtest()` 封装 backtrader + A 股费用 + 大盘过滤器 + FIFO 交易记录 |
+| `scripts/run_ml_backtest.py` | ML 端到端回测（因子→筛选→训练→汇总） |
+| `scripts/overfit_check.py` | 过拟合检测（样本内 vs 样本外 Sharpe 对比） |
 
 ### 第七站：Web 页面（按需阅读）
 
-| 页面 | 做什么 |
+| 模块 | 做什么 |
 |------|-------|
-| [Watchlist](../app/pages/1_📈_Watchlist.py) | 自选股实时报价（akshare 5s 缓存） |
-| [Charts](../app/pages/2_📊_Charts.py) | K 线图 + 技术指标 |
-| [Backtest](../app/pages/3_🧪_Backtest.py) | 静态策略回测 + 股票池批量 |
-| [Paper Trade](../app/pages/4_📋_Paper_Trade.py) | 模拟盘管理 + 已平仓交易 P&L |
-| [ML Monitor](../app/pages/8_📊_ML_Monitor.py) | 因子 IC 看板 + 当日信号 + 模拟盘净值 + 最近交易 |
+| 行情看板 | 自选股实时报价 + K线图 |
+| 回测对比 | 回测结果历史对比 + 导出 |
+| 模拟盘 | 模拟盘账户/持仓/委托管理 |
+| 数据状态 | 数据覆盖度/质量/同步监控 |
+| 因子监控 | 因子 IC 看板 + 模型表现 + 当日信号 |
 
-### 第八站：批量脚本（按需运行）
+### 第八站：后台研究管线（新增 v2.0）
+
+v2.0 引入完整的后台研究管线，以脚本+定时任务的方式运行：
+
+```
+数据同步(sync.py)
+    │
+    ▼
+质量校验(quality.py) ── 覆盖度/缺失值/异常值/交易日对齐
+    │
+    ▼
+因子计算(factors/engine.py) ── 76个因子 + 截面中性化
+    │
+    ▼
+模型训练(models/trainer.py) ── Walk-forward + XGBoost+LightGBM 集成
+    │
+    ▼
+历史回测(run_ml_backtest.py) ── 过拟合检测(overfit_check.py)
+    │
+    ▼
+模拟盘验证(paper_engine.py) ── 日频信号→订单→DB写入
+    │
+    ▼
+归因分析(attribution.py) ── 因子/行业/风格收益归因
+    │
+    ▼
+自动调参(auto_adjust.py) ── 基于归因结果调整模型参数
+```
+
+| 脚本 | 做什么 |
+|------|-------|
+| `scripts/overfit_check.py` | 样本内 vs 样本外 Sharpe 衰减比检测 |
+| `scripts/attribution.py` | 收益归因分析（因子/行业/风格维度） |
+| `scripts/auto_adjust.py` | 基于归因反馈自动调参 |
+| `scripts/health_check.py` | 系统全链路健康检查 |
+| `scripts/command_worker.py` | 后台命令执行 worker |
+
+### 第九站：批量脚本（按需运行）
 
 | 脚本 | 做什么 |
 |------|-------|
@@ -161,7 +199,7 @@
 | 质押数据 | 按需 | `python -m data.sync --mode pledge` |
 | 行业分类 | 按需 | `python -m data.sync --mode industry` |
 
-**自动同步**：app/main.py 已配置每日 18:00 自动运行 stock-daily 同步。
+**自动同步**：通过 macOS launchd plist (`config/com.quant.sync.plist`) 配置定时任务，每日收盘后自动运行 stock-daily 同步。也可通过 `scripts/command_worker.py` 手动触发。
 **分钟线同步**：新浪 API 限制约 75 次连续请求后封 IP 30 分钟，建议分批 200 只/次，间隔 40 分钟。
 
 ---
@@ -180,15 +218,28 @@ python -m data.sync --mode daily-extra --start 20260101 --workers 8  # 估值（
 python scripts/run_simulation.py --top-n 15 --ndrop --ndrop-n 2 \
     --save-results /tmp/simulation_$(date +%Y%m%d).json
 
-# 3. 参数优化（~30-60分钟，周末跑）
+# 3. 过拟合检测
+python scripts/overfit_check.py
+
+# 4. 收益归因分析
+python scripts/attribution.py
+
+# 5. 自动调参（基于归因结果）
+python scripts/auto_adjust.py
+
+# 6. 系统健康检查
+python scripts/health_check.py
+
+# 7. 参数优化（~30-60分钟，周末跑）
 python scripts/grid_backtest.py --codes-file scripts/test_50_codes.txt
 
-# 4. 全市场回测（~2-3小时，周末跑）
+# 8. 全市场回测（~2-3小时，周末跑）
 python scripts/grid_backtest.py
 ```
 
 **建议节奏**：
 - **每日收盘后**：跑数据同步（stock-daily + index + daily-extra）
-- **每日**：跑 `run_simulation.py` 看当日模拟结果
-- **每周末**：跑 `grid_backtest.py` 做参数优化和过拟合检测
+- **每日**：跑 `run_simulation.py` 看当日模拟结果 + `health_check.py` 系统巡检
+- **每周**：跑 `overfit_check.py` + `attribution.py` 归因分析
+- **每周末**：跑 `grid_backtest.py` 做参数优化和过拟合检测，根据归因结果运行 `auto_adjust.py`
 - **每月**：跑 `financial` 和 `pledge` 同步更新基本面数据
