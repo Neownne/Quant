@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-05-28 (v1.12)  
+> 最后更新：2026-05-29 (v1.12)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
@@ -242,13 +242,53 @@ data/availability.py  ─── 数据可用性
 
 **命令行**：
 ```bash
-# 全功能回测
-python scripts/run_ml_backtest.py --multi-horizon --industry-neutralize \
-    --factors +momentum+reversal+volatility+liquidity+intraday \
-    --start 20240301 --end 20260429 --top-n 30
+# 全功能回测（新默认：无需额外参数）
+python scripts/run_ml_backtest.py
+# 关闭某个功能
+python scripts/run_ml_backtest.py --no-multi-horizon --forward-days 5
 # 今日预测
-python scripts/predict_today.py --industry-neutralize --top-n 30
+python scripts/predict_today.py --top-n 15
 ```
+
+### v1.12 参数优化：日频网格搜索（2026-05-29）
+
+> 由于分钟数据覆盖率不足（1,472/4,911），对 v1.12 日频管线做 6 维网格搜索，寻找无分钟因子的最优参数组合。
+> 固定：`+momentum+reversal+volatility+liquidity+fundamental` 因子集（~66个）、动态多因子闭环、300只候选池。
+
+**搜索空间**（72 组排列组合）：
+
+| 参数 | 候选值 |
+|------|--------|
+| 多周期集成 | ON (T+1/5/20) / OFF |
+| 市场状态分治 | ON / OFF |
+| 行业截面中性化 | ON / OFF |
+| 持仓数 (top-n) | 10 / 15 / 20 |
+| 调仓频率 | 每日 / 周度(5日) |
+
+**Top 10 结果**（回测区间 2022-01~2026-05, CAGR年化, Score=CAGR-2×|DD|+0.5×Sharpe）：
+
+| Rank | 多周期 | Regime | 中性化 | Top-N | 调仓 | CAGR | Sharpe | MaxDD | Score |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1 | — | ON | — | 10 | 日 | 169.5% | 2.99 | 23.0% | 138.4 |
+| 2 | — | ON | — | 15 | 日 | 134.3% | 2.74 | 23.8% | 100.4 |
+| **3** | **ON** | — | **ON** | **15** | **周** | **110.3%** | **2.99** | **16.0%** | **93.3** |
+| 4 | — | ON | — | 20 | 日 | 117.9% | 2.65 | 22.1% | 87.0 |
+| 5 | ON | — | — | 20 | 周 | 99.3% | 3.16 | 14.8% | 85.6 |
+| 6 | — | — | — | 20 | 周 | 103.8% | 2.61 | 19.2% | 78.5 |
+| 7 | — | — | ON | 10 | 周 | 103.2% | 2.34 | 18.4% | 78.0 |
+| 8 | ON | — | — | 15 | 日 | 81.7% | 2.94 | 10.1% | 76.3 |
+| 9 | — | ON | ON | 20 | 日 | 101.7% | 2.44 | 18.9% | 76.0 |
+| 10 | ON | — | ON | 20 | 周 | 96.0% | 2.73 | 18.5% | 72.6 |
+
+**关键发现**：
+- **Multi-Horizon 更稳**：MH 组合回撤普遍 15-20%，远优于单周期 23-30%
+- **Regime 对 MH 无效**：`--multi-horizon` 代码路径优先于 `--regime`，MH 模式下分状态训练被跳过
+- **Industry-neutralize 双刃剑**：MH 下开中性化→CAGR↑/DD↑，关→CAGR↓/DD↓
+- **top-n=15 最优**：10 太集中，20 摊薄超额收益
+- **T+5+日频** 年化虚高：外样本仅 ~1.4 年，CAGR 放大效应；MH 相对可靠
+- **第 1 名虽然 Score 最高但第 3 名才是最优实际选择**：综合收益、回撤、稳健性后，**第 3 名（MH+中性化+15只+周度）**被选为新默认 CLI 参数
+
+**脚本**：`scripts/grid_search.py`，结果文件 `output/grid_results.csv`。
 
 ### v1.10 改进
 - **全市场选股**：修复 `ORDER BY code LIMIT 200` 仅选深市股偏差，默认5238只非ST
@@ -634,8 +674,9 @@ v2.0 完成了从 Streamlit 单体应用到 FastAPI + HTMX 分层架构的迁移
 ## 变更记录
 
 | 日期 | 变更内容 |
-|---|---|
+|---|---|---|
 
+| 2026-05-29 | **v1.12 参数优化：日频网格搜索**：分钟数据覆盖率不足，对日频管线做 6 维 72 组参数网格搜索（多周期/Regime/行业中性化/持仓数/调仓频率）。结论：MH+行业中性化+15只+周度调仓为最优均衡组合（CAGR 110.3%、Sharpe 2.99、MaxDD 16.0%）。`scripts/run_ml_backtest.py` 默认参数更新：`--multi-horizon`/`--industry-neutralize`/`--dynamic` 默认开启，`--top-n` 默认 15，增加 `--no-*` 关闭选项。新增 `scripts/grid_search.py` 通用网格搜索工具。 |
 | 2026-05-28 | **v1.12 分钟因子+行业中性化+多周期预测**：新增 `factors/intraday_minute.py`（7个60min K线日内因子，因子总数 76→83）；`factors/engine.py` 新增 `neutralize_by_industry()` 行业截面中性化（19个SW1行业）；`models/dataset.py` 支持多周期标签 `forward_days=[1,5,20]` 和行业中性化开关；`models/trainer.py` 新增 `MultiHorizonEnsemble` 加权复合打分和 `walk_forward_train_multihorizon`；`scripts/run_ml_backtest.py` 新增 `--multi-horizon`/`--industry-neutralize`/`--horizon-weights` CLI 参数、分钟/行业数据加载；`scripts/predict_today.py` 同步更新。回测验证：500只候选池/52因子，年化收益 86.87%→119.47%（+32.6pp），Sharpe 2.12→3.35（+1.23），最大回撤 27.37%→12.52%（-14.85pp）。修复 `MultiHorizonEnsemble.predict()` 索引对齐 bug（composite 用 code 字符串索引而非整数位置）。 |
 | 2026-05-28 | **v1.11 动态反馈闭环**：新增 ML-动态多因子策略，两级联动——窗口级因子淘汰/发现（IC衰减→权重衰减→淘汰<0.3）和日度级信号追踪（滚动IC→连续衰减告警→触发重训）。新增 `strategy_health`/`strategy_commands` 表。全市场选股+组合风控，Sharpe 1.30。 |
 | 2026-05-27 | **交易成本修正 + 策略精简**：ML 回测新增 A 股真实交易成本（佣金万 0.9 + 印花税万 5 + 滑点 0.1%，基于每日换手率扣除）。静态回测确认 100 万本金 + 万 0.9 佣金 + 万 5 印花税 + 0.1% 滑点。删除 RSI/MACD/双均线三种零收益静态策略，策略总数从 9 降至 6（1 静态 + 5 ML）。README 全面更新。 |

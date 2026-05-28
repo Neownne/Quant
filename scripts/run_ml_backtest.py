@@ -2,12 +2,12 @@
 """ML 选股端到端回测验证。
 
 用法:
-    python scripts/run_ml_backtest.py                              # 集成模式+IC门禁
-    python scripts/run_ml_backtest.py --regime --optuna            # 分状态+超参优化
-    python scripts/run_ml_backtest.py --model xgboost              # 单模型
-    python scripts/run_ml_backtest.py --factor-preset momentum --forward-days 5 --model xgboost
-    python scripts/run_ml_backtest.py --factor-preset reversal --forward-days 1 --model lightgbm
-    python scripts/run_ml_backtest.py --dynamic                    # 动态多因子：归因→健康度→调参
+    python scripts/run_ml_backtest.py                              # 默认: MH+行业中性化+动态+top15+周度
+    python scripts/run_ml_backtest.py --no-multi-horizon --forward-days 5  # 单周期 T+5
+    python scripts/run_ml_backtest.py --no-dynamic                 # 关闭动态反馈
+    python scripts/run_ml_backtest.py --no-industry-neutralize     # 关闭行业中性化
+    python scripts/run_ml_backtest.py --regime --no-multi-horizon  # 分状态训练（需关闭MH）
+    python scripts/run_ml_backtest.py --optuna                     # 启用贝叶斯超参搜索
 """
 import argparse
 import sys
@@ -223,7 +223,7 @@ def main():
     parser.add_argument("--factors", default="all", help="'all', factor preset name, '+preset1+preset2', or comma-separated factor list")
     parser.add_argument("--factor-preset", default="", help="Shorthand for --factors: momentum, reversal, volatility, liquidity, fundamental, all")
     parser.add_argument("--forward-days", type=int, default=1, help="Label horizon: 1=next day, 5=next week")
-    parser.add_argument("--top-n", type=int, default=20)
+    parser.add_argument("--top-n", type=int, default=15)
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--val-years", type=int, default=1)
     parser.add_argument("--start", default="20200101")
@@ -236,14 +236,17 @@ def main():
     parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
     parser.add_argument("--optuna-trials", type=int, default=30, help="Optuna 搜索轮数")
     parser.add_argument("--strategy", default="", help="策略名称，对应 strategy_configs.name，用于匹配 version_id")
-    parser.add_argument("--dynamic", action="store_true", help="启用动态多因子闭环（归因→健康度→调参）")
+    parser.add_argument("--dynamic", action="store_true", default=True, help="启用动态多因子闭环（归因→健康度→调参）")
+    parser.add_argument("--no-dynamic", action="store_false", dest="dynamic", help="禁用动态多因子闭环")
     parser.add_argument("--rebalance-freq", type=int, default=5, help="调仓频率（交易日），默认5=周度")
     parser.add_argument("--universe-size", type=int, default=0, help="候选池上限，0=全市场非ST")
     parser.add_argument("--dd-reduce", type=float, default=0.20, help="组合回撤减仓阈值")
     parser.add_argument("--dd-liquidate", type=float, default=0.25, help="组合回撤清仓阈值")
     parser.add_argument("--index-crash", type=float, default=-0.12, help="指数大跌阈值")
-    parser.add_argument("--industry-neutralize", action="store_true", help="对各因子做行业截面中性化")
-    parser.add_argument("--multi-horizon", action="store_true", help="启用多周期预测 (T+1, T+5, T+20)")
+    parser.add_argument("--industry-neutralize", action="store_true", default=True, help="对各因子做行业截面中性化")
+    parser.add_argument("--no-industry-neutralize", action="store_false", dest="industry_neutralize", help="禁用行业中性化")
+    parser.add_argument("--multi-horizon", action="store_true", default=True, help="启用多周期预测 (T+1, T+5, T+20)")
+    parser.add_argument("--no-multi-horizon", action="store_false", dest="multi_horizon", help="禁用多周期预测")
     parser.add_argument("--horizon-weights", default="0.5,0.3,0.2", help="多周期权重, 逗号分隔")
     args = parser.parse_args()
 
