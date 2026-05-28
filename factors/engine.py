@@ -208,3 +208,35 @@ def neutralize(
     result = pd.Series(np.nan, index=factor.index, dtype=float)
     result.loc[valid] = residuals
     return result
+
+
+def neutralize_by_industry(
+    factor_matrix: pd.DataFrame,
+    factor_names: list[str],
+    industry_col: str = "industry_sw1",
+) -> pd.DataFrame:
+    """行业截面中性化：每个因子减去同行业同日均值。
+
+    对每个 (trade_date, industry) 组，factor = factor - group_mean(factor)。
+    无行业数据的行不参与组均值计算但保留原值。
+
+    参数
+    ----
+    factor_matrix : 含 [trade_date, industry_col] + factor_names 的 DataFrame
+    factor_names : 要中性化的因子列名列表
+    industry_col : 行业分类列名
+
+    返回
+    ----
+    中性化后的 DataFrame（原地修改并返回）
+    """
+    if industry_col not in factor_matrix.columns:
+        return factor_matrix
+
+    for name in factor_names:
+        if name not in factor_matrix.columns:
+            continue
+        group_means = factor_matrix.groupby(["trade_date", industry_col])[name].transform("mean")
+        factor_matrix[name] = factor_matrix[name] - group_means
+
+    return factor_matrix

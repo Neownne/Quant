@@ -407,3 +407,158 @@ def walk_forward_train_by_regime(
         })
 
     return results
+
+
+# ============================================================
+#  Multi-Horizon Ensemble (Feature 3: multi-period prediction)
+# ============================================================
+
+class MultiHorizonEnsemble:
+    """多周期集成：每个 horizon 一个 EnsemblePredictor，加权组合打分。
+
+    Parameters
+    ----------
+    predictors : {1: EnsemblePredictor for T+1, 5: for T+5, 20: for T+20}
+    factor_names : 因子列名
+    weights : {1: 0.5, 5: 0.3, 20: 0.2}，默认等权
+    """
+
+    def __init__(
+        self,
+        predictors: dict[int, EnsemblePredictor],
+        factor_names: list[str],
+        weights: dict[int, float] | None = None,
+    ):
+        self.predictors = predictors
+        self.factor_names = factor_names
+        if weights is None:
+            n = len(predictors)
+            self.weights = {h: 1.0 / n for h in predictors}
+        else:
+            total = sum(weights.values())
+            self.weights = {h: w / total for h, w in weights.items()}
+
+    def predict(self, factor_df: pd.DataFrame) -> pd.DataFrame:
+        """加权复合得分 = Σ w_h * prob_h。
+
+        返回 DataFrame[code, score, rank]，与 EnsemblePredictor.predict() 一致。
+        """
+        codes = factor_df["code"].values
+        composite = pd.Series(0.0, index=codes)
+
+        for horizon, predictor in self.predictors.items():
+            w = self.weights.get(horizon, 0)
+            if w == 0:
+                continue
+            try:
+                pred = predictor.predict(factor_df)
+                scores = pred.set_index("code")["score"]
+                composite = composite.add(scores * w, fill_value=0)
+            except Exception:
+                continue
+
+        result = factor_df[["code"]].copy()
+        result["score"] = result["code"].map(composite)
+        result["rank"] = result["score"].rank(ascending=False, method="first").astype(int)
+        return result.sort_values("rank").reset_index(drop=True)
+
+
+def walk_forward_train_multihorizon(
+    df: pd.DataFrame,
+    factor_cols: list[str],
+    horizons: list[int] | None = None,
+    train_years: int = 3,
+    val_years: int = 1,
+    threshold: float = 0.5,
+    use_optuna: bool = False,
+    optuna_trials: int = 30,
+    scores_weights: dict[int, float] | None = None,
+) -> list[dict]:
+    """Walk-forward 训练 XGB+LightGBM，每 horizon 独立建模。
+
+    对每个滚动窗口，对每个 horizon 分别训练模型对，最后封装为
+    MultiHorizonEnsemble。返回结构与 walk_forward_train_ensemble 兼容。
+    """
+    from models.dataset import walk_forward_split
+
+    if horizons is None:
+        horizons = [1, 5, 20]
+    if scores_weights is None:
+        scores_weights = {1: 0.5, 5: 0.3, 20: 0.2}
+
+    results = []
+
+    for train_df, val_df in walk_forward_split(df, train_years, val_years):
+        active_cols = [c for c in factor_cols if train_df[c].notna().any()]
+        if not active_cols:
+            continue
+
+        horizon_predictors: dict[int, EnsemblePredictor] = {}
+        horizon_info: dict[int, dict] = {}
+        train_end = train_df["trade_date"].max()
+        val_start = val_df["trade_date"].min()
+        val_end = val_df["trade_date"].max()
+
+        for h in horizons:
+            label_col = f"label_{h}"
+            if label_col not in df.columns:
+                logger.warning(f"  跳过 horizon T+{h}: 无 {label_col} 列")
+                continue
+
+            cols_to_use = active_cols + [label_col]
+            train_clean = train_df[cols_to_use].dropna()
+            val_clean = val_df[cols_to_use].dropna()
+
+            if len(train_clean) < 100 or len(val_clean) < 50:
+                logger.warning(f"  跳过 horizon T+{h}: 数据不足 (train={len(train_clean)}, val={len(val_clean)})")
+                continue
+
+            X_tr = train_clean[active_cols]
+            y_tr = train_clean[label_col]
+            X_v = val_clean[active_cols]
+            y_v = val_clean[label_col]
+
+            xgb_params = None
+            if use_optuna:
+                from models.tuning import optimize_xgboost_optuna
+                try:
+                    xgb_params = optimize_xgboost_optuna(X_tr, y_tr, X_v, y_v, n_trials=optuna_trials)
+                except Exception:
+                    pass
+
+            xgb_model, xgb_metrics = train_xgboost(X_tr, y_tr, X_v, y_v, params=xgb_params)
+            lgb_model, lgb_metrics = train_lightgbm(X_tr, y_tr, X_v, y_v)
+
+            xgb_prob = xgb_model.predict_proba(X_v)[:, 1]
+            lgb_prob = lgb_model.predict_proba(X_v)[:, 1]
+            ensemble_prob = (xgb_prob + lgb_prob) / 2
+
+            from models.tuning import find_best_threshold
+            best_t, _ = find_best_threshold(y_v, ensemble_prob)
+
+            horizon_predictors[h] = EnsemblePredictor(xgb_model, lgb_model, active_cols, best_t)
+            horizon_info[h] = {
+                "best_threshold": best_t,
+                "xgb": xgb_metrics,
+                "lgb": lgb_metrics,
+            }
+            logger.info(
+                f"  Horizon T+{h}: acc={xgb_metrics.get('accuracy',0):.3f}, "
+                f"threshold={best_t:.2f}, samples={len(train_clean)}"
+            )
+
+        if not horizon_predictors:
+            continue
+
+        ensemble = MultiHorizonEnsemble(horizon_predictors, active_cols, scores_weights)
+
+        results.append({
+            "ensemble": ensemble,
+            "horizons": horizon_info,
+            "active_cols": active_cols,
+            "train_end": train_end,
+            "val_start": val_start,
+            "val_end": val_end,
+        })
+
+    return results

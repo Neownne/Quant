@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-05-28 (v1.10)  
+> 最后更新：2026-05-28 (v1.12)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
@@ -30,6 +30,7 @@
 ┌──────────────────────┴──────────────────────────────────┐
 │              后台研究引擎 (脚本/定时任务)                    │
 │  数据同步→质量校验→因子计算→训练→回测→归因→调参            │
+│  v1.12: 分钟因子(7) + 行业中性化 + 多周期预测(T+1/5/20)    │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -66,9 +67,9 @@ quant/
 │   ├── rsi_strategy.py       # [已废弃] RSI 超买超卖策略
 │   └── grid_shock.py         # 震荡网格(高抛低吸)策略
 │
-├── factors/                    # 因子层（76 个因子）
-│   ├── __init__.py             # ALL_FACTORS 注册表（76 个因子）
-│   ├── engine.py               # FactorEngine + 截面中性化
+├── factors/                    # 因子层（83 个因子）
+│   ├── __init__.py             # ALL_FACTORS 注册表（83 个因子）
+│   ├── engine.py               # FactorEngine + 截面中性化 + 行业中性化
 │   ├── alpha101.py             # 30 个 Alpha101 核心因子
 │   ├── alpha191_turnover.py    # Alpha191 换手率类 5 因子
 │   ├── alpha191_intraday.py    # Alpha191 日内形态类 4 因子
@@ -78,13 +79,14 @@ quant/
 │   ├── alpha191_liquidity.py   # Alpha191 流动性高阶类 4 因子
 │   ├── custom.py               # 7 个自定义 A 股因子
 │   ├── fundamental.py          # 11 个基本面质量因子（九项排雷）
+│   ├── intraday_minute.py      # 7 个分钟频率日内因子（60min K线聚合）
 │   ├── monitor.py              # IC/ICIR/衰减曲线监控
 │   └── screening.py            # 正交性筛选（Spearman + 贪心）
 │
 ├── models/                     # ML 预测层
 │   ├── __init__.py             # 模块导出
-│   ├── dataset.py              # 因子数据集构造 + walk-forward 切分
-│   ├── trainer.py              # XGBoost/LightGBM 训练器 + EnsemblePredictor
+│   ├── dataset.py              # 因子数据集构造 + walk-forward 切分 + 多周期标签
+│   ├── trainer.py              # XGBoost/LightGBM 训练器 + EnsemblePredictor + MultiHorizonEnsemble
 │   ├── predictor.py            # DailyPredictor 横截面打分排序
 │   ├── regime.py               # 市场状态识别（牛/熊/震荡）
 │   └── tuning.py               # 阈值搜索 + Optuna 超参调优
@@ -213,15 +215,42 @@ data/availability.py  ─── 数据可用性
   └── 实时数据可用性查询（某股票在某日期是否有数据）
 ```
 
-## 回测结果（2026-05-28, v1.10）
+## 回测结果（2026-05-28, v1.12）
 
-> 6 个策略（1 静态 + 5 ML），v1.10 管线：全市场选股 → ML打分 → 排雷过滤 → NDrop调仓 → 等权持有 + 组合风控。
+> v1.12 管线：分钟K线(60min) → 日内特征聚合(7个) → 行业截面中性化 → 多周期标签(T+1/5/20) → 集成预测。全市场选股 → ML打分 → 排雷过滤 → NDrop调仓 → 等权持有 + 组合风控。
 > 统一参数：100 万本金、佣金万 0.9（买卖双向）、印花税万 5（卖出单向）、滑点 0.1%。
 > ```bash
 > bash scripts/run_all_backtests.sh          # 一键运行全部 6 个策略
 > ```
 
-### v1.10 核心改进
+### v1.12 新增功能（2026-05-28）
+
+**v1.12 vs Baseline 对比**（500只候选池, 52因子, 2024-03~2026-04）：
+
+| 指标 | Baseline | v1.12 | 改善 |
+|------|:---:|:---:|:---:|
+| 最终活跃因子 | 13 | 19 | +6 |
+| **总收益率** | 100.81% | **140.25%** | +39.44pp |
+| **年化收益率** | 86.87% | **119.47%** | +32.60pp |
+| **Sharpe** | 2.12 | **3.35** | +1.23 |
+| **最大回撤** | 27.37% | **12.52%** | -14.85pp |
+
+**三项新功能**：
+- **分钟频率因子（7个）**：从 `stock_minute` 60min K线聚合日频特征，通过 `factors/intraday_minute.py` → `extra_data` 注入因子引擎
+- **行业截面中性化**：`factors/engine.py::neutralize_by_industry()`，每个因子减去同行业同日截面均值（19个SW1行业，~2,900只覆盖）
+- **多周期预测**：`models/trainer.py::MultiHorizonEnsemble`，T+1/T+5/T+20 三对模型加权打分（默认 0.5/0.3/0.2）
+
+**命令行**：
+```bash
+# 全功能回测
+python scripts/run_ml_backtest.py --multi-horizon --industry-neutralize \
+    --factors +momentum+reversal+volatility+liquidity+intraday \
+    --start 20240301 --end 20260429 --top-n 30
+# 今日预测
+python scripts/predict_today.py --industry-neutralize --top-n 30
+```
+
+### v1.10 改进
 - **全市场选股**：修复 `ORDER BY code LIMIT 200` 仅选深市股偏差，默认5238只非ST
 - **排雷过滤**：8项质量检查（调整后净利润/负债率/商誉/质押/现金流/ROE/净利率），允许≤3项违规
 - **NDrop 增量调仓**：每次最多替换2只最差持仓，换手率~4%（vs 旧版~16%）
@@ -253,9 +282,9 @@ data/availability.py  ─── 数据可用性
 
 ---
 
-## 分钟频 ML 回测
+## 分钟数据（已集成到主选股管线）
 
-> 对比日频(daily) vs 60 分钟频(60min) ML 策略表现。
+> v1.12 已将分钟因子通过 `extra_data` 注入主 ML 管线，不再需要单独的频率对比回测。
 
 **当前状态**（2026-05-27）：已同步 **1,309 / 4,909** 只股票（26.7%），区间 2024-03 ~ 2026-05-27。新浪 API 有 ~75 次/IP 封堵，需分批冷却。
 
@@ -607,6 +636,8 @@ v2.0 完成了从 Streamlit 单体应用到 FastAPI + HTMX 分层架构的迁移
 | 日期 | 变更内容 |
 |---|---|
 
+| 2026-05-28 | **v1.12 分钟因子+行业中性化+多周期预测**：新增 `factors/intraday_minute.py`（7个60min K线日内因子，因子总数 76→83）；`factors/engine.py` 新增 `neutralize_by_industry()` 行业截面中性化（19个SW1行业）；`models/dataset.py` 支持多周期标签 `forward_days=[1,5,20]` 和行业中性化开关；`models/trainer.py` 新增 `MultiHorizonEnsemble` 加权复合打分和 `walk_forward_train_multihorizon`；`scripts/run_ml_backtest.py` 新增 `--multi-horizon`/`--industry-neutralize`/`--horizon-weights` CLI 参数、分钟/行业数据加载；`scripts/predict_today.py` 同步更新。回测验证：500只候选池/52因子，年化收益 86.87%→119.47%（+32.6pp），Sharpe 2.12→3.35（+1.23），最大回撤 27.37%→12.52%（-14.85pp）。修复 `MultiHorizonEnsemble.predict()` 索引对齐 bug（composite 用 code 字符串索引而非整数位置）。 |
+| 2026-05-28 | **v1.11 动态反馈闭环**：新增 ML-动态多因子策略，两级联动——窗口级因子淘汰/发现（IC衰减→权重衰减→淘汰<0.3）和日度级信号追踪（滚动IC→连续衰减告警→触发重训）。新增 `strategy_health`/`strategy_commands` 表。全市场选股+组合风控，Sharpe 1.30。 |
 | 2026-05-27 | **交易成本修正 + 策略精简**：ML 回测新增 A 股真实交易成本（佣金万 0.9 + 印花税万 5 + 滑点 0.1%，基于每日换手率扣除）。静态回测确认 100 万本金 + 万 0.9 佣金 + 万 5 印花税 + 0.1% 滑点。删除 RSI/MACD/双均线三种零收益静态策略，策略总数从 9 降至 6（1 静态 + 5 ML）。README 全面更新。 |
 | 2026-05-27 | **动态反馈闭环 + 日度信号追踪**：新增 ML-动态多因子策略（`--dynamic` 标志），两级联动。窗口级 `BacktestFeedbackLoop`：因子重要性归因 → Sharpe 趋势/t 检验衰退 → 衰减因子×0.8 → 权重<0.3 淘汰。日度级 `DailySignalTracker`：每日 Rank IC → 滚动 20 日 IC → 连续 5 日衰减警告 → 连续 10 日触发重训。数据写入 `strategy_health` + `strategy_commands`。6 策略全 valid，年化 7.69%~28.70%。 |
 | 2026-05-27 | **Web 增强 + ML 策略差异化 + 分钟数据同步优化**：行情看板显示股票名称（JOIN stock_basic）；K线图新增 dataZoom 缩放（默认展示近1年，可拖动扩展）；回测列表新增年化收益/最大回撤/Sharpe 列。ML 策略全面差异化：因子预设系统（momentum/reversal/volatility/liquidity/fundamental 五组+联合预设）、`--forward-days` 标签周期切换、单模型/集成可选、Optuna 贝叶斯超参优化，4个 ML 策略年化 19.10%~31.82%。新增 `run_static_backtest.py`（backtrader Cerebro + 等权聚合）和 `run_all_backtests.sh`。`sync_minute_data.py` 新增 `--batch-size`/`--cooldown` 分批冷却机制适配新浪 ~75 次封 IP 限制，`--skip` 改为在 missing-only 过滤后计数，新增 `missing_only` 参数只同步无分钟数据的股票。分钟数据已覆盖 1,309/4,909 只。修复单模型 equity curve、regime_count 默认值、dataset 多周期收益列等 bug。全部 6 策略 quality=valid。 |

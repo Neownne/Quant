@@ -104,6 +104,119 @@ def get_factors_by_preset(preset: str) -> list[str]:
     return [f.strip() for f in preset.split(",") if f.strip() in ALL_FACTORS]
 
 
+def retrain_at_point(ohlcv: pd.DataFrame, current_date: str, factor_cols: list[str],
+                     forward_days: int, model_type: str, use_ensemble: bool,
+                     extra_data: dict | None = None,
+                     train_years: int = 3,
+                     industry_neutralize: bool = False) -> dict | None:
+    """在回测中某时间点触发增量重训。
+
+    使用当前日期前 train_years 年的数据，对新因子集做 IC 筛选 + 模型训练。
+    返回 {"ensemble": ..., "model": ..., "active_cols": ..., "factor_cols": ...} 或 None。
+    """
+    from models.trainer import train_xgboost, train_lightgbm
+    from factors.screening import filter_factors_by_ic, select_orthogonal_factors
+
+    current_dt = pd.Timestamp(current_date)
+    train_start = pd.Timestamp(current_dt - pd.DateOffset(years=train_years))
+    train_ohlcv = ohlcv[(ohlcv["trade_date"] >= train_start) & (ohlcv["trade_date"] <= current_dt)]
+
+    if len(train_ohlcv["trade_date"].unique()) < 252:
+        logger.warning(f"重训数据不足 ({len(train_ohlcv['trade_date'].unique())} 天 < 252), 跳过")
+        return None
+
+    try:
+        dataset = build_factor_dataset(
+            train_ohlcv, factor_cols,
+            label_mode="binary", forward_days=forward_days,
+            extra_data=extra_data,
+            industry_neutralize=industry_neutralize,
+        )
+    except Exception as e:
+        logger.warning(f"重训因子计算失败: {e}")
+        return None
+
+    dataset = dataset.dropna()
+    if len(dataset) < 1000:
+        logger.warning(f"重训有效数据不足 ({len(dataset)} 行), 跳过")
+        return None
+
+    # IC 筛选
+    try:
+        passing, ic_report = filter_factors_by_ic(dataset, factor_cols)
+        if len(passing) < 3:
+            passing = factor_cols[:min(8, len(factor_cols))]
+    except Exception:
+        passing = factor_cols
+
+    # 正交筛选
+    try:
+        selected = select_orthogonal_factors(dataset, passing, max_factors=min(16, len(passing)))
+    except Exception:
+        selected = passing[:16]
+
+    logger.info(f"重训因子筛选: {len(factor_cols)} → IC{len(passing)} → 正交{len(selected)}")
+
+    # 训练
+    feature_cols = selected if selected else passing
+    X = dataset[feature_cols].fillna(0)
+    y = dataset["label"]
+
+    try:
+        if use_ensemble:
+            xgb = train_xgboost(X, y, eval_metric="logloss")
+            lgb = train_lightgbm(X, y)
+            from models.trainer import EnsemblePredictor
+            ensemble = EnsemblePredictor([xgb, lgb])
+            ensemble.factor_names = feature_cols
+            return {"ensemble": ensemble, "active_cols": feature_cols, "factor_cols": selected}
+        elif model_type == "xgboost":
+            model = train_xgboost(X, y, eval_metric="logloss")
+            return {"model": model, "active_cols": feature_cols}
+        else:
+            model = train_lightgbm(X, y)
+            return {"model": model, "active_cols": feature_cols}
+    except Exception as e:
+        logger.warning(f"重训模型失败: {e}")
+        return None
+
+
+def _discover_factors(day_data: pd.DataFrame, active_factors: list[str],
+                      ic_threshold: float = 0.02, max_add: int = 5) -> list[str]:
+    """从已计算但未使用的因子中发现新有效因子。
+
+    扫描 day_data 中在 ALL_FACTORS 里但不在 active_factors 中的列，
+    计算其横截面 |IC|，返回 |IC| >= ic_threshold 的因子名（最多 max_add 个）。
+    """
+    ret_col = "ret_1d"
+    if ret_col not in day_data.columns or day_data.empty:
+        return []
+
+    candidates = [c for c in day_data.columns
+                  if c in ALL_FACTORS and c not in active_factors]
+    if not candidates:
+        return []
+
+    ret_vals = day_data[ret_col]
+    scores = []
+    for f in candidates:
+        if f not in day_data.columns:
+            continue
+        f_vals = day_data[f]
+        valid = f_vals.notna() & ret_vals.notna()
+        if valid.sum() < 30:
+            continue
+        try:
+            ic = f_vals[valid].corr(ret_vals[valid], method="spearman")
+            if pd.notna(ic) and abs(ic) >= ic_threshold:
+                scores.append((f, abs(ic)))
+        except Exception:
+            pass
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return [f for f, _ in scores[:max_add]]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="xgboost", choices=["xgboost", "lightgbm"])
@@ -129,6 +242,9 @@ def main():
     parser.add_argument("--dd-reduce", type=float, default=0.20, help="组合回撤减仓阈值")
     parser.add_argument("--dd-liquidate", type=float, default=0.25, help="组合回撤清仓阈值")
     parser.add_argument("--index-crash", type=float, default=-0.12, help="指数大跌阈值")
+    parser.add_argument("--industry-neutralize", action="store_true", help="对各因子做行业截面中性化")
+    parser.add_argument("--multi-horizon", action="store_true", help="启用多周期预测 (T+1, T+5, T+20)")
+    parser.add_argument("--horizon-weights", default="0.5,0.3,0.2", help="多周期权重, 逗号分隔")
     args = parser.parse_args()
 
     # Resolve factor preset (--factor-preset overrides --factors if given)
@@ -161,7 +277,8 @@ def main():
                 text("""
                     SELECT sv.id, sc.id FROM strategy_versions sv
                     JOIN strategy_configs sc ON sv.strategy_id = sc.id
-                    WHERE sc.name = :name AND sv.version = '1.10'
+                    WHERE sc.name = :name
+                    ORDER BY sv.created_at DESC LIMIT 1
                 """),
                 {"name": args.strategy},
             ).fetchone()
@@ -170,7 +287,7 @@ def main():
                 strategy_config_id = row[1]
                 logger.info(f"策略 '{args.strategy}' → version_id={version_id}, config_id={strategy_config_id}")
             else:
-                logger.warning(f"未找到策略 '{args.strategy}' 的 v1.10 版本，将使用 version_id=0")
+                logger.warning(f"未找到策略 '{args.strategy}' 的版本记录，将使用 version_id=0")
     codes = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
     if codes is None:
         if args.universe_size > 0:
@@ -202,6 +319,7 @@ def main():
         ORDER BY code, trade_date
     """
     ohlcv = pd.read_sql(sql, engine)
+    ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"])
     logger.info(f"OHLCV: {len(ohlcv)} 行")
 
     # 加载指数数据（始终加载用于风控，regime 模式额外做状态检测）
@@ -258,6 +376,43 @@ def main():
             logger.info(f"  股东数据: {len(sh_df)} 行")
     except Exception as e:
         logger.warning(f"  股东数据加载失败: {e}")
+
+    # ── 分钟频日内特征 (Feature 1) ──
+    try:
+        minute_sql = f"""
+            SELECT code, trade_time, period, open, high, low, close, volume, amount
+            FROM stock_minute
+            WHERE code IN ({code_list})
+              AND trade_time >= '{args.start}'::timestamp
+              AND trade_time <  ('{args.end}'::date + interval '1 day')::timestamp
+            ORDER BY code, trade_time
+        """
+        minute_df = pd.read_sql(minute_sql, engine)
+        if not minute_df.empty:
+            from factors.intraday_minute import build_intraday_daily_features
+            minute_extra = build_intraday_daily_features(minute_df)
+            extra_data.update(minute_extra)
+            logger.info(f"  分钟数据: {len(minute_df)} 行 → {len(minute_extra)} 个日内特征")
+    except Exception as e:
+        logger.warning(f"  分钟数据加载失败 (Feature 1 跳过): {e}")
+
+    # ── 行业数据 (Feature 2) ──
+    try:
+        industry_sql = f"""
+            SELECT code, industry_sw1
+            FROM stock_industry
+            WHERE code IN ({code_list})
+        """
+        industry_df = pd.read_sql(industry_sql, engine)
+        if not industry_df.empty:
+            all_dates = sorted(ohlcv["trade_date"].unique())
+            ind_expanded = industry_df.merge(
+                pd.DataFrame({"trade_date": all_dates}), how="cross"
+            )
+            extra_data["industry_sw1"] = ind_expanded[["code", "trade_date", "industry_sw1"]]
+            logger.info(f"  行业数据: {len(industry_df)} 只股票, {industry_df['industry_sw1'].nunique()} 个行业")
+    except Exception as e:
+        logger.warning(f"  行业数据加载失败 (Feature 2 跳过): {e}")
 
     # ── 排雷系统：加载财务 & 质押数据 ──
     quality_pass: dict[str, set[str]] = {}
@@ -387,12 +542,18 @@ def main():
     engine.dispose()
 
     # 构建因子数据集（含 ret_1d 和 ret_{forward_days}d 列）
-    ret_col = f"ret_{args.forward_days}d"
+    # 多周期: forward_days 变为列表
+    multi_horizon = getattr(args, "multi_horizon", False)
+    horizons = [1, 5, 20] if multi_horizon else [args.forward_days]
+    fwd_arg = horizons if multi_horizon else args.forward_days
+
     dataset = build_factor_dataset(
         ohlcv, factor_names, label_mode="binary",
-        forward_days=args.forward_days,
+        forward_days=fwd_arg,
         extra_data=extra_data if extra_data else None,
+        industry_neutralize=getattr(args, "industry_neutralize", False),
     )
+    ret_col = "ret_1d"  # IC 筛选始终用 T+1
 
     # 1. IC 门禁
     if not args.no_ic_gate:
@@ -407,7 +568,19 @@ def main():
     # 3. Walk-forward 训练
     use_ensemble = not args.no_ensemble
 
-    if args.regime and use_ensemble and regime_df is not None:
+    if multi_horizon and use_ensemble:
+        from models.trainer import walk_forward_train_multihorizon
+        weights_raw = [float(w) for w in args.horizon_weights.split(",")]
+        h_weights = {h: w for h, w in zip(horizons, weights_raw)}
+        logger.info(f"多周期预测: horizons={horizons}, weights={h_weights}")
+        results = walk_forward_train_multihorizon(
+            dataset, factor_cols,
+            horizons=horizons,
+            train_years=args.train_years, val_years=args.val_years,
+            use_optuna=args.optuna, optuna_trials=args.optuna_trials,
+            scores_weights=h_weights,
+        )
+    elif args.regime and use_ensemble and regime_df is not None:
         logger.info("使用分市场状态集成训练")
         results = walk_forward_train_by_regime(
             dataset, factor_cols, regime_df,
@@ -432,23 +605,45 @@ def main():
     # 汇总
     all_metrics = []
     for i, r in enumerate(results):
-        m = r["metrics"]
-        best_t = r.get("best_threshold", 0.5)
-        regime_info = f", regimes={r.get('regimes_trained', [])}" if "regimes_trained" in r else ""
-        logger.info(
-            f"窗口 {i+1}: val={r['val_start'].date()}~{r['val_end'].date()}, "
-            f"t={best_t:.2f}, acc={m['accuracy']:.3f}, prec={m['precision']:.3f}, rec={m['recall']:.3f}"
-            f"{regime_info}"
-        )
-        all_metrics.append({
-            "window": i + 1,
-            "val_start": r["val_start"],
-            "val_end": r["val_end"],
-            "best_t": best_t,
-            "accuracy": m["accuracy"],
-            "precision": m["precision"],
-            "recall": m["recall"],
-        })
+        if "horizons" in r:
+            # 多周期结果：汇总各 horizon 的 T+1 指标
+            h_info = r["horizons"]
+            t1 = h_info.get(1, {})
+            xgb_m = t1.get("xgb", {})
+            lgb_m = t1.get("lgb", {})
+            logger.info(
+                f"窗口 {i+1}: val={r['val_start'].date()}~{r['val_end'].date()}, "
+                f"horizons={list(h_info.keys())}"
+            )
+            for hh, hi in h_info.items():
+                logger.info(f"  T+{hh}: t={hi.get('best_threshold',0.5):.2f}")
+            all_metrics.append({
+                "window": i + 1,
+                "val_start": r["val_start"],
+                "val_end": r["val_end"],
+                "best_t": t1.get("best_threshold", 0.5),
+                "accuracy": xgb_m.get("accuracy", 0),
+                "precision": xgb_m.get("precision", 0),
+                "recall": xgb_m.get("recall", 0),
+            })
+        else:
+            m = r["metrics"]
+            best_t = r.get("best_threshold", 0.5)
+            regime_info = f", regimes={r.get('regimes_trained', [])}" if "regimes_trained" in r else ""
+            logger.info(
+                f"窗口 {i+1}: val={r['val_start'].date()}~{r['val_end'].date()}, "
+                f"t={best_t:.2f}, acc={m['accuracy']:.3f}, prec={m['precision']:.3f}, rec={m['recall']:.3f}"
+                f"{regime_info}"
+            )
+            all_metrics.append({
+                "window": i + 1,
+                "val_start": r["val_start"],
+                "val_end": r["val_end"],
+                "best_t": best_t,
+                "accuracy": m["accuracy"],
+                "precision": m["precision"],
+                "recall": m["recall"],
+            })
 
     summary = pd.DataFrame(all_metrics)
     print("\n=== Walk-Forward 汇总 ===")
@@ -478,7 +673,12 @@ def main():
         print(f"\n=== 动态反馈闭环 ===")
         loop = BacktestFeedbackLoop(strategy_config_id, orig_factor_names, get_engine())
         for i, r in enumerate(results):
-            m = r["metrics"]
+            if "horizons" in r:
+                # 多周期：用 T+1 的指标
+                t1 = r["horizons"].get(1, {})
+                m = t1.get("xgb", {})
+            else:
+                m = r["metrics"]
             win_metrics = {
                 "sharpe": m.get("sharpe_ratio", m.get("accuracy", 0)),
                 "accuracy": m.get("accuracy", 0),
@@ -536,8 +736,10 @@ def main():
     day_counter = 0
     current_holdings: list[str] = []
     cost_basis: dict[str, float] = {}  # code -> entry price
+    position_entry_day: dict[str, int] = {}  # code -> entry day_counter (for continuous-loss re-check)
     stop_loss_events: list[dict] = []  # record stop-loss triggers
     risk_events: list[dict] = []  # record portfolio DD / index crash events
+    annotation_events: list[dict] = []  # record events for chart annotation
     peak_nav = 1.0
     lockout_until = 0  # day_counter value after liquidation
 
@@ -565,6 +767,17 @@ def main():
         if val_data.empty or len(val_data["trade_date"].unique()) < 2:
             continue
 
+        # Record window transition event
+        active = r.get("active_cols", factor_cols)
+        best_t = r.get("best_threshold", 0.5)
+        annotation_events.append({
+            "date": str(val_start.date()),
+            "type": "window_transition",
+            "label": f"窗口{window_idx + 1}开始",
+            "detail": f"训练: {str((val_start - pd.DateOffset(years=args.train_years)).date())}~{str(val_start.date())}, "
+                      f"因子: {len(active)}个, 阈值: {best_t:.2f}",
+        })
+
         val_dates = sorted(val_data["trade_date"].unique())
 
         if ensemble is not None:
@@ -584,16 +797,116 @@ def main():
             is_rebalance = (day_counter % args.rebalance_freq == 0) or (not current_holdings and day_counter >= lockout_until)
 
             if is_rebalance:
-                # ── 日度信号质量追踪 ──
+                # ── 逐因子 IC 计算（仅调仓日） ──
+                factor_ic_today: dict[str, float] = {}
+                if args.dynamic and not day_data.empty:
+                    ret_col = "ret_1d"
+                    if ret_col in day_data.columns:
+                        ret_vals = day_data[ret_col]
+                        for f in factor_cols:
+                            if f in day_data.columns:
+                                f_vals = day_data[f]
+                                valid = f_vals.notna() & ret_vals.notna()
+                                if valid.sum() > 30:
+                                    try:
+                                        ic_f = f_vals[valid].corr(ret_vals[valid], method="spearman")
+                                        factor_ic_today[f] = float(ic_f) if pd.notna(ic_f) else 0.0
+                                    except Exception:
+                                        factor_ic_today[f] = 0.0
+
+                # ── 日度信号质量追踪 + 因子淘汰 ──
                 if args.dynamic and tracker.needs_adjustment():
-                    decayed = [f for f, w in current_factor_weights.items() if w < 0.8]
+                    decayed = tracker.get_decayed_factors(ic_threshold=0.05)
                     if decayed:
-                        print(f"  [动态] {str(dt)[:10]} IC衰减警告={tracker.decay_warnings}, "
-                              f"低权重因子: {decayed}")
-                    if tracker.needs_retrain() and retrain_count < 2:
-                        print(f"  [动态] {str(dt)[:10]} 连续低IC触发重训建议 "
-                              f"(decay_warnings={tracker.decay_warnings})")
-                        retrain_count += 1
+                        # 降低淘汰因子权重
+                        for f in decayed:
+                            current_factor_weights[f] = round(current_factor_weights.get(f, 1.0) * 0.7, 4)
+                        # 淘汰权重 < 0.3 的因子
+                        eliminated = [f for f, w in current_factor_weights.items() if w < 0.3]
+                        print(f"  [动态] {str(dt)[:10]} IC衰减={tracker.decay_warnings}天, "
+                              f"精准淘汰({len(decayed)}): {decayed[:5]}{'...' if len(decayed) > 5 else ''}")
+                        if eliminated:
+                            print(f"  [动态] → 权重<0.3淘汰({len(eliminated)}): {eliminated[:5]}")
+                            annotation_events.append({
+                                "date": str(dt)[:10],
+                                "type": "factor_eliminate",
+                                "label": f"淘汰{len(eliminated)}个因子",
+                                "detail": ", ".join(eliminated[:8]),
+                            })
+                            for f in eliminated:
+                                current_factor_weights.pop(f, None)
+                    elif tracker.needs_retrain():
+                        print(f"  [动态] {str(dt)[:10]} 触发重训信号 "
+                              f"(decay={tracker.decay_warnings}, 死因子≥3)")
+
+                # ── 因子发现 + 重训触发（每 40 个调仓日扫描一次） ──
+                if args.dynamic and tracker.rebalance_day_count > 0 and \
+                   tracker.rebalance_day_count % 40 == 0 and retrain_count < 3:
+                    # 扫描已计算但未使用的因子
+                    discovered = _discover_factors(
+                        day_data, factor_cols, ic_threshold=0.02, max_add=5,
+                    )
+                    if discovered:
+                        print(f"  [发现] {str(dt)[:10]} 新有效因子({len(discovered)}): "
+                              f"{discovered[:5]}{'...' if len(discovered) > 5 else ''}")
+                        annotation_events.append({
+                            "date": str(dt)[:10],
+                            "type": "factor_discover",
+                            "label": f"发现{len(discovered)}个新因子",
+                            "detail": ", ".join(discovered[:8]),
+                        })
+                        # 加入因子集并重训
+                        new_factor_cols = factor_cols + [f for f in discovered
+                                                         if f not in factor_cols]
+                        retrain_result = retrain_at_point(
+                            ohlcv, str(dt)[:10], new_factor_cols,
+                            forward_days=args.forward_days,
+                            model_type=args.model,
+                            use_ensemble=not args.no_ensemble,
+                            extra_data=extra_data,
+                            industry_neutralize=getattr(args, "industry_neutralize", False),
+                        )
+                        if retrain_result:
+                            ensemble = retrain_result.get("ensemble")
+                            single_model = retrain_result.get("model")
+                            factor_cols = retrain_result.get("factor_cols", new_factor_cols)
+                            # 更新权重：新因子权重 1.0
+                            for f in discovered:
+                                current_factor_weights[f] = 1.0
+                            print(f"  [重训] {str(dt)[:10]} 模型已更新, "
+                                  f"因子: {len(factor_cols)} → 活跃: {len(retrain_result.get('active_cols', factor_cols))}")
+                            annotation_events.append({
+                                "date": str(dt)[:10],
+                                "type": "model_retrain",
+                                "label": f"模型重训(新因子)",
+                                "detail": f"因子{len(factor_cols)}→{len(retrain_result.get('active_cols', factor_cols))}个, "
+                                          f"新增: {', '.join(discovered[:5])}",
+                            })
+                            retrain_count += 1
+                    elif tracker.needs_retrain():
+                        # 无新因子但 IC 持续衰减：用当前因子集重训
+                        retrain_result = retrain_at_point(
+                            ohlcv, str(dt)[:10], factor_cols,
+                            forward_days=args.forward_days,
+                            model_type=args.model,
+                            use_ensemble=not args.no_ensemble,
+                            extra_data=extra_data,
+                            industry_neutralize=getattr(args, "industry_neutralize", False),
+                        )
+                        if retrain_result:
+                            ensemble = retrain_result.get("ensemble")
+                            single_model = retrain_result.get("model")
+                            factor_cols = retrain_result.get("factor_cols", factor_cols)
+                            print(f"  [重训] {str(dt)[:10]} 刷新模型 (因子不变), "
+                                  f"活跃: {len(retrain_result.get('active_cols', factor_cols))}")
+                            annotation_events.append({
+                                "date": str(dt)[:10],
+                                "type": "model_retrain",
+                                "label": "模型重训(IC衰减)",
+                                "detail": f"活跃因子{len(retrain_result.get('active_cols', factor_cols))}个, "
+                                          f"decay={tracker.decay_warnings}天",
+                            })
+                            retrain_count += 1
 
                 try:
                     if ensemble is not None:
@@ -631,14 +944,16 @@ def main():
                     N=TradingConfig.NDROP_N,
                 )
 
-                # ── 更新成本基础（新买入的股票记录买入价） ──
+                # ── 更新成本基础（新买入的股票记录买入价+入场日） ──
                 today_prices = price_lookup.get(dt_str, {})
                 for code in to_buy:
                     if code in today_prices:
                         cost_basis[code] = today_prices[code]
+                        position_entry_day[code] = day_counter
                 # 清除已卖出的成本基础
                 for code in to_sell:
                     cost_basis.pop(code, None)
+                    position_entry_day.pop(code, None)
 
                 new_holdings = list(new_holdings_set)
                 top_scores = [float(scores_series.get(c, 0)) for c in new_holdings]
@@ -680,6 +995,32 @@ def main():
                         })
                         current_holdings.remove(code)
                         cost_basis.pop(code, None)
+                        position_entry_day.pop(code, None)
+
+            # ── 持续亏损重检：持仓 ≥3 天且累计亏损 >5% → 提前平仓 ──
+            early_cut: list[str] = []
+            for code in top_codes[:]:
+                if code in cost_basis and code in next_prices and code in position_entry_day:
+                    days_held = day_counter - position_entry_day[code]
+                    cum_loss = (next_prices[code] - cost_basis[code]) / cost_basis[code]
+                    if days_held >= 3 and cum_loss <= -0.05:
+                        early_cut.append(code)
+                        stop_loss_events.append({
+                            "date": str(next_dt)[:10],
+                            "code": code,
+                            "entry_price": round(cost_basis[code], 3),
+                            "exit_price": round(next_prices[code], 3),
+                            "pnl_pct": round(cum_loss, 4),
+                            "type": "continuous_loss",
+                            "days_held": days_held,
+                        })
+                        current_holdings.remove(code)
+                        cost_basis.pop(code, None)
+                        position_entry_day.pop(code, None)
+
+            if early_cut:
+                cut_cost = len(early_cut) * (COMM + STAMP + SLIP) / max(len(top_codes) + len(early_cut), 1)
+                cost += cut_cost
 
             if stopped_out:
                 # 止损卖出成本：佣金 + 印花税 + 滑点
@@ -730,6 +1071,7 @@ def main():
                     positions={"codes": top_codes, "scores": top_scores},
                     daily_ret=daily_ret_net,
                     factor_weights=current_factor_weights if args.dynamic else None,
+                    factor_ic=factor_ic_today if args.dynamic else None,
                 )
 
             # ── 复合净值 ──
@@ -748,6 +1090,7 @@ def main():
                     })
                     current_holdings = []
                     cost_basis = {}
+                    position_entry_day = {}
                     lockout_until = day_counter + 10
                     peak_nav = nav  # 重置峰值，避免清仓后立即再触发
             elif dd >= args.dd_reduce and len(current_holdings) > 1:
@@ -756,6 +1099,7 @@ def main():
                 current_holdings = current_holdings[:keep]
                 for code in sold:
                     cost_basis.pop(code, None)
+                    position_entry_day.pop(code, None)
                 risk_events.append({
                     "date": str(next_dt)[:10], "type": "reduce",
                     "dd": round(dd, 4), "nav": round(nav, 6),
@@ -904,8 +1248,8 @@ def main():
             "n_params": len(factor_cols),
             "n_wins": win_days,
             "n_losses": loss_days,
-            "start_date": args.start,
-            "end_date": args.end,
+            "start_date": all_dates[0] if all_dates else args.start,
+            "end_date": all_dates[-1] if all_dates else args.end,
             "win_rate": float(computed_win),
             "factor_cols": screened_factors,
             "active_cols": all_active_cols,
@@ -921,6 +1265,12 @@ def main():
             "n_stop_loss": len(stop_loss_events),
             "risk_events": risk_events,
             "n_risk_events": len(risk_events),
+            "annotation_events": annotation_events + [
+                {"date": e["date"], "type": f"risk_{e['type']}",
+                 "label": {"liquidate": "清仓", "reduce": "减仓", "index_crash": "指数大跌"}.get(e['type'], e['type']),
+                 "detail": e.get("msg", f"DD={e.get('dd', 0):.1%}")}
+                for e in risk_events
+            ],
             "quality_pass_dates": len(quality_pass),
             "rebalance_freq": args.rebalance_freq,
             "ndrop_n": TradingConfig.NDROP_N,
