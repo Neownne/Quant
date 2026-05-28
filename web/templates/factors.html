@@ -2,6 +2,13 @@
 {% block content %}
 <div class="card">
     <h3>因子监控</h3>
-    <p style="color:#889;">因子IC序列、衰减曲线、覆盖率将在此展示。当前因子数据通过 factors/monitor.py 查询。</p>
+    <p style="color:#889;font-size:13px;margin-bottom:16px;">
+        因子就绪时间（防未来函数）、数据来源、延迟毫秒数。
+        运行 <code>factors/engine.py</code> 更新因子数据。
+    </p>
+</div>
+
+<div class="card" id="factor-overview" hx-get="/api/factor-overview" hx-trigger="load" hx-swap="innerHTML">
+    <p>加载中...</p>
 </div>
 {% endblock %}

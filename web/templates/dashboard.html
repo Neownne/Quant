@@ -2,21 +2,35 @@
 {% block title %}行情看板 - Quant Monitor{% endblock %}
 {% block content %}
 <div x-data="{ group: 'default' }">
-    <div class="card" style="display:flex; gap:12px; align-items:center;">
+    <div class="card" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
         <h3 style="margin:0;">行情看板</h3>
-        <select x-model="group" @change="window.location.href='/' + (group === 'default' ? '' : '?group=' + group)">
+        <select x-model="group"
+                @change="document.querySelector('#quotes-panel').setAttribute('hx-get', '/api/quotes/' + group);
+                         htmx.process(document.querySelector('#quotes-panel'));
+                         document.querySelector('#quotes-panel').dispatchEvent(new Event('refreshQuotes'));">
             <option value="default">默认自选</option>
             <option value="tech">科技</option>
         </select>
+        <span style="color:#999;font-size:12px;">|</span>
+        <input id="custom-code" placeholder="输入代码如 000001" style="width:140px;">
+        <button class="mock-button"
+                onclick="var c=document.getElementById('custom-code').value.trim();if(c){var url='/api/kline/'+c;var panel=document.getElementById('kline-panel');panel.setAttribute('hx-get',url);htmx.process(panel);panel.dispatchEvent(new Event('loadKline'));}">
+            查看K线
+        </button>
+        <button class="mock-button green"
+                onclick="var c=document.getElementById('custom-code').value.trim();if(c){fetch('/api/add-watch/'+c,{method:'POST'}).then(function(r){return r.text()}).then(function(html){document.getElementById('msg-area').innerHTML=html;});}">
+            加入自选
+        </button>
+        <span id="msg-area" style="font-size:12px;"></span>
     </div>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
-        <div class="card" hx-get="/api/quotes/default" hx-trigger="load" hx-swap="innerHTML">
-            <p>加载中...</p>
+        <div class="card" id="quotes-panel" hx-get="/api/quotes/default" hx-trigger="load, refreshQuotes from:body" hx-swap="innerHTML">
+            <p style="color:#999;">加载中...</p>
         </div>
 
-        <div class="card" id="kline-panel">
-            <p style="color:#889;">选择股票查看K线图</p>
+        <div class="card" id="kline-panel" hx-get="/api/kline/000001" hx-trigger="loadKline, load" hx-swap="innerHTML">
+            <p style="color:#999;">加载中...</p>
         </div>
     </div>
 </div>

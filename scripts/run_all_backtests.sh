@@ -8,7 +8,7 @@ START="20200101"
 END="20260501"
 N=30
 REBAL=5  # 周度调仓（5个交易日）
-UNIVERSE=200  # 候选池大小（0=全市场）
+UNIVERSE=0  # 候选池大小（0=全市场，约5238只非ST）
 
 echo "=========================================="
 echo " Phase 1: Static Strategy"
@@ -28,8 +28,7 @@ python scripts/run_ml_backtest.py \
     --factor-preset "+momentum+reversal" \
     --forward-days 1 \
     --top-n $N \
-    --rebalance-freq $REBAL \
-    --universe-size $UNIVERSE \
+    --rebalance-freq $REBAL \    --universe-size $UNIVERSE \
     --start $START --end $END
 
 # 2. ML-动量精选: momentum only, XGBoost, ret_5d
@@ -40,8 +39,7 @@ python scripts/run_ml_backtest.py \
     --forward-days 5 \
     --model xgboost \
     --top-n $N \
-    --rebalance-freq $REBAL \
-    --universe-size $UNIVERSE \
+    --rebalance-freq $REBAL \    --universe-size $UNIVERSE \
     --start $START --end $END
 
 # 3. ML-反转精选: reversal only, LightGBM, ret_1d
@@ -52,8 +50,7 @@ python scripts/run_ml_backtest.py \
     --forward-days 1 \
     --model lightgbm \
     --top-n $N \
-    --rebalance-freq $REBAL \
-    --universe-size $UNIVERSE \
+    --rebalance-freq $REBAL \    --universe-size $UNIVERSE \
     --start $START --end $END
 
 # 4. ML-全量因子测试: all factors, ensemble
@@ -63,8 +60,7 @@ python scripts/run_ml_backtest.py \
     --factor-preset all \
     --forward-days 1 \
     --top-n $N \
-    --rebalance-freq $REBAL \
-    --universe-size $UNIVERSE \
+    --rebalance-freq $REBAL \    --universe-size $UNIVERSE \
     --start $START --end $END
 
 # 5. ML-动态多因子: all factors + 归因->健康度->调参 闭环
@@ -75,8 +71,7 @@ python scripts/run_ml_backtest.py \
     --forward-days 1 \
     --dynamic \
     --top-n $N \
-    --rebalance-freq $REBAL \
-    --universe-size $UNIVERSE \
+    --rebalance-freq $REBAL \    --universe-size $UNIVERSE \
     --start $START --end $END
 
 echo ""
