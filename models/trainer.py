@@ -276,18 +276,28 @@ def walk_forward_train_ensemble(
     return results
 
 
+# 5-state → 3-state fallback for model routing
+_REGIME_FALLBACK = {
+    "strong_bull": "bull", "weak_bull": "bull",
+    "fast_bear": "bear", "slow_bear": "bear",
+    "bull": "bull", "bear": "bear", "sideways": "sideways",
+}
+
+
 class RegimeAwareEnsemble:
-    """分市场状态的集成预测器。"""
+    """分市场状态的集成预测器（3-state 模型 + 5-state 路由）。"""
 
     def __init__(self, ensembles: dict[str, object], factor_names: list[str], default_regime: str = "sideways"):
-        self.ensembles = ensembles
+        self.ensembles = ensembles  # keyed by bull/bear/sideways (3-state)
         self.factor_names = factor_names
         self.default_regime = default_regime
 
     def predict(self, factor_df: pd.DataFrame, regime: str | None = None) -> pd.DataFrame:
         if regime is None and "regime" in factor_df.columns:
             regime = factor_df["regime"].iloc[0] if len(factor_df) > 0 else self.default_regime
-        model = self.ensembles.get(regime, self.ensembles.get(self.default_regime))
+        # 5-state → 3-state fallback
+        parent = _REGIME_FALLBACK.get(regime or "", self.default_regime)
+        model = self.ensembles.get(parent, self.ensembles.get(self.default_regime))
         if model is None:
             model = next(iter(self.ensembles.values()))
         return model.predict(factor_df)

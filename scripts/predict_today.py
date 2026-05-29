@@ -2,8 +2,9 @@
 """今日持仓预测：加载最新数据 → 因子计算 → 模型训练 → 打分选股。
 
 用法:
-    python scripts/predict_today.py --top-n 30
-    python scripts/predict_today.py --top-n 15 --factor-preset all
+    python scripts/predict_today.py                             # 默认: regime+15只
+    python scripts/predict_today.py --regime                    # 分牛熊状态训练
+    python scripts/predict_today.py --top-n 20 --no-regime      # 传统模式
 """
 import argparse
 import sys
@@ -16,7 +17,9 @@ from loguru import logger
 
 from data.db import get_engine
 from models.dataset import build_factor_dataset
-from models.trainer import walk_forward_train_ensemble, train_xgboost, train_lightgbm, EnsemblePredictor
+from models.trainer import (walk_forward_train_ensemble, walk_forward_train_by_regime,
+                            train_xgboost, train_lightgbm, EnsemblePredictor)
+from models.regime import detect_regime
 from factors import ALL_FACTORS
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from portfolio.selector import select_topk_ndrop
@@ -63,12 +66,15 @@ def get_factors_by_preset(preset: str) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--top-n", type=int, default=30)
-    parser.add_argument("--factor-preset", default="all")
-    parser.add_argument("--forward-days", type=int, default=1)
+    parser.add_argument("--top-n", type=int, default=10)
+    parser.add_argument("--factor-preset", default="+momentum+reversal+volatility+liquidity+fundamental")
+    parser.add_argument("--forward-days", type=int, default=5)
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--no-quality", action="store_true")
-    parser.add_argument("--industry-neutralize", action="store_true", help="对各因子做行业截面中性化")
+    parser.add_argument("--industry-neutralize", action="store_true", default=False)
+    parser.add_argument("--no-industry-neutralize", action="store_false", dest="industry_neutralize")
+    parser.add_argument("--regime", action="store_true", default=True, help="启用分市场状态训练（默认）")
+    parser.add_argument("--no-regime", action="store_false", dest="regime", help="禁用分状态训练")
     args = parser.parse_args()
 
     engine = get_engine()
@@ -131,7 +137,26 @@ def main():
     except Exception as e:
         logger.warning(f"  行业数据加载失败: {e}")
 
-    # ── 2. 因子 ──
+    # ── 2. 市场状态识别 ──
+    regime_df = None
+    today_regime = "unknown"
+    if args.regime:
+        try:
+            idx_sql = f"""
+                SELECT trade_date, close FROM index_daily
+                WHERE code = '000001' AND trade_date BETWEEN '{train_start}' AND '{latest_str}'
+                ORDER BY trade_date
+            """
+            index_df = pd.read_sql(idx_sql, engine)
+            index_df["trade_date"] = pd.to_datetime(index_df["trade_date"])
+            if not index_df.empty:
+                regime_df = detect_regime(index_df)
+                today_regime = str(regime_df["regime"].iloc[-1])
+                logger.info(f"市场状态: {regime_df['regime'].value_counts().to_dict()} → 今日={today_regime}")
+        except Exception as e:
+            logger.warning(f"市场状态识别失败: {e}, 退到普通模式")
+
+    # ── 3. 因子 ──
     factor_names = get_factors_by_preset(args.factor_preset)
     factor_names = get_factors_by_preset(args.factor_preset)
     if not factor_names:
@@ -156,27 +181,38 @@ def main():
     selected = select_orthogonal_factors(dataset, passing, threshold=0.7)
     logger.info(f"正交筛选: {len(passing)} → {len(selected)} 个因子")
 
-    # ── 4. 训练模型 ──
-    X = dataset[selected].fillna(0)
-    y = dataset["label"]
+    # ── 5. 训练模型 ──
+    xgb_model = None
+    if args.regime and regime_df is not None:
+        logger.info("使用分市场状态训练")
+        results = walk_forward_train_by_regime(
+            dataset, selected, regime_df,
+            train_years=args.train_years, val_years=1,
+        )
+        if results:
+            ensemble = results[-1].get("ensemble")
+            logger.info(f"Regime模型: regimes={results[-1].get('regimes_trained', [])}")
+        else:
+            logger.warning("Regime训练无结果，退到普通模式")
+            args.regime = False
+            ensemble = None
 
-    # 按时间切分训练/验证集
-    all_dates = sorted(dataset["trade_date"].unique())
-    split_idx = len(all_dates) - min(252, len(all_dates) // 4)
-    split_date = all_dates[split_idx] if split_idx > 0 and split_idx < len(all_dates) else all_dates[-252]
-    train_mask = dataset["trade_date"] < split_date
-    val_mask = dataset["trade_date"] >= split_date
+    if not args.regime or ensemble is None:
+        X = dataset[selected].fillna(0)
+        y = dataset["label"]
+        all_dates = sorted(dataset["trade_date"].unique())
+        split_idx = len(all_dates) - min(252, len(all_dates) // 4)
+        split_date = all_dates[split_idx] if 0 < split_idx < len(all_dates) else all_dates[-252]
+        train_mask = dataset["trade_date"] < split_date
+        val_mask = dataset["trade_date"] >= split_date
+        X_train, y_train = X[train_mask], y[train_mask]
+        X_val, y_val = X[val_mask], y[val_mask]
+        logger.info(f"训练集: {len(X_train)} 行, 验证集: {len(X_val)} 行")
+        xgb_model, xgb_metrics = train_xgboost(X_train, y_train, X_val, y_val)
+        lgb_model, lgb_metrics = train_lightgbm(X_train, y_train, X_val, y_val)
+        ensemble = EnsemblePredictor(xgb_model, lgb_model, selected, threshold=0.5)
 
-    X_train, y_train = X[train_mask], y[train_mask]
-    X_val, y_val = X[val_mask], y[val_mask]
-    logger.info(f"训练集: {len(X_train)} 行, 验证集: {len(X_val)} 行")
-
-    xgb_model, xgb_metrics = train_xgboost(X_train, y_train, X_val, y_val)
-    lgb_model, lgb_metrics = train_lightgbm(X_train, y_train, X_val, y_val)
-    ensemble = EnsemblePredictor(xgb_model, lgb_model, selected, threshold=0.5)
-
-    # ── 5. 今日预测 ──
-    # 使用数据集中最新有效日期（去掉 NaN 后可能比 latest_date 少一天）
+    # ── 6. 今日预测 ──
     pred_date = dataset["trade_date"].max()
     pred_str = str(pred_date)[:10]
     today_data = dataset[dataset["trade_date"] == pred_date].copy()
@@ -184,10 +220,14 @@ def main():
         logger.error(f"无 {pred_str} 数据")
         return
 
+    # 如果是 regime 模式，注入当日市场状态
+    if args.regime and regime_df is not None:
+        today_data["regime"] = today_regime
+
     preds = ensemble.predict(today_data)
     preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
 
-    # ── 6. 质量过滤 ──
+    # ── 7. 质量过滤 ──
     if not args.no_quality:
         quality_pass = _load_quality_filter(engine, latest_str)
         if quality_pass:
@@ -195,7 +235,7 @@ def main():
             preds = preds[preds["code"].isin(quality_pass)]
             logger.info(f"排雷过滤: {n_before} → {len(preds)} 只")
 
-    # ── 6.5 ST 过滤 ──
+    # ── 8. ST 过滤 ──
     n_before = len(preds)
     st_codes = pd.read_sql("SELECT code FROM stock_basic WHERE is_st = TRUE", engine)
     if not st_codes.empty:
@@ -204,7 +244,7 @@ def main():
         if len(preds) < n_before:
             logger.info(f"ST 过滤: {n_before} → {len(preds)} 只")
 
-    # ── 7. NDrop 选股 ──
+    # ── 9. NDrop 选股 ──
     scores_series = pd.Series(preds["score"].values, index=preds["code"].values)
     scores_series = scores_series.sort_values(ascending=False)
     new_holdings, to_buy, _ = select_topk_ndrop(
@@ -212,12 +252,14 @@ def main():
         K=args.top_n, N=TradingConfig.NDROP_N,
     )
 
-    # ── 8. 输出 ──
+    # ── 10. 输出 ──
     top_codes = list(new_holdings)[:args.top_n]
     print(f"\n=== 今日持仓建议 (数据日: {pred_str}, 预测日: {latest_str}) ===")
-    print(f"策略: ML-动态多因子v1.11")
+    print(f"策略: ML-动态多因子 v1.12 + {'Regime分状态' if args.regime else '集成'}")
+    if args.regime and today_regime != "unknown":
+        print(f"市场状态: {today_regime} {'(牛市)' if today_regime == 'bull' else '(熊市)' if today_regime == 'bear' else '(震荡)'}")
     print(f"因子: {len(selected)} 个 (从 {len(factor_names)} 筛选)")
-    print(f"模型: XGBoost + LightGBM 集成")
+    print(f"模型: {'RegimeAwareEnsemble' if args.regime else 'XGBoost + LightGBM 集成'}")
     print(f"候选池: {len(preds)} 只 (排雷后)")
     print(f"持仓数: {len(top_codes)} 只")
     print()
@@ -239,7 +281,7 @@ def main():
             print(f"{code:<10s} {name:<10s} {score:>8.4f}")
 
     # Top-5 factor importance
-    if hasattr(xgb_model, "feature_importances_"):
+    if xgb_model is not None and hasattr(xgb_model, "feature_importances_"):
         imp = dict(zip(selected, xgb_model.feature_importances_))
         top5 = sorted(imp.items(), key=lambda x: x[1], reverse=True)[:5]
         print(f"\nTop-5 因子重要性 (XGBoost):")

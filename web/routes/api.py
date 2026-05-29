@@ -784,12 +784,72 @@ async def get_paper_run_detail(run_id: int):
         sig_html += f"<tr><td>{sd}</td><td>{sc}</td><td>{score:.4f}</td><td>{rank}</td></tr>"
     sig_html += "</tbody></table>"
 
-    total_pnl = sum((p[6] or 0) for p in positions)
-    wins = sum(1 for p in positions if (p[7] or 0) > 0)
+    # Open vs closed positions
+    open_pos = [p for p in positions if p[3] is None]  # exit_date is None
+    closed_pos = [p for p in positions if p[3] is not None]
 
-    html = f"""<div class="card"><h3>持仓明细 ({len(positions)}笔)</h3>{pos_html}</div>
-    <div class="card"><h3>信号记录</h3>{sig_html}</div>
-    <div class="card"><h3>汇总</h3><p>总盈亏: <span class="{'up' if total_pnl > 0 else 'down'}">{total_pnl:+,.0f}</span></p><p>胜率: {wins}/{len([p for p in positions if p[6] is not None])}</p></div>"""
+    total_pnl = sum((p[6] or 0) for p in closed_pos)
+    wins = sum(1 for p in closed_pos if (p[7] or 0) > 0)
+
+    # Portfolio summary from paper_daily_pnl
+    pnl_summary = ""
+    try:
+        with engine.connect() as conn:
+            daily = conn.execute(text("""
+                SELECT trade_date, cash, position_value, total_value, daily_return, drawdown
+                FROM paper_daily_pnl WHERE account_id = 14
+                ORDER BY trade_date DESC LIMIT 1
+            """)).fetchone()
+        if daily:
+            d, cash, pv, tv, dr, dd = daily
+            pnl_summary = f"""<div class="card"><h3>账户概览</h3>
+            <p>日期: {d} | 现金: {cash:,.0f} | 持仓市值: {pv:,.0f}</p>
+            <p>总资产: <strong>{tv:,.0f}</strong> | 日收益: {dr:+.2%} | 回撤: {dd:.2%}</p>
+            </div>"""
+    except Exception:
+        pass
+
+    # Open positions table
+    open_html = ""
+    if open_pos:
+        open_html = "<table><thead><tr><th>代码</th><th>入场日</th><th>入场价</th><th>数量</th></tr></thead><tbody>"
+        for p in open_pos:
+            code, ed, ep, xd, xp, qty, pnl, pct = p
+            open_html += f"<tr><td><strong>{code}</strong></td><td>{ed}</td><td>{ep:.2f}</td><td>{qty}</td></tr>"
+        open_html += "</tbody></table>"
+
+    # Equity curve chart
+    chart_html = ""
+    try:
+        with engine.connect() as conn:
+            eq_rows = conn.execute(text("""
+                SELECT trade_date, total_value FROM paper_daily_pnl
+                WHERE account_id = 14 ORDER BY trade_date
+            """)).fetchall()
+        if len(eq_rows) > 1:
+            dates = [str(r[0]) for r in eq_rows]
+            values = [float(r[1]) for r in eq_rows]
+            import json as _json
+            chart_opt = _json.dumps({
+                "tooltip": {"trigger": "axis"},
+                "grid": {"left": 60, "right": 20, "top": 20, "bottom": 30},
+                "xAxis": {"type": "category", "data": dates, "axisLabel": {"rotate": 45, "fontSize": 10}},
+                "yAxis": {"type": "value", "name": "净值"},
+                "series": [{"name": "权益", "type": "line", "data": values,
+                            "lineStyle": {"color": "#26a69a"}, "areaStyle": {"color": "rgba(38,166,154,0.1)"},
+                            "markLine": {"data": [{"yAxis": values[0], "label": {"formatter": "初始"}, "lineStyle": {"type": "dashed"}}]}}]
+            })
+            chart_html = f'<div class="card"><h3>权益曲线</h3><div class="chart-container" data-chart=\'{chart_opt}\' style="width:100%;height:350px;"></div></div>'
+    except Exception:
+        pass
+
+    html = f"""{pnl_summary}
+    {chart_html}
+    <div class="card"><h3>当前持仓 ({len(open_pos)}只)</h3>{open_html or '<p>无持仓</p>'}</div>
+    <div class="card"><h3>已平仓交易 ({len(closed_pos)}笔)</h3>{pos_html.replace('<th>代码</th><th>入场日</th>', '<th>代码</th><th>入场日</th><th>出场日</th><th>出场价</th>')
+    if not closed_pos else pos_html}</div>
+    <div class="card"><h3>近期信号</h3>{sig_html}</div>
+    <div class="card"><h3>汇总</h3><p>总盈亏: <span class="{'up' if total_pnl > 0 else 'down'}">{total_pnl:+,.0f}</span></p><p>胜率: {wins}/{len(closed_pos)} ({wins/max(len(closed_pos),1)*100:.0f}%)</p></div>"""
     return HTMLResponse(html)
 
 

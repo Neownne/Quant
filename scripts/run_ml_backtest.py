@@ -29,7 +29,7 @@ from models.dataset import build_factor_dataset
 from models.trainer import walk_forward_train, walk_forward_train_ensemble, walk_forward_train_by_regime
 from factors import ALL_FACTORS
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
-from models.regime import detect_regime
+from models.regime import detect_regime, REGIME_PARAMS
 from portfolio.selector import select_topk_ndrop
 from portfolio.risk import check_drawdown_limit, check_index_crash
 
@@ -164,17 +164,17 @@ def retrain_at_point(ohlcv: pd.DataFrame, current_date: str, factor_cols: list[s
 
     try:
         if use_ensemble:
-            xgb = train_xgboost(X, y, eval_metric="logloss")
-            lgb = train_lightgbm(X, y)
+            xgb, _ = train_xgboost(X, y, X, y)
+            lgb, _ = train_lightgbm(X, y, X, y)
             from models.trainer import EnsemblePredictor
             ensemble = EnsemblePredictor([xgb, lgb])
             ensemble.factor_names = feature_cols
             return {"ensemble": ensemble, "active_cols": feature_cols, "factor_cols": selected}
         elif model_type == "xgboost":
-            model = train_xgboost(X, y, eval_metric="logloss")
+            model, _ = train_xgboost(X, y, X, y)
             return {"model": model, "active_cols": feature_cols}
         else:
-            model = train_lightgbm(X, y)
+            model, _ = train_lightgbm(X, y, X, y)
             return {"model": model, "active_cols": feature_cols}
     except Exception as e:
         logger.warning(f"重训模型失败: {e}")
@@ -222,8 +222,8 @@ def main():
     parser.add_argument("--model", default="xgboost", choices=["xgboost", "lightgbm"])
     parser.add_argument("--factors", default="all", help="'all', factor preset name, '+preset1+preset2', or comma-separated factor list")
     parser.add_argument("--factor-preset", default="", help="Shorthand for --factors: momentum, reversal, volatility, liquidity, fundamental, all")
-    parser.add_argument("--forward-days", type=int, default=1, help="Label horizon: 1=next day, 5=next week")
-    parser.add_argument("--top-n", type=int, default=15)
+    parser.add_argument("--forward-days", type=int, default=5, help="Label horizon: 1=next day, 5=next week")
+    parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--val-years", type=int, default=1)
     parser.add_argument("--start", default="20200101")
@@ -232,21 +232,22 @@ def main():
     parser.add_argument("--no-ensemble", action="store_true")
     parser.add_argument("--no-orthogonal", action="store_true")
     parser.add_argument("--no-ic-gate", action="store_true", help="跳过 IC 门禁")
-    parser.add_argument("--regime", action="store_true", help="启用分市场状态训练")
+    parser.add_argument("--regime", action="store_true", default=True, help="启用分市场状态训练（默认）")
+    parser.add_argument("--no-regime", action="store_false", dest="regime", help="禁用分状态训练")
     parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
     parser.add_argument("--optuna-trials", type=int, default=30, help="Optuna 搜索轮数")
     parser.add_argument("--strategy", default="", help="策略名称，对应 strategy_configs.name，用于匹配 version_id")
     parser.add_argument("--dynamic", action="store_true", default=True, help="启用动态多因子闭环（归因→健康度→调参）")
     parser.add_argument("--no-dynamic", action="store_false", dest="dynamic", help="禁用动态多因子闭环")
-    parser.add_argument("--rebalance-freq", type=int, default=5, help="调仓频率（交易日），默认5=周度")
-    parser.add_argument("--universe-size", type=int, default=0, help="候选池上限，0=全市场非ST")
+    parser.add_argument("--rebalance-freq", type=int, default=1, help="调仓频率（交易日），默认1=日频")
+    parser.add_argument("--universe-size", type=int, default=500, help="候选池上限，0=全市场非ST")
     parser.add_argument("--dd-reduce", type=float, default=0.20, help="组合回撤减仓阈值")
     parser.add_argument("--dd-liquidate", type=float, default=0.25, help="组合回撤清仓阈值")
     parser.add_argument("--index-crash", type=float, default=-0.12, help="指数大跌阈值")
-    parser.add_argument("--industry-neutralize", action="store_true", default=True, help="对各因子做行业截面中性化")
-    parser.add_argument("--no-industry-neutralize", action="store_false", dest="industry_neutralize", help="禁用行业中性化")
-    parser.add_argument("--multi-horizon", action="store_true", default=True, help="启用多周期预测 (T+1, T+5, T+20)")
-    parser.add_argument("--no-multi-horizon", action="store_false", dest="multi_horizon", help="禁用多周期预测")
+    parser.add_argument("--industry-neutralize", action="store_true", default=False, help="对各因子做行业截面中性化")
+    parser.add_argument("--no-industry-neutralize", action="store_false", dest="industry_neutralize", help="禁用行业中性化（默认）")
+    parser.add_argument("--multi-horizon", action="store_true", default=False, help="启用多周期预测 (T+1, T+5, T+20)")
+    parser.add_argument("--no-multi-horizon", action="store_false", dest="multi_horizon", help="禁用多周期预测（同默认）")
     parser.add_argument("--horizon-weights", default="0.5,0.3,0.2", help="多周期权重, 逗号分隔")
     args = parser.parse_args()
 
@@ -342,6 +343,13 @@ def main():
             if args.regime:
                 regime_df = detect_regime(index_df)
                 logger.info(f"regime={regime_df['regime'].value_counts().to_dict()}")
+                # Build date→regime lookup for simulation loop
+                regime_map = dict(zip(
+                    regime_df["trade_date"].dt.strftime("%Y-%m-%d"),
+                    regime_df["regime"]
+                ))
+            else:
+                regime_map = {}
     except Exception as e:
         logger.warning(f"指数数据加载失败: {e}, 风控中指数检查将跳过")
         if args.regime:
@@ -723,8 +731,8 @@ def main():
     turnover_rates: list[float] = []
     daily_costs: list[float] = []
 
-    # 初始化日度信号追踪器（所有 ML 策略都追踪，动态策略额外启用调参）
-    tracker = DailySignalTracker(strategy_config_id, get_engine(), window_size=20)
+    # 初始化日度信号追踪器（仅在已关联策略配置时启用）
+    tracker = DailySignalTracker(strategy_config_id, get_engine(), window_size=20) if strategy_config_id > 0 else None
 
     # Collect active factor cols from results
     all_active_cols = []
@@ -818,7 +826,7 @@ def main():
                                         factor_ic_today[f] = 0.0
 
                 # ── 日度信号质量追踪 + 因子淘汰 ──
-                if args.dynamic and tracker.needs_adjustment():
+                if args.dynamic and tracker is not None and tracker.needs_adjustment():
                     decayed = tracker.get_decayed_factors(ic_threshold=0.05)
                     if decayed:
                         # 降低淘汰因子权重
@@ -838,12 +846,12 @@ def main():
                             })
                             for f in eliminated:
                                 current_factor_weights.pop(f, None)
-                    elif tracker.needs_retrain():
+                    elif tracker is not None and tracker.needs_retrain():
                         print(f"  [动态] {str(dt)[:10]} 触发重训信号 "
                               f"(decay={tracker.decay_warnings}, 死因子≥3)")
 
                 # ── 因子发现 + 重训触发（每 40 个调仓日扫描一次） ──
-                if args.dynamic and tracker.rebalance_day_count > 0 and \
+                if args.dynamic and tracker is not None and tracker.rebalance_day_count > 0 and \
                    tracker.rebalance_day_count % 40 == 0 and retrain_count < 3:
                     # 扫描已计算但未使用的因子
                     discovered = _discover_factors(
@@ -886,7 +894,7 @@ def main():
                                           f"新增: {', '.join(discovered[:5])}",
                             })
                             retrain_count += 1
-                    elif tracker.needs_retrain():
+                    elif tracker is not None and tracker.needs_retrain():
                         # 无新因子但 IC 持续衰减：用当前因子集重训
                         retrain_result = retrain_at_point(
                             ohlcv, str(dt)[:10], factor_cols,
@@ -934,6 +942,12 @@ def main():
                 if preds.empty:
                     continue
 
+                # ── 按市场状态调整参数 ──
+                today_regime = regime_map.get(dt_str, "sideways")
+                reg_params = REGIME_PARAMS.get(today_regime, REGIME_PARAMS["sideways"])
+                reg_top_n = reg_params["top_n"]  # 按状态独立设定持仓数
+                reg_stop = reg_params["stop_loss_pct"]
+
                 # ── NDrop 选股 ──
                 scores_series = pd.Series(
                     preds["score"].values,
@@ -943,7 +957,7 @@ def main():
                 new_holdings_set, to_buy, to_sell = select_topk_ndrop(
                     scores_series,
                     current_holdings=set(current_holdings),
-                    K=args.top_n,
+                    K=reg_top_n,
                     N=TradingConfig.NDROP_N,
                 )
 
@@ -974,6 +988,9 @@ def main():
                 current_holdings = new_holdings
             else:
                 # 持仓不变：无调仓成本
+                today_regime = regime_map.get(dt_str, "sideways")
+                reg_params = REGIME_PARAMS.get(today_regime, REGIME_PARAMS["sideways"])
+                reg_stop = reg_params["stop_loss_pct"]
                 turnover_rate = 0.0
                 cost = 0.0
                 top_scores = [0.0] * len(current_holdings) if current_holdings else []
@@ -987,7 +1004,7 @@ def main():
             for code in top_codes[:]:
                 if code in cost_basis and code in next_prices and cost_basis[code] > 0:
                     pnl_pct = (next_prices[code] - cost_basis[code]) / cost_basis[code]
-                    if pnl_pct <= -TradingConfig.STOP_LOSS_PCT:
+                    if pnl_pct <= -reg_stop:
                         stopped_out.append(code)
                         stop_loss_events.append({
                             "date": str(next_dt)[:10],
@@ -1043,7 +1060,9 @@ def main():
                 continue
 
             daily_ret = float(selected_next["ret_1d"].mean())
-            daily_ret_net = daily_ret - cost
+            # 按市场状态调整仓位比例（弱牛/熊市降低风险暴露）
+            pos_ratio = reg_params.get("position_ratio", 1.0)
+            daily_ret_net = daily_ret * pos_ratio - cost
             total_trading_days += 1
 
             # ── 记录日度持仓 + 信号质量 ──
@@ -1067,15 +1086,16 @@ def main():
                     pred_scores_ic.append(row["score"])
                     actual_rets_ic.append(actual_ret_map.get(row["code"], 0))
 
-                tracker.record_day(
-                    date_str=str(next_dt)[:10],
-                    pred_scores=pred_scores_ic,
-                    actual_rets=actual_rets_ic,
-                    positions={"codes": top_codes, "scores": top_scores},
-                    daily_ret=daily_ret_net,
-                    factor_weights=current_factor_weights if args.dynamic else None,
-                    factor_ic=factor_ic_today if args.dynamic else None,
-                )
+                if tracker is not None:
+                    tracker.record_day(
+                        date_str=str(next_dt)[:10],
+                        pred_scores=pred_scores_ic,
+                        actual_rets=actual_rets_ic,
+                        positions={"codes": top_codes, "scores": top_scores},
+                        daily_ret=daily_ret_net,
+                        factor_weights=current_factor_weights if args.dynamic else None,
+                        factor_ic=factor_ic_today if args.dynamic else None,
+                    )
 
             # ── 复合净值 ──
             nav *= (1 + daily_ret_net)
@@ -1126,8 +1146,11 @@ def main():
             all_navs.append(round(nav, 6))
 
     # ── 日度信号追踪总结 ──
-    tracker.save_daily_summary()
-    tracker_status = tracker.get_status()
+    if tracker is not None:
+        tracker.save_daily_summary()
+        tracker_status = tracker.get_status()
+    else:
+        tracker_status = {"total_days": 0, "latest_ic": 0, "rolling_ic_20d": 0, "signal_level": "N/A"}
     # Turnover stats
     if turnover_rates:
         avg_turnover = np.mean(turnover_rates)
@@ -1195,10 +1218,18 @@ def main():
 
     # Compute real metrics from equity curve
     n_vals = list(equity_curve.values())
-    total_return = float(n_vals[-1] / n_vals[0] - 1) if len(n_vals) >= 2 else 0.0
-    n_days = max(len(n_vals), 1)
-    years = max(n_days / 252, 0.2)
-    annual_return = float((1 + total_return) ** (1 / years) - 1)
+    # Drop NaN values (last day may have no T+1 label)
+    clean_vals = [v for v in n_vals if not np.isnan(v)]
+    if len(clean_vals) >= 2:
+        total_return = float(clean_vals[-1] / clean_vals[0] - 1)
+        n_days = max(len(clean_vals), 1)
+        years = max(n_days / 252, 0.2)
+        annual_return = float((1 + total_return) ** (1 / years) - 1)
+    else:
+        total_return = 0.0
+        annual_return = 0.0
+        n_days = 1
+        years = 0.2
 
     # Sharpe from daily returns
     daily_ret_vals = [v for v in daily_returns.values() if v != 0.0]
@@ -1210,7 +1241,7 @@ def main():
     # Max drawdown
     peak = 1.0
     max_dd = 0.0
-    for v in n_vals:
+    for v in clean_vals:
         if v > peak:
             peak = v
         dd = (peak - v) / peak
@@ -1230,6 +1261,50 @@ def main():
 
     print(f"\n=== 权益曲线统计 ===")
     print(f"总收益: {total_return:.2%}, 年化: {annual_return:.2%}, Sharpe: {computed_sharpe:.2f}, 最大回撤: {computed_mdd:.2%}")
+
+    # ── 分市场状态统计 ──────────────────────────────────────────────────
+    if regime_df is not None and len(equity_curve) > 1:
+        regime_map = dict(zip(
+            regime_df["trade_date"].dt.strftime("%Y-%m-%d"),
+            regime_df["regime"]
+        ))
+        ec_dates = sorted(equity_curve.keys())
+        ec_vals = [equity_curve[d] for d in ec_dates]
+
+        for reg_label in ["strong_bull", "weak_bull", "fast_bear", "slow_bear", "sideways"]:
+            reg_indices = [i for i, d in enumerate(ec_dates)
+                          if regime_map.get(d, "sideways") == reg_label]
+            if len(reg_indices) < 5:
+                print(f"[{reg_label}] 数据不足 (<5天)")
+                continue
+            # Compute segment returns
+            seg_rets = []
+            for i in range(1, len(reg_indices)):
+                prev_idx = reg_indices[i - 1]
+                curr_idx = reg_indices[i]
+                if ec_vals[prev_idx] > 0:
+                    seg_rets.append(ec_vals[curr_idx] / ec_vals[prev_idx] - 1)
+            if not seg_rets:
+                print(f"[{reg_label}] 无有效数据")
+                continue
+            total_reg_ret = ec_vals[reg_indices[-1]] / ec_vals[reg_indices[0]] - 1
+            reg_years = max(len(reg_indices) / 252, 0.1)
+            reg_cagr = (1 + total_reg_ret) ** (1 / reg_years) - 1 if total_reg_ret > -1 else -1.0
+            # Max DD within this regime's segments
+            peak_v = ec_vals[reg_indices[0]]
+            reg_dd = 0.0
+            for idx in reg_indices:
+                v = ec_vals[idx]
+                if v > peak_v:
+                    peak_v = v
+                dd = (peak_v - v) / peak_v
+                if dd > reg_dd:
+                    reg_dd = dd
+            daily_r = [ec_vals[reg_indices[i]] / ec_vals[reg_indices[i-1]] - 1
+                      for i in range(1, len(reg_indices)) if ec_vals[reg_indices[i-1]] > 0]
+            reg_sharpe = (np.mean(daily_r) / np.std(daily_r) * np.sqrt(252)) if daily_r and np.std(daily_r) > 0 else 0.0
+            print(f"[{reg_label}] 天数={len(reg_indices)}, 总收益={total_reg_ret:.2%}, "
+                  f"年化={reg_cagr:.2%}, Sharpe={reg_sharpe:.2f}, MaxDD={reg_dd:.2%}")
 
     # ── 防过拟合验证并入库 ──────────────────────────────────────────────
     # Collect all factor info
@@ -1262,7 +1337,7 @@ def main():
             "walk_forward_windows": len(results),
             "feedback_summary": feedback_summary,
             "daily_signal_tracker": tracker_status,
-            "daily_ic_series": tracker.get_ic_series(),
+            "daily_ic_series": tracker.get_ic_series() if tracker is not None else [],
             "position_history": daily_position_records[-500:],
             "stop_loss_events": stop_loss_events,
             "n_stop_loss": len(stop_loss_events),
@@ -1296,6 +1371,17 @@ def _validate_and_save(version_id, metrics, equity_curve, daily_returns,
     start_date = metrics.get("start_date", "")
     end_date = metrics.get("end_date", "")
 
+    # Sanitize NaN/Inf for JSON serialization
+    def _sanitize(obj):
+        """Replace NaN/Inf with None for JSON compatibility."""
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize(v) for v in obj]
+        if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+            return None
+        return obj
+
     engine = get_engine()
     try:
         with engine.begin() as conn:
@@ -1310,9 +1396,9 @@ def _validate_and_save(version_id, metrics, equity_curve, daily_returns,
                 "end": end_date,
                 "quality": result["quality"],
                 "flags": result["flags"],
-                "metrics": json.dumps({**metrics, "adjusted_sharpe": result["adjusted_sharpe"]}, default=str),
-                "equity": json.dumps(equity_curve, default=str),
-                "returns": json.dumps(daily_returns, default=str),
+                "metrics": json.dumps(_sanitize({**metrics, "adjusted_sharpe": result["adjusted_sharpe"]})),
+                "equity": json.dumps(_sanitize(equity_curve)),
+                "returns": json.dumps(_sanitize(daily_returns)),
             })
         print(f"\n回测结果已写入 backtest_results (quality={result['quality']})")
     except Exception as e:
