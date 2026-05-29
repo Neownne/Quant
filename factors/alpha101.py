@@ -71,6 +71,23 @@ def mom_60(df: pd.DataFrame) -> pd.Series:
     return _ts_roc(df["close"], w(60))
 
 
+def price_mom_5(df: pd.DataFrame) -> pd.Series:
+    """纯价格5日动量（不依赖换手率，捕捉缩量上涨龙头）"""
+    return df["close"].pct_change(w(5))
+
+
+def price_mom_10(df: pd.DataFrame) -> pd.Series:
+    """纯价格10日动量"""
+    return df["close"].pct_change(w(10))
+
+
+def price_accel(df: pd.DataFrame) -> pd.Series:
+    """动量加速度: mom_5 / (|mom_20| + ε)，正值=加速，负值=减速"""
+    m5 = df["close"].pct_change(w(5))
+    m20 = df["close"].pct_change(w(20)).abs()
+    return m5 / (m20 + 0.01)
+
+
 def ema_ratio_5_20(df: pd.DataFrame) -> pd.Series:
     """EMA(5) / EMA(20) - 1"""
     c = df["close"]
@@ -282,6 +299,10 @@ ALPHA101_FUNCTIONS: dict = {
     "mom_20": mom_20,
     "mom_60": mom_60,
     "ema_ratio_5_20": ema_ratio_5_20,
+    # 纯价格动量（不依赖换手率，v1.13 新增）
+    "price_mom_5": price_mom_5,
+    "price_mom_10": price_mom_10,
+    "price_accel": price_accel,
     # 波动率
     "vol_20": vol_20,
     "atr_14": atr_14,

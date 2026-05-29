@@ -743,14 +743,14 @@ async def list_paper_runs():
             <td>{name}</td><td>{ver}</td><td>{start}</td><td>{end or '进行中'}</td>
             <td>{cap:,.0f}</td>
             <td><span class="badge {status_badge}">{status}</span></td>
-            <td><button class="mock-button" hx-get="/api/paper-run/{rid}" hx-target="#paper-detail" hx-swap="innerHTML">查看</button></td>
+            <td><button class="mock-button" hx-get="/api/paper-run/{rid}?account_id=15" hx-target="#paper-detail" hx-swap="innerHTML">查看</button></td>
         </tr>"""
     html += "</tbody></table>"
     return HTMLResponse(html)
 
 
 @router.get("/paper-run/{run_id}")
-async def get_paper_run_detail(run_id: int):
+async def get_paper_run_detail(run_id: int, account_id: int = 15):
     engine = get_engine()
     try:
         with engine.connect() as conn:
@@ -762,44 +762,66 @@ async def get_paper_run_detail(run_id: int):
                 SELECT signal_date, stock_code, predicted_score, rank
                 FROM paper_signals WHERE run_id = :rid ORDER BY signal_date DESC LIMIT 30
             """), {"rid": run_id}).fetchall()
+            # 股票名称映射
+            all_codes = list(set(p[0] for p in positions) | set(s[1] for s in signals))
+            name_map = {}
+            if all_codes:
+                cl = ",".join([f"'{c}'" for c in all_codes])
+                names = conn.execute(text(f"SELECT code, name FROM stock_basic WHERE code IN ({cl})")).fetchall()
+                name_map = {r[0]: r[1] for r in names}
+            # 最新收盘价（用于计算当日涨幅）
+            price_map = {}
+            if all_codes:
+                prices = conn.execute(text(f"""
+                    SELECT code, close, close-prev_close as chg, (close-prev_close)/NULLIF(prev_close,0)*100 as chg_pct
+                    FROM (SELECT code, close, LAG(close) OVER (PARTITION BY code ORDER BY trade_date) as prev_close
+                          FROM stock_daily WHERE code IN ({cl}) AND trade_date >= CURRENT_DATE - INTERVAL '7 days') t
+                    WHERE prev_close IS NOT NULL
+                """)).fetchall()
+                # Take latest per code
+                for r in prices:
+                    if r[0] not in price_map:
+                        price_map[r[0]] = (float(r[1]), float(r[3]) if r[3] else 0)
     except Exception:
         positions = []
         signals = []
+        name_map = {}
+        price_map = {}
 
-    pos_html = "<table><thead><tr><th>代码</th><th>入场日</th><th>入场价</th><th>出场日</th><th>出场价</th><th>数量</th><th>盈亏</th><th>盈亏%</th></tr></thead><tbody>"
+    # 已平仓交易表
+    pos_html = "<table><thead><tr><th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>出场日</th><th>出场价</th><th>数量</th><th>盈亏</th><th>盈亏%</th></tr></thead><tbody>"
     for p in positions:
         code, ed, ep, xd, xp, qty, pnl, pct = p
         pnl_class = "up" if (pnl or 0) > 0 else "down"
         pos_html += f"""<tr>
-            <td>{code}</td><td>{ed}</td><td>{ep:.2f}</td><td>{xd or '-'}</td><td>{xp or '-'}</td>
+            <td>{code}</td><td>{name_map.get(code, '?')}</td><td>{ed}</td><td>{ep:.2f}</td><td>{xd or '-'}</td><td>{xp or '-'}</td>
             <td>{qty}</td>
             <td class="{pnl_class}">{pnl:,.0f}</td>
             <td class="{pnl_class}">{pct:+.2f}%</td>
         </tr>"""
     pos_html += "</tbody></table>"
 
-    sig_html = "<table><thead><tr><th>日期</th><th>代码</th><th>评分</th><th>排名</th></tr></thead><tbody>"
+    sig_html = "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th></tr></thead><tbody>"
     for s in signals:
         sd, sc, score, rank = s
-        sig_html += f"<tr><td>{sd}</td><td>{sc}</td><td>{score:.4f}</td><td>{rank}</td></tr>"
+        sig_html += f"<tr><td>{sd}</td><td>{sc}</td><td>{name_map.get(sc, '?')}</td><td>{score:.4f}</td><td>{rank}</td></tr>"
     sig_html += "</tbody></table>"
 
-    # Open vs closed positions
-    open_pos = [p for p in positions if p[3] is None]  # exit_date is None
+    open_pos = [p for p in positions if p[3] is None]
     closed_pos = [p for p in positions if p[3] is not None]
 
     total_pnl = sum((p[6] or 0) for p in closed_pos)
     wins = sum(1 for p in closed_pos if (p[7] or 0) > 0)
 
-    # Portfolio summary from paper_daily_pnl
+    # 账户概览
     pnl_summary = ""
     try:
         with engine.connect() as conn:
             daily = conn.execute(text("""
                 SELECT trade_date, cash, position_value, total_value, daily_return, drawdown
-                FROM paper_daily_pnl WHERE account_id = 14
+                FROM paper_daily_pnl WHERE account_id = :aid
                 ORDER BY trade_date DESC LIMIT 1
-            """)).fetchone()
+            """), {"aid": account_id}).fetchone()
         if daily:
             d, cash, pv, tv, dr, dd = daily
             pnl_summary = f"""<div class="card"><h3>账户概览</h3>
@@ -809,23 +831,37 @@ async def get_paper_run_detail(run_id: int):
     except Exception:
         pass
 
-    # Open positions table
+    # 当前持仓（含名称+当日涨幅+份额权重）
     open_html = ""
     if open_pos:
-        open_html = "<table><thead><tr><th>代码</th><th>入场日</th><th>入场价</th><th>数量</th></tr></thead><tbody>"
+        total_qty = sum(p[5] for p in open_pos)
+        open_html = "<table><thead><tr><th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>现价</th><th>当日涨幅</th><th>份额</th><th>权重</th><th>浮动盈亏</th></tr></thead><tbody>"
         for p in open_pos:
             code, ed, ep, xd, xp, qty, pnl, pct = p
-            open_html += f"<tr><td><strong>{code}</strong></td><td>{ed}</td><td>{ep:.2f}</td><td>{qty}</td></tr>"
+            price_info = price_map.get(code, (ep, 0))
+            cur_price, chg_pct = price_info
+            weight = qty / max(total_qty, 1) * 100
+            float_pnl = (cur_price / ep - 1) * 100 if ep > 0 else 0
+            pnl_class = "up" if float_pnl > 0 else "down"
+            chg_class = "up" if chg_pct > 0 else "down"
+            open_html += f"""<tr>
+                <td><strong>{code}</strong></td><td>{name_map.get(code, '?')}</td><td>{ed}</td>
+                <td>{ep:.2f}</td><td>{cur_price:.2f}</td>
+                <td class="{chg_class}">{chg_pct:+.2f}%</td>
+                <td>{qty}股</td><td>{weight:.1f}%</td>
+                <td class="{pnl_class}">{float_pnl:+.2f}%</td>
+            </tr>"""
         open_html += "</tbody></table>"
+        open_html += f"<p style='margin-top:8px;color:#888;'>等权分配，每只约 {100/max(len(open_pos),1):.0f}% 仓位</p>"
 
-    # Equity curve chart
+    # 权益曲线
     chart_html = ""
     try:
         with engine.connect() as conn:
             eq_rows = conn.execute(text("""
                 SELECT trade_date, total_value FROM paper_daily_pnl
-                WHERE account_id = 14 ORDER BY trade_date
-            """)).fetchall()
+                WHERE account_id = :aid ORDER BY trade_date
+            """), {"aid": account_id}).fetchall()
         if len(eq_rows) > 1:
             dates = [str(r[0]) for r in eq_rows]
             values = [float(r[1]) for r in eq_rows]
