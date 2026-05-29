@@ -804,8 +804,13 @@ def main():
             if day_data.empty or next_data.empty:
                 continue
 
-            # ── 调仓决策：每 N 日调仓一次 ──
-            is_rebalance = (day_counter % args.rebalance_freq == 0) or (not current_holdings and day_counter >= lockout_until)
+            # ── 调仓决策：按市场状态自适应频率 ──
+            dt_str = str(dt)[:10]
+            today_regime = regime_map.get(dt_str, "sideways")
+            reg_params = REGIME_PARAMS.get(today_regime, REGIME_PARAMS["sideways"])
+            reg_stop = reg_params["stop_loss_pct"]
+            reg_rb = reg_params.get("rebalance_freq", args.rebalance_freq)
+            is_rebalance = (day_counter % reg_rb == 0) or (not current_holdings and day_counter >= lockout_until)
 
             if is_rebalance:
                 # ── 逐因子 IC 计算（仅调仓日） ──
@@ -942,13 +947,8 @@ def main():
                 if preds.empty:
                     continue
 
-                # ── 按市场状态调整参数 ──
-                today_regime = regime_map.get(dt_str, "sideways")
-                reg_params = REGIME_PARAMS.get(today_regime, REGIME_PARAMS["sideways"])
-                reg_top_n = reg_params["top_n"]  # 按状态独立设定持仓数
-                reg_stop = reg_params["stop_loss_pct"]
-
                 # ── NDrop 选股 ──
+                reg_top_n = reg_params["top_n"]
                 scores_series = pd.Series(
                     preds["score"].values,
                     index=preds["code"].values,
@@ -988,9 +988,6 @@ def main():
                 current_holdings = new_holdings
             else:
                 # 持仓不变：无调仓成本
-                today_regime = regime_map.get(dt_str, "sideways")
-                reg_params = REGIME_PARAMS.get(today_regime, REGIME_PARAMS["sideways"])
-                reg_stop = reg_params["stop_loss_pct"]
                 turnover_rate = 0.0
                 cost = 0.0
                 top_scores = [0.0] * len(current_holdings) if current_holdings else []
