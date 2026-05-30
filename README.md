@@ -676,7 +676,7 @@ v2.0 完成了从 Streamlit 单体应用到 FastAPI + HTMX 分层架构的迁移
 | 日期 | 变更内容 |
 |---|---|---|
 
-| 2026-05-30 | **v1.3 五候策略上线**：5状态市场检测(强牛/弱牛/快熊/慢熊/震荡) + 按状态自适应调仓频率/仓位/止损。新增3个纯价格动量因子。模拟盘系统V2(paper_runs/signals/positions)打通,`run_daily_paper.py`每日驱动。回测CAGR 44.6%/Sharpe 1.34/MaxDD 25.8%。Web UI: 权益曲线+持仓明细+市场状态+版本号。 |
+| 2026-05-30 | **v1.3 舞策略上线**：5状态市场检测(强牛/弱牛/快熊/慢熊/震荡) + 按状态自适应调仓频率/仓位/止损。新增3个纯价格动量因子。模拟盘系统V2(paper_runs/signals/positions)打通,`run_daily_paper.py`每日驱动。回测CAGR 44.6%/Sharpe 1.34/MaxDD 25.8%。Web UI: 权益曲线+持仓明细+市场状态+版本号。 |
 | 2026-05-29 | **v1.12 参数优化：日频网格搜索**：分钟数据覆盖率不足，对日频管线做 6 维 72 组参数网格搜索（多周期/Regime/行业中性化/持仓数/调仓频率）。结论：MH+行业中性化+15只+周度调仓为最优均衡组合（CAGR 110.3%、Sharpe 2.99、MaxDD 16.0%）。`scripts/run_ml_backtest.py` 默认参数更新：`--multi-horizon`/`--industry-neutralize`/`--dynamic` 默认开启，`--top-n` 默认 15，增加 `--no-*` 关闭选项。新增 `scripts/grid_search.py` 通用网格搜索工具。 |
 | 2026-05-28 | **v1.12 分钟因子+行业中性化+多周期预测**：新增 `factors/intraday_minute.py`（7个60min K线日内因子，因子总数 76→83）；`factors/engine.py` 新增 `neutralize_by_industry()` 行业截面中性化（19个SW1行业）；`models/dataset.py` 支持多周期标签 `forward_days=[1,5,20]` 和行业中性化开关；`models/trainer.py` 新增 `MultiHorizonEnsemble` 加权复合打分和 `walk_forward_train_multihorizon`；`scripts/run_ml_backtest.py` 新增 `--multi-horizon`/`--industry-neutralize`/`--horizon-weights` CLI 参数、分钟/行业数据加载；`scripts/predict_today.py` 同步更新。回测验证：500只候选池/52因子，年化收益 86.87%→119.47%（+32.6pp），Sharpe 2.12→3.35（+1.23），最大回撤 27.37%→12.52%（-14.85pp）。修复 `MultiHorizonEnsemble.predict()` 索引对齐 bug（composite 用 code 字符串索引而非整数位置）。 |
 | 2026-05-28 | **v1.11 动态反馈闭环**：新增 ML-动态多因子策略，两级联动——窗口级因子淘汰/发现（IC衰减→权重衰减→淘汰<0.3）和日度级信号追踪（滚动IC→连续衰减告警→触发重训）。新增 `strategy_health`/`strategy_commands` 表。全市场选股+组合风控，Sharpe 1.30。 |
