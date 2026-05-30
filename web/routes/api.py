@@ -622,18 +622,35 @@ async def get_backtest_detail(backtest_id: int):
     # ── Position history section ──────────────────────────────────────
     pos_html = ""
     if position_history and strategy_type == "ml":
-        pos_html = "<h4 style='margin:16px 0 8px;'>近期持仓明细 (最近20日)</h4>"
+        # Build name lookup from stock_basic
+        name_map = {}
+        all_pos_codes = set()
+        for p in position_history[-20:]:
+            all_pos_codes.update(p.get("codes", []))
+        if all_pos_codes:
+            try:
+                with engine.connect() as conn:
+                    cl = ",".join([f"'{c}'" for c in all_pos_codes])
+                    names = conn.execute(text(f"SELECT code, name FROM stock_basic WHERE code IN ({cl})")).fetchall()
+                    name_map = {r[0]: r[1] for r in names}
+            except Exception:
+                pass
+
+        pos_html = "<h4 style='margin:16px 0 8px;'>近期持仓明细 (最近20个调仓日)</h4>"
         recent = position_history[-20:]
         pos_html += """<table style="font-size:11px;width:100%;border-collapse:collapse;"><thead>
         <tr style="background:#f5f5f5;"><th style="padding:4px;text-align:left;">日期</th>
-        <th style="padding:4px;text-align:left;">持仓股票</th>
+        <th style="padding:4px;text-align:left;">持仓 (代码+名称)</th>
+        <th style="padding:4px;text-align:center;">只数</th>
         <th style="padding:4px;text-align:right;">日收益</th></tr></thead><tbody>"""
         for p in reversed(recent):
-            codes_str = " ".join(str(c) for c in p.get("codes", [])[:8])
+            codes = p.get("codes", [])
+            codes_display = " ".join(f"{c}({name_map.get(c, '?')})" for c in codes)
             ret = p.get("daily_ret", p.get("ret", 0))
             ret_color = "#c62828" if ret > 0 else "#2e7d32" if ret < 0 else "#666"
             pos_html += f"""<tr><td style="padding:4px;">{p['date']}</td>
-            <td style="padding:4px;font-family:monospace;font-size:10px;">{codes_str}</td>
+            <td style="padding:4px;font-size:10px;">{codes_display}</td>
+            <td style="padding:4px;text-align:center;">{len(codes)}</td>
             <td style="padding:4px;text-align:right;color:{ret_color};">{ret*100:+.2f}%</td></tr>"""
         pos_html += "</tbody></table>"
 

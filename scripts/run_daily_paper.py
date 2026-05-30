@@ -40,11 +40,12 @@ FACTOR_NAMES = [f for f in FACTOR_NAMES if f in ALL_FACTORS]
 
 def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
     """加载 OHLCV + 指数 + 行业 + 估值数据。"""
-    # 候选池：按成交额排序取 top-N
+    # 候选池：按成交额排序取 top-N（排除 ST）
     codes = pd.read_sql(
-        f"SELECT code FROM stock_daily "
-        f"WHERE trade_date BETWEEN '{start_date}' AND '{end_date}' "
-        f"GROUP BY code ORDER BY SUM(amount) DESC LIMIT {universe_size}",
+        f"SELECT d.code FROM stock_daily d "
+        f"JOIN stock_basic b ON d.code = b.code AND b.is_st = FALSE "
+        f"WHERE d.trade_date BETWEEN '{start_date}' AND '{end_date}' "
+        f"GROUP BY d.code ORDER BY SUM(d.amount) DESC LIMIT {universe_size}",
         engine,
     )["code"].tolist()
     code_list = ",".join([f"'{c}'" for c in codes])
