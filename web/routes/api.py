@@ -790,15 +790,14 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             price_map = {}
             if all_codes:
                 prices = conn.execute(text(f"""
-                    SELECT code, close, close-prev_close as chg, (close-prev_close)/NULLIF(prev_close,0)*100 as chg_pct
-                    FROM (SELECT code, close, LAG(close) OVER (PARTITION BY code ORDER BY trade_date) as prev_close
-                          FROM stock_daily WHERE code IN ({cl}) AND trade_date >= CURRENT_DATE - INTERVAL '7 days') t
-                    WHERE prev_close IS NOT NULL
+                    SELECT DISTINCT ON (code) code, close,
+                           (close - LAG(close) OVER (PARTITION BY code ORDER BY trade_date))
+                           / NULLIF(LAG(close) OVER (PARTITION BY code ORDER BY trade_date), 0) * 100 as chg_pct
+                    FROM stock_daily WHERE code IN ({cl})
+                    ORDER BY code, trade_date DESC
                 """)).fetchall()
-                # Take latest per code
                 for r in prices:
-                    if r[0] not in price_map:
-                        price_map[r[0]] = (float(r[1]), float(r[3]) if r[3] else 0)
+                    price_map[r[0]] = (float(r[1]), float(r[2]) if r[2] else 0)
     except Exception:
         positions = []
         signals = []

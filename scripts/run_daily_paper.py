@@ -28,14 +28,24 @@ from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from portfolio.paper_engine import PaperEngine
 from config.settings import TradingConfig
 
-# ── 因子预设 ──
-# 经验证有效的日频 OHLCV 因子（Regime 网格搜索中通过 IC+正交筛选）
-FACTOR_NAMES = [
-    "force_index", "cwt", "rsi_7", "rsi_14", "turnover_ma_dev",
-    "vol_20", "turnover_5", "mom_20", "rev_20", "vwap_ratio",
-    "bb_position", "rev_5", "vol_ratio_5_20", "atr_14",
+# ── 因子预设：与回测保持一致的66因子集（通过IC+正交自动筛选） ──
+_FACTOR_PRESET_NAMES = [
+    *["mom_20", "mom_60", "ema_ratio_5_20", "macd_dif", "macd_signal", "macd_hist",
+      "vwap_ratio", "vpt", "money_flow", "force_index", "cwt", "vwap_momentum",
+      "gap_ma_dev", "turnover_ma_dev", "turnover_ret_corr", "free_turnover_ratio", "turnover_mom"],
+    *["rev_5", "rev_10", "rev_20", "rsi_7", "rsi_14", "bb_position", "bb_width",
+      "overnight_ret", "overnight_ret_std", "open_auction_jump",
+      "intra_day_rev", "upper_shadow", "lower_shadow", "body_ratio",
+      "ret_asymmetry", "tail_risk", "gap_ratio", "intra_vol"],
+    *["vol_20", "atr_14", "vol_ratio_5_20", "vol_of_vol", "down_vol_ratio",
+      "beta_20", "vol_conv"],
+    *["turnover_5", "turnover_skew", "turnover_cv", "turnover_breakout",
+      "volume_climax", "obv_roc", "amihud_5", "dollar_volume",
+      "bid_ask_proxy", "illiquidity"],
+    # v1.13 新增 - 纯价格动量（不依赖换手率）
+    *["price_mom_5", "price_mom_10", "price_accel"],
 ]
-FACTOR_NAMES = [f for f in FACTOR_NAMES if f in ALL_FACTORS]
+FACTOR_NAMES = [f for f in _FACTOR_PRESET_NAMES if f in ALL_FACTORS]
 
 
 def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
