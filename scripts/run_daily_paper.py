@@ -42,10 +42,18 @@ _FACTOR_PRESET_NAMES = [
     *["turnover_5", "turnover_skew", "turnover_cv", "turnover_breakout",
       "volume_climax", "obv_roc", "amihud_5", "dollar_volume",
       "bid_ask_proxy", "illiquidity"],
-    # v1.13 新增 - 纯价格动量（不依赖换手率）
+    # v1.13 新增 - 纯价格动量
     *["price_mom_5", "price_mom_10", "price_accel"],
 ]
-FACTOR_NAMES = [f for f in _FACTOR_PRESET_NAMES if f in ALL_FACTORS]
+# 基本面因子（需 extra_data: 财务/估值/质押数据）
+_FUNDAMENTAL_NAMES = [
+    "log_mcap", "pb_pct", "sh_change",
+    "fin_cashflow_gap", "fin_roe_quality", "fin_profit_cv",
+    "fin_net_margin", "fin_bps_growth", "fin_revenue_stability",
+    "fin_eps_growth", "fin_debt_ratio", "fin_goodwill_ratio",
+    "fin_pledge_risk", "fin_audit_score",
+]
+FACTOR_NAMES = [f for f in _FACTOR_PRESET_NAMES + _FUNDAMENTAL_NAMES if f in ALL_FACTORS]
 
 
 def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
@@ -82,21 +90,78 @@ def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
     if regime_df is not None:
         logger.info(f"市场状态: {regime_df['regime'].value_counts().to_dict()}")
 
-    # extra_data（仅行业数据，日频因子不需要估值）
+    # extra_data
     extra_data = {}
 
+    # 行业分类
     try:
         ind_df = pd.read_sql(f"""
             SELECT code, industry_sw1 FROM stock_industry WHERE code IN ({code_list})
         """, engine)
         if not ind_df.empty:
             all_dates = sorted(ohlcv["trade_date"].unique())
-            ind_df["trade_date"] = pd.to_datetime(ind_df["trade_date"])
             extra_data["industry_sw1"] = ind_df.merge(
                 pd.DataFrame({"trade_date": all_dates}), how="cross"
             )[["code", "trade_date", "industry_sw1"]]
     except Exception:
         pass
+
+    # 估值数据（log_mcap, pb）
+    try:
+        extra_df = pd.read_sql(f"""
+            SELECT code, trade_date, market_cap, pb FROM stock_daily_extra
+            WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'
+        """, engine)
+        if not extra_df.empty:
+            extra_df["log_mcap"] = np.log(extra_df["market_cap"].replace(0, np.nan))
+            extra_data["log_mcap"] = extra_df[["code", "trade_date", "log_mcap"]]
+            extra_data["pb"] = extra_df[["code", "trade_date", "pb"]]
+            logger.info(f"  估值数据: {len(extra_df)} 行")
+    except Exception as e:
+        logger.warning(f"  估值数据跳过: {e}")
+
+    # 股东户数
+    try:
+        sh_df = pd.read_sql(f"""
+            SELECT code, end_date AS trade_date, shareholder_count
+            FROM stock_shareholder WHERE code IN ({code_list})
+            AND end_date BETWEEN '{start_date}' AND '{end_date}'
+        """, engine)
+        if not sh_df.empty:
+            extra_data["shareholder_count"] = sh_df[["code", "trade_date", "shareholder_count"]]
+            logger.info(f"  股东数据: {len(sh_df)} 行")
+    except Exception:
+        pass
+
+    # 质押数据
+    try:
+        pledge_df = pd.read_sql(f"""
+            SELECT code, trade_date, pledge_ratio FROM stock_pledge
+            WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'
+        """, engine)
+        if not pledge_df.empty:
+            extra_data["pledge_ratio"] = pledge_df[["code", "trade_date", "pledge_ratio"]]
+    except Exception:
+        pass
+
+    # 财务数据（fin_* 因子需要）
+    try:
+        fin_cols = ["net_profit", "roe", "bps", "net_margin", "revenue", "eps",
+                     "cash_flow", "operating_cash_flow", "total_assets", "total_liability",
+                     "goodwill", "holder_equity", "adjusted_profit"]
+        fin_df = pd.read_sql(f"""
+            SELECT code, report_date, {','.join(fin_cols)}
+            FROM stock_financial WHERE code IN ({code_list})
+            AND report_date >= '2018-01-01'
+            ORDER BY code, report_date
+        """, engine)
+        if not fin_df.empty:
+            for col in fin_cols:
+                if col in fin_df.columns:
+                    extra_data[col] = fin_df[["code", "report_date", col]].copy()  # 保留report_date供asof merge
+            logger.info(f"  财务数据: {len(fin_df)} 行, {len(fin_cols)} 列")
+    except Exception as e:
+        logger.warning(f"  财务数据跳过: {e}")
 
     return ohlcv, index_df, regime_df, extra_data, codes
 
