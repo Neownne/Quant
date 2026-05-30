@@ -747,7 +747,8 @@ def main():
     day_counter = 0
     current_holdings: list[str] = []
     cost_basis: dict[str, float] = {}  # code -> entry price
-    position_entry_day: dict[str, int] = {}  # code -> entry day_counter (for continuous-loss re-check)
+    peak_price: dict[str, float] = {}  # code -> highest price since entry (trailing stop)
+    position_entry_day: dict[str, int] = {}  # code -> entry day_counter
     stop_loss_events: list[dict] = []  # record stop-loss triggers
     risk_events: list[dict] = []  # record portfolio DD / index crash events
     annotation_events: list[dict] = []  # record events for chart annotation
@@ -966,10 +967,11 @@ def main():
                 for code in to_buy:
                     if code in today_prices:
                         cost_basis[code] = today_prices[code]
+                        peak_price[code] = today_prices[code]
                         position_entry_day[code] = day_counter
-                # 清除已卖出的成本基础
                 for code in to_sell:
                     cost_basis.pop(code, None)
+                    peak_price.pop(code, None)
                     position_entry_day.pop(code, None)
 
                 new_holdings = list(new_holdings_set)
@@ -995,7 +997,7 @@ def main():
             day_counter += 1
             top_codes = current_holdings
 
-            # ── 个股止损检查：每日检查持仓是否触及 -8% 止损 ──
+            # ── 个股止损：固定比例止损 ──
             next_prices = price_lookup.get(str(next_dt)[:10], {})
             stopped_out: list[str] = []
             for code in top_codes[:]:
@@ -1012,32 +1014,8 @@ def main():
                         })
                         current_holdings.remove(code)
                         cost_basis.pop(code, None)
+                        peak_price.pop(code, None)
                         position_entry_day.pop(code, None)
-
-            # ── 持续亏损重检：持仓 ≥3 天且累计亏损 >5% → 提前平仓 ──
-            early_cut: list[str] = []
-            for code in top_codes[:]:
-                if code in cost_basis and code in next_prices and code in position_entry_day:
-                    days_held = day_counter - position_entry_day[code]
-                    cum_loss = (next_prices[code] - cost_basis[code]) / cost_basis[code]
-                    if days_held >= 3 and cum_loss <= -0.05:
-                        early_cut.append(code)
-                        stop_loss_events.append({
-                            "date": str(next_dt)[:10],
-                            "code": code,
-                            "entry_price": round(cost_basis[code], 3),
-                            "exit_price": round(next_prices[code], 3),
-                            "pnl_pct": round(cum_loss, 4),
-                            "type": "continuous_loss",
-                            "days_held": days_held,
-                        })
-                        current_holdings.remove(code)
-                        cost_basis.pop(code, None)
-                        position_entry_day.pop(code, None)
-
-            if early_cut:
-                cut_cost = len(early_cut) * (COMM + STAMP + SLIP) / max(len(top_codes) + len(early_cut), 1)
-                cost += cut_cost
 
             if stopped_out:
                 # 止损卖出成本：佣金 + 印花税 + 滑点
@@ -1161,7 +1139,7 @@ def main():
         # ── 止损统计 ──
         if stop_loss_events:
             n_stops = len(stop_loss_events)
-            avg_loss = np.mean([e["pnl_pct"] for e in stop_loss_events])
+            avg_loss = np.mean([e.get("dd_from_peak", e.get("pnl_pct", 0)) for e in stop_loss_events])
             print(f"\n=== 止损统计 ===")
             print(f"止损触发次数: {n_stops}, 平均亏损: {avg_loss:.2%}, "
                   f"止损频率: {n_stops / max(total_trading_days, 1):.1%}/日")

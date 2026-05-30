@@ -84,26 +84,26 @@ REGIME_PARAMS = {
     },
     "weak_bull": {
         "top_n": 10,
-        "rebalance_freq": 5,      # 周度调仓减少噪声交易
+        "rebalance_freq": 5,
         "stop_loss_pct": 0.07,
-        "position_ratio": 1.0,    # 保持满仓，弱牛也能赚钱
+        "position_ratio": 1.0,
     },
     "fast_bear": {
         "top_n": 5,
         "rebalance_freq": 5,
         "stop_loss_pct": 0.04,
-        "position_ratio": 0.3,    # 暴跌时空仓为主
+        "position_ratio": 0.3,
     },
     "slow_bear": {
-        "top_n": 5,               # 更少的持仓
+        "top_n": 5,
         "rebalance_freq": 5,
-        "stop_loss_pct": 0.04,    # 更紧的止损
-        "position_ratio": 0.4,    # 阴跌也大幅降仓
+        "stop_loss_pct": 0.04,
+        "position_ratio": 0.4,
     },
     "sideways": {
         "top_n": 10,
         "rebalance_freq": 5,
         "stop_loss_pct": 0.06,
-        "position_ratio": 1.0,    # 震荡市满仓
+        "position_ratio": 1.0,
     },
 }
