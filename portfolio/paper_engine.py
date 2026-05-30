@@ -81,7 +81,7 @@ class PaperEngine:
         # 交易成本
         self.commission = TradingConfig.COMMISSION
         self.stamp_duty = TradingConfig.STAMP_DUTY
-        self.slippage = TradingConfig.SLIPPAGE
+        self.slippage = 0.0015  # 模拟盘更保守(0.15%),含冲击成本
 
     # ── 公开接口 ──────────────────────────────────────────
 
@@ -196,7 +196,7 @@ class PaperEngine:
                 buy_orders, sell_orders, risk_orders,
                 signal_scores, trade_date)
 
-        # 11. 内存更新持仓
+        # 11. 内存更新持仓（先卖后买，现金已在 _generate_orders 中验证）
         for so in sell_orders:
             code = so["code"]
             if code in positions:
@@ -208,10 +208,8 @@ class PaperEngine:
             code = bo["code"]
             price = bo["price"]
             shares = bo["volume"]
-            cost_shares = shares * price
-            if cost_shares <= cash:
-                cash -= cost_shares
-                positions[code] = {"shares": shares, "cost_basis": price}
+            cash -= shares * price
+            positions[code] = {"shares": shares, "cost_basis": price}
 
         # 12. 计算当日净值
         position_value = sum(
@@ -443,6 +441,13 @@ class PaperEngine:
                 "code": code, "direction": "SELL",
                 "price": p, "volume": positions[code]["shares"], "reason": "signal"})
 
+        # 计算可用现金（现有现金 + 待卖出回笼）
+        sell_proceeds = sum(
+            today_prices.get(code, positions[code]["cost_basis"]) * positions[code]["shares"]
+            for code in current_codes - target_codes
+        )
+        available_cash = cash + sell_proceeds
+
         for code in target_codes:
             t_shares = target_map[code]["shares"]
             t_price = target_map[code]["price"]
@@ -450,16 +455,21 @@ class PaperEngine:
 
             if t_shares > c_shares:
                 diff = int((t_shares - c_shares) / 100) * 100
-                if diff > 0:
+                cost_needed = diff * t_price
+                if diff > 0 and cost_needed <= available_cash:
                     buy_orders.append({
                         "code": code, "direction": "BUY",
                         "price": t_price, "volume": diff, "reason": "signal"})
+                    available_cash -= cost_needed
+                elif diff > 0:
+                    logger.warning(f"现金不足: {code} 需{cost_needed:.0f} 可用{available_cash:.0f}")
             elif t_shares < c_shares:
                 diff = int((c_shares - t_shares) / 100) * 100
                 if diff > 0:
                     sell_orders.append({
                         "code": code, "direction": "SELL",
                         "price": t_price, "volume": diff, "reason": "signal"})
+                    available_cash += diff * t_price
 
         return buy_orders, sell_orders
 

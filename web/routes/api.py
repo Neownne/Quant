@@ -776,8 +776,11 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 FROM paper_positions WHERE run_id = :rid ORDER BY entry_date DESC LIMIT 50
             """), {"rid": run_id}).fetchall()
             signals = conn.execute(text("""
-                SELECT signal_date, stock_code, predicted_score, rank
-                FROM paper_signals WHERE run_id = :rid ORDER BY signal_date DESC LIMIT 30
+                SELECT ps.signal_date, ps.stock_code, ps.predicted_score, ps.rank
+                FROM paper_signals ps
+                WHERE ps.run_id = :rid
+                AND EXISTS (SELECT 1 FROM paper_positions pp WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date)
+                ORDER BY ps.signal_date DESC LIMIT 30
             """), {"rid": run_id}).fetchall()
             # 股票名称映射
             all_codes = list(set(p[0] for p in positions) | set(s[1] for s in signals))
@@ -887,6 +890,32 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         open_html += "</tbody></table>"
         open_html += f"<p style='margin-top:8px;color:#888;'>等权分配，每只约 {100/max(len(open_pos),1):.0f}% 仓位</p>"
 
+    # ── 待执行信号（T+1：已生成但未入场） ──
+    pending_html = ""
+    try:
+        with engine.connect() as conn:
+            pending = conn.execute(text("""
+                SELECT ps.signal_date, ps.stock_code, ps.predicted_score, ps.rank, sb.name
+                FROM paper_signals ps
+                LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
+                WHERE ps.run_id = :rid
+                AND NOT EXISTS (
+                    SELECT 1 FROM paper_positions pp
+                    WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
+                )
+                ORDER BY ps.signal_date DESC, ps.rank
+                LIMIT 15
+            """), {"rid": run_id}).fetchall()
+        if pending:
+            pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
+            pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th></tr></thead><tbody>"
+            for p in pending:
+                sd, sc, score, rank, nm = p
+                pending_html += f"<tr><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td></tr>"
+            pending_html += "</tbody></table></div>"
+    except Exception:
+        pass
+
     # 权益曲线
     chart_html = ""
     try:
@@ -914,6 +943,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
 
     html = f"""{pnl_summary}
     {chart_html}
+    {pending_html}
     <div class="card"><h3>当前持仓 ({len(open_pos)}只)</h3>{open_html or '<p>无持仓</p>'}</div>
     <div class="card"><h3>已平仓交易 ({len(closed_pos)}笔)</h3>{pos_html.replace('<th>代码</th><th>入场日</th>', '<th>代码</th><th>入场日</th><th>出场日</th><th>出场价</th>')
     if not closed_pos else pos_html}</div>

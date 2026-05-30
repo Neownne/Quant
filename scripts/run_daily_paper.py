@@ -306,38 +306,77 @@ def main():
     # 注入 regime
     today_factor["regime"] = today_regime
 
-    # ── 8. 预测 ──
+    # ── 8. T+1执行：先处理上一个交易日的待执行信号 ──
+    prev_signals = None
+    prev_date = None
+    if not args.dry_run:
+        with engine.connect() as conn:
+            prev = conn.execute(text("""
+                SELECT DISTINCT ps.signal_date FROM paper_signals ps
+                WHERE ps.run_id = :rid
+                AND NOT EXISTS (
+                    SELECT 1 FROM paper_positions pp
+                    WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
+                )
+                ORDER BY ps.signal_date LIMIT 1
+            """), {"rid": args.run_id}).fetchone()
+        if prev:
+            prev_date = pd.Timestamp(prev[0])
+            logger.info(f"发现待执行信号: {prev_date.date()}，T+1执行中...")
+            # Load signals from that date
+            prev_signals = pd.read_sql(f"""
+                SELECT signal_date, stock_code, predicted_score, rank
+                FROM paper_signals WHERE run_id = {args.run_id}
+                AND signal_date = '{prev_date.date()}'
+                ORDER BY rank
+            """, engine)
+            # Build factor data for that date
+            prev_factor = dataset[dataset["trade_date"] == prev_date].copy()
+            if not prev_factor.empty:
+                prev_regime = str(regime_df[regime_df["trade_date"] <= prev_date]["regime"].iloc[-1]) if regime_df is not None else "sideways"
+                prev_factor["regime"] = prev_regime
+                engine_paper_prev = PaperEngine(
+                    account_id=args.account_id, run_id=args.run_id,
+                    predictor=ensemble, top_n=args.top_n, rebalance_mode="ndrop",
+                )
+                result_prev = engine_paper_prev.run_daily(
+                    trade_date=prev_date, factor_df=prev_factor,
+                    ohlcv_data=ohlcv, index_ohlcv=index_df, regime=prev_regime,
+                )
+                if result_prev:
+                    logger.info(f"T+1执行完成: 总资产={result_prev['total_value']:,.0f}, "
+                                f"买入={result_prev['n_buy_orders']}, 卖出={result_prev['n_sell_orders']}")
+
+    # ── 9. 预测今日信号（仅生成，不执行） ──
     preds = ensemble.predict(today_factor)
     preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
     logger.info(f"预测: {len(preds)} 只, Top-5: {preds['code'].head(5).tolist()}")
 
-    # ── 9. PaperEngine 执行 ──
+    # ── 10. 保存信号到 paper_signals（等待下一个交易日执行） ──
     if args.dry_run:
-        logger.info("[DRY RUN] 跳过执行")
+        logger.info("[DRY RUN] 跳过写入")
         print(f"\n=== 今日信号 ({pred_date.date()}) === 市场: {today_regime}")
         for i, row in preds.head(args.top_n).iterrows():
             print(f"  {i+1}. {row['code']}  score={row['score']:.4f}")
     else:
-        engine_paper = PaperEngine(
-            account_id=args.account_id,
-            run_id=args.run_id,
-            predictor=ensemble,
-            top_n=args.top_n,
-            rebalance_mode="ndrop",
-        )
-        result = engine_paper.run_daily(
-            trade_date=pred_date,
-            factor_df=today_factor,
-            ohlcv_data=ohlcv,
-            index_ohlcv=index_df,
-            regime=today_regime,
-        )
-        if result:
-            logger.info(
-                f"执行完成: 总资产={result['total_value']:,.0f}, "
-                f"买入={result['n_buy_orders']}, 卖出={result['n_sell_orders']}, "
-                f"成本={result['cost']:,.0f}"
-            )
+        from sqlalchemy import text as sqltxt
+        with engine.begin() as conn:
+            # Check if signals for this date already exist
+            existing = conn.execute(sqltxt(
+                "SELECT COUNT(*) FROM paper_signals WHERE run_id = :rid AND signal_date = :sd"
+            ), {"rid": args.run_id, "sd": pred_date.date()}).fetchone()[0]
+            if existing == 0:
+                for rank, (_, row) in enumerate(preds.head(args.top_n).iterrows()):
+                    conn.execute(sqltxt("""
+                        INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
+                        VALUES (:rid, :sd, :sc, :ps, :rk)
+                    """), {
+                        "rid": args.run_id, "sd": pred_date.date(),
+                        "sc": row["code"], "ps": float(row["score"]), "rk": rank + 1,
+                    })
+                logger.info(f"信号已保存: {min(args.top_n, len(preds))} 只, 等待T+1执行")
+            else:
+                logger.info(f"信号已存在 ({existing}条), 跳过")
 
     engine.dispose()
     logger.info("Done.")
