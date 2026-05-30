@@ -755,14 +755,6 @@ def main():
     peak_nav = 1.0
     lockout_until = 0  # day_counter value after liquidation
 
-    # ── 流动性过滤：单只买入额 ≤ 日均成交的 max_pct% ──
-    max_participation = 0.005  # 单只持仓不超过日均成交额的0.5%
-    min_daily_amount = TradingConfig.INITIAL_CASH / args.top_n / max_participation
-    avg_amount = ohlcv.groupby("code")["amount"].apply(lambda x: x.rolling(20, min_periods=5).mean())
-    ohlcv["avg_amount_20"] = avg_amount.reset_index(level=0, drop=True)
-    liquid_codes = set(ohlcv[ohlcv["avg_amount_20"] >= min_daily_amount]["code"].unique())
-    logger.info(f"流动性过滤: {len(liquid_codes)}/{ohlcv['code'].nunique()} 只通过 (参与率<{max_participation*100:.1f}%, 日均>{min_daily_amount/1e4:.0f}万)")
-
     # ── 价格查找表（止损计算用） ──
     price_lookup: dict[str, dict[str, float]] = {}  # {date_str: {code: close}}
     ohlcv_pivot = ohlcv.pivot_table(
@@ -952,9 +944,6 @@ def main():
                 if quality_pass and dt_str in quality_pass:
                     passing_set = quality_pass[dt_str]
                     preds = preds[preds["code"].isin(passing_set)]
-
-                # ── 流动性过滤：排除日均成交不足的股票 ──
-                preds = preds[preds["code"].isin(liquid_codes)]
 
                 if preds.empty:
                     continue
