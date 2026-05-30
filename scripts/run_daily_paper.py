@@ -193,9 +193,29 @@ def main():
             train_years=args.train_years, val_years=1,
         )
         if results:
-            ensemble = results[-1].get("ensemble")
-            trained_regimes = results[-1].get("regimes_trained", [])
-            logger.info(f"模型就绪: regimes={trained_regimes}")
+            # Merge models from all windows: pick best ensemble per regime
+            from models.trainer import RegimeAwareEnsemble
+            merged_ensembles = {}
+            merged_factors = []
+            all_trained = set()
+            for r in results:
+                ens = r.get("ensemble")
+                if ens:
+                    for reg, model in ens.ensembles.items():
+                        if reg not in merged_ensembles:
+                            merged_ensembles[reg] = model
+                            all_trained.add(reg)
+                    if not merged_factors:
+                        merged_factors = ens.factor_names
+            # Fallback: use any available model for missing regimes
+            if merged_ensembles:
+                any_model = next(iter(merged_ensembles.values()))
+                for reg in ["bull", "bear", "sideways"]:
+                    if reg not in merged_ensembles:
+                        merged_ensembles[reg] = any_model
+            ensemble = RegimeAwareEnsemble(merged_ensembles, merged_factors or selected)
+            trained_regimes = list(all_trained)
+            logger.info(f"模型就绪: regimes={trained_regimes} (merged from {len(results)} windows)")
         else:
             logger.error("Regime 训练无结果")
             sys.exit(1)
@@ -245,6 +265,7 @@ def main():
             factor_df=today_factor,
             ohlcv_data=ohlcv,
             index_ohlcv=index_df,
+            regime=today_regime,
         )
         if result:
             logger.info(

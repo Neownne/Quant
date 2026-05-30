@@ -25,6 +25,7 @@ from datetime import date
 
 from data.db import get_engine
 from config.settings import TradingConfig
+from models.regime import REGIME_PARAMS
 from portfolio.selector import select_top_n, select_topk_ndrop, filter_stocks
 from portfolio.allocator import equal_weight, apply_position_limits
 from portfolio.risk import (
@@ -91,10 +92,18 @@ class PaperEngine:
         ohlcv_data: pd.DataFrame,
         industry_map: dict[str, str] | None = None,
         index_ohlcv: pd.DataFrame | None = None,
+        regime: str = "sideways",
     ) -> dict | None:
-        """执行单日完整交易周期。"""
+        """执行单日完整交易周期。regime 为当前5状态标签，用于自适应调参。"""
         if factor_df.empty:
             return None
+
+        # ── 按市场状态覆写参数 ──
+        reg_params = REGIME_PARAMS.get(regime, REGIME_PARAMS["sideways"])
+        self.top_n = reg_params["top_n"]
+        self.stop_loss_pct = reg_params["stop_loss_pct"]
+        pos_ratio = reg_params.get("position_ratio", 1.0)
+        self._pos_ratio = pos_ratio  # 在选股分配时使用
 
         ohlcv_data = ohlcv_data.copy()
         ohlcv_data["trade_date"] = pd.to_datetime(ohlcv_data["trade_date"])
@@ -355,7 +364,7 @@ class PaperEngine:
             code = row["code"]
             price = float(price_map.get(code, 0))
             if price > 0:
-                target_value = cash * weight_per_code[code]
+                target_value = cash * weight_per_code[code] * getattr(self, '_pos_ratio', 1.0)
                 shares = int(target_value / price / 100) * 100
                 result.at[i, "target_shares"] = shares
                 result.at[i, "price"] = price

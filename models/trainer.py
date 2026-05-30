@@ -321,6 +321,9 @@ def walk_forward_train_by_regime(
         df = df.merge(regime_df, on="trade_date", how="left")
         df["regime"] = df["regime"].fillna("sideways")
 
+    # 5-state → 3-state fallback: strong_bull/weak_bull → bull, etc.
+    df["regime"] = df["regime"].map(lambda x: _REGIME_FALLBACK.get(x, "sideways"))
+
     results = []
 
     for train_df, val_df in walk_forward_split(df, train_years, val_years):
