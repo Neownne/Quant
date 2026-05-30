@@ -831,6 +831,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
 
     # 账户概览
     pnl_summary = ""
+    reg_label = "—"
     try:
         with engine.connect() as conn:
             daily = conn.execute(text("""
@@ -838,9 +839,25 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 FROM paper_daily_pnl WHERE account_id = :aid
                 ORDER BY trade_date DESC LIMIT 1
             """), {"aid": account_id}).fetchone()
-        if daily:
-            d, cash, pv, tv, dr, dd = daily
-            pnl_summary = f"""<div class="card"><h3>账户概览</h3>
+            if daily:
+                d, cash, pv, tv, dr, dd = daily
+                # 获取当前市场状态
+                try:
+                    idx_row = conn.execute(text(
+                        "SELECT close, AVG(close) OVER (ORDER BY trade_date ROWS BETWEEN 249 PRECEDING AND CURRENT ROW) as ma250, "
+                        "(close - LAG(close,20) OVER (ORDER BY trade_date)) / NULLIF(LAG(close,20) OVER (ORDER BY trade_DATE), 0) as ret_20 "
+                        "FROM index_daily WHERE code='000001' ORDER BY trade_date DESC LIMIT 1"
+                    )).fetchone()
+                    if idx_row and idx_row[1] and idx_row[2] is not None:
+                        c, ma, r20 = float(idx_row[0]), float(idx_row[1]), float(idx_row[2])
+                        if c > ma and r20 > 0.03: reg_label = "强牛"
+                        elif c > ma and r20 > 0: reg_label = "弱牛"
+                        elif c < ma and r20 < -0.03: reg_label = "快熊"
+                        elif c < ma and r20 < 0: reg_label = "慢熊"
+                        else: reg_label = "震荡"
+                except Exception:
+                    pass
+            pnl_summary = f"""<div class="card"><h3>账户概览 <span style="font-size:12px;color:#1976d2;">市场: {reg_label}</span></h3>
             <p>日期: {d} | 现金: {cash:,.0f} | 持仓市值: {pv:,.0f}</p>
             <p>总资产: <strong>{tv:,.0f}</strong> | 日收益: {dr:+.2%} | 回撤: {dd:.2%}</p>
             </div>"""
