@@ -755,6 +755,14 @@ def main():
     peak_nav = 1.0
     lockout_until = 0  # day_counter value after liquidation
 
+    # ── 流动性过滤：单只买入额 ≤ 日均成交的 max_pct% ──
+    max_participation = 0.005  # 单只持仓不超过日均成交额的0.5%
+    min_daily_amount = TradingConfig.INITIAL_CASH / args.top_n / max_participation
+    avg_amount = ohlcv.groupby("code")["amount"].apply(lambda x: x.rolling(20, min_periods=5).mean())
+    ohlcv["avg_amount_20"] = avg_amount.reset_index(level=0, drop=True)
+    liquid_codes = set(ohlcv[ohlcv["avg_amount_20"] >= min_daily_amount]["code"].unique())
+    logger.info(f"流动性过滤: {len(liquid_codes)}/{ohlcv['code'].nunique()} 只通过 (参与率<{max_participation*100:.1f}%, 日均>{min_daily_amount/1e4:.0f}万)")
+
     # ── 价格查找表（止损计算用） ──
     price_lookup: dict[str, dict[str, float]] = {}  # {date_str: {code: close}}
     ohlcv_pivot = ohlcv.pivot_table(
@@ -939,11 +947,14 @@ def main():
                 except Exception:
                     continue
 
-                # ── 排雷过滤：剔除质量不过关的股票 ──
+                # ── 排雷过滤 ──
                 dt_str = str(dt)[:10]
                 if quality_pass and dt_str in quality_pass:
                     passing_set = quality_pass[dt_str]
                     preds = preds[preds["code"].isin(passing_set)]
+
+                # ── 流动性过滤：排除日均成交不足的股票 ──
+                preds = preds[preds["code"].isin(liquid_codes)]
 
                 if preds.empty:
                     continue
@@ -997,12 +1008,17 @@ def main():
             day_counter += 1
             top_codes = current_holdings
 
-            # ── 个股止损：固定比例止损 ──
+            # ── 个股止损：固定比例止损（跌停封死则顺延） ──
             next_prices = price_lookup.get(str(next_dt)[:10], {})
+            today_prices_sell = price_lookup.get(str(dt)[:10], {})
             stopped_out: list[str] = []
             for code in top_codes[:]:
                 if code in cost_basis and code in next_prices and cost_basis[code] > 0:
                     pnl_pct = (next_prices[code] - cost_basis[code]) / cost_basis[code]
+                    # 跌停检查：今日跌停则无法卖出，顺延到次日
+                    limit_down = today_prices_sell.get(code, 0) * (0.80 if code.startswith('3') else 0.90) * 0.995
+                    if next_prices.get(code, 0) <= limit_down and next_prices.get(code, 0) > 0:
+                        continue  # 跌停封死，推迟到次日
                     if pnl_pct <= -reg_stop:
                         stopped_out.append(code)
                         stop_loss_events.append({
