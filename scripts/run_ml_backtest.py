@@ -241,6 +241,7 @@ def main():
     parser.add_argument("--no-dynamic", action="store_false", dest="dynamic", help="禁用动态多因子闭环")
     parser.add_argument("--rebalance-freq", type=int, default=1, help="调仓频率（交易日），默认1=日频")
     parser.add_argument("--universe-size", type=int, default=500, help="候选池上限，0=全市场非ST")
+    parser.add_argument("--small-cap", action="store_true", help="小市值策略模式（按市值升序选股+行业分散+季节空仓）")
     parser.add_argument("--dd-reduce", type=float, default=0.20, help="组合回撤减仓阈值")
     parser.add_argument("--dd-liquidate", type=float, default=0.25, help="组合回撤清仓阈值")
     parser.add_argument("--index-crash", type=float, default=-0.12, help="指数大跌阈值")
@@ -294,7 +295,20 @@ def main():
                 logger.warning(f"未找到策略 '{args.strategy}' 的版本记录，将使用 version_id=0")
     codes = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
     if codes is None:
-        if args.universe_size > 0:
+        if args.small_cap:
+            # 小市值模式
+            with engine.connect() as conn:
+                codes = pd.read_sql(text(
+                    "SELECT b.code FROM stock_basic b "
+                    "JOIN stock_daily_extra e ON b.code = e.code "
+                    "WHERE b.is_st = FALSE "
+                    "AND b.list_date <= CURRENT_DATE - INTERVAL '375 days' "
+                    "AND b.code NOT LIKE '688%' AND b.code NOT LIKE '300%'"
+                    "AND b.code NOT LIKE '4%' AND b.code NOT LIKE '8%'"
+                    "AND e.trade_date = (SELECT MAX(trade_date) FROM stock_daily_extra) "
+                    "ORDER BY e.market_cap ASC LIMIT :lim"
+                ), conn, params={"lim": args.universe_size})["code"].tolist()
+        elif args.universe_size > 0:
             # 按成交额取前 N 只（覆盖沪深两市）
             codes = pd.read_sql(
                 f"SELECT code FROM stock_daily "
@@ -948,6 +962,18 @@ def main():
                 if preds.empty:
                     continue
 
+                # ── 小市值：季节性空仓 ──
+                if args.small_cap:
+                    month = pd.Timestamp(dt).month
+                    day = pd.Timestamp(dt).day
+                    # 跳过1月/4月/12月20-31日/3月20-31日
+                    if month in (1, 4):
+                        continue
+                    if month == 12 and day >= 20:
+                        continue
+                    if month == 3 and day >= 20:
+                        continue
+
                 # ── NDrop 选股 ──
                 reg_top_n = reg_params["top_n"]
                 scores_series = pd.Series(
@@ -961,6 +987,30 @@ def main():
                     K=reg_top_n,
                     N=TradingConfig.NDROP_N,
                 )
+
+                # ── 小市值：行业分散（每行业最多1只） ──
+                if args.small_cap and "industry_sw1" in extra_data:
+                    ind_df = extra_data["industry_sw1"]
+                    ind_map = dict(zip(ind_df["code"], ind_df["industry_sw1"]))
+                    seen_industries = set()
+                    filtered_holdings = []
+                    for c in new_holdings_set:
+                        ind = ind_map.get(c, "未知")
+                        if ind not in seen_industries:
+                            seen_industries.add(ind)
+                            filtered_holdings.append(c)
+                    # 按分数补足
+                    if len(filtered_holdings) < reg_top_n:
+                        for c in scores_series.index:
+                            ind = ind_map.get(c, "未知")
+                            if c not in filtered_holdings and ind not in seen_industries:
+                                seen_industries.add(ind)
+                                filtered_holdings.append(c)
+                                if len(filtered_holdings) >= reg_top_n:
+                                    break
+                    new_holdings_set = set(filtered_holdings[:reg_top_n])
+                    to_buy = new_holdings_set - set(current_holdings)
+                    to_sell = set(current_holdings) - new_holdings_set
 
                 # ── 更新成本基础（新买入的股票记录买入价+入场日） ──
                 today_prices = price_lookup.get(dt_str, {})

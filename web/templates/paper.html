@@ -4,7 +4,7 @@
 <div class="card">
     <h3>模拟盘监控</h3>
     <p style="color:#888;font-size:13px;margin-bottom:12px;">
-        模拟盘在后台独立运行：每日收盘后计算因子 → 模型预测 → 选股下单 → 结果写 DB。
+        模拟盘在后台独立运行：每日收盘后计算因子 → 模型预测/事件扫描 → 选股下单 → 结果写 DB。
         Web 端只读展示运行状态、持仓和信号。
     </p>
 
@@ -17,31 +17,21 @@
         <input id="paper-capital" value="1000000" placeholder="初始资金" style="width:120px;">
         <input id="paper-start" placeholder="起始日 (如2026-01-01)" style="width:150px;">
         <button class="mock-button green"
-                onclick="var s=document.getElementById('paper-strategy').value;var c=document.getElementById('paper-capital').value;var d=document.getElementById('paper-start').value;var params='strategy='+encodeURIComponent(s)+'&capital='+c;if(d)params+='&start_date='+d;fetch('/api/paper/create?'+params,{method:'POST'}).then(function(r){return r.text()}).then(function(html){document.getElementById('paper-msg').innerHTML=html;document.getElementById('paper-runs').setAttribute('hx-get','/api/paper-runs');htmx.process(document.getElementById('paper-runs'));document.getElementById('paper-runs').dispatchEvent(new Event('load'));});">
+                onclick="var s=document.getElementById('paper-strategy').value;var c=document.getElementById('paper-capital').value;var d=document.getElementById('paper-start').value;var params='strategy='+encodeURIComponent(s)+'&capital='+c;if(d)params+='&start_date='+d;fetch('/api/paper/create?'+params,{method:'POST'}).then(function(r){return r.text()}).then(function(html){document.getElementById('paper-msg').innerHTML=html;});">
             创建模拟盘
         </button>
     </div>
     <div id="paper-msg"></div>
 </div>
 
-<div class="card">
-    <h4>运行中的模拟盘</h4>
-    <div id="paper-runs" hx-get="/api/paper-runs" hx-trigger="load" hx-swap="innerHTML">
-        <p style="color:#999;">加载中...</p>
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div>
+        <h2 style="color:#1976d2;margin-bottom:12px;">舞 (ML因子选股)</h2>
+        <div hx-get="/api/paper-run/2?account_id=15" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
-</div>
-<div id="paper-detail"></div>
-
-<div class="card" style="margin-top:20px;">
-    <h4>如何使用模拟盘</h4>
-    <ol style="color:#888;font-size:13px;line-height:2;padding-left:20px;">
-        <li>点击"创建模拟盘"注册一个 paper_run 记录</li>
-        <li>在后台脚本中调用 <code>PaperEngine(account_id, predictor, factor_names, ...)</code> 初始化引擎</li>
-        <li>每日收盘后运行 <code>engine.run_daily(trade_date)</code> 生成信号和订单</li>
-        <li>Web 端刷新此页面查看持仓、信号和盈亏汇总</li>
-    </ol>
-    <p style="color:#999;font-size:12px;margin-top:8px;">
-        完整示例见 <code>scripts/run_simulation.py</code>
-    </p>
+    <div>
+        <h2 style="color:#e65100;margin-bottom:12px;">小市 (事件驱动)</h2>
+        <div hx-get="/api/paper-run/3?account_id=16" hx-trigger="load" hx-swap="innerHTML"></div>
+    </div>
 </div>
 {% endblock %}

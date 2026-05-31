@@ -1,0 +1,47 @@
+<h2>双策略并行架构</h2>
+<p class="subtitle">舞 (ML因子选股) + 小市 (事件驱动低开反转) → 共享DB + 独立回测/模拟盘</p>
+
+<div class="mockup">
+  <div class="mockup-header">系统架构</div>
+  <div class="mockup-body">
+    <table style="width:100%;font-size:13px;">
+      <tr style="background:#f5f5f5;"><th>组件</th><th>舞 (ML)</th><th>小市 (事件)</th></tr>
+      <tr><td>回测脚本</td><td>scripts/run_ml_backtest.py</td><td>scripts/run_small_cap_backtest.py</td></tr>
+      <tr><td>模拟盘驱动</td><td>scripts/run_daily_paper.py</td><td>scripts/run_small_cap_paper.py</td></tr>
+      <tr><td>策略引擎</td><td>PaperEngine (ML预测→选股)</td><td>SmallCapEngine (条件扫描→入场)</td></tr>
+      <tr><td>DB策略名</td><td>舞</td><td>小市</td></tr>
+      <tr><td>DB账户</td><td>paper_account id=15</td><td>paper_account id=16</td></tr>
+      <tr><td>DB运行</td><td>paper_runs id=2</td><td>paper_runs id=3</td></tr>
+      <tr><td>因子/T0</td><td>69因子 ML训练</td><td>OHLCV 条件扫描</td></tr>
+      <tr><td>参数</td><td colspan="2">共用 TradingConfig (100万/万0.9/万5/0.1%滑点)</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Web 布局：哪种对比方式更好？</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>左右分栏 (推荐)</h3>
+      <p>回测和模拟盘页面各分左右两栏，左栏=舞，右栏=小市。一目了然对比CAGR/DD/持仓。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Tab切换</h3>
+      <p>顶部增加 舞|小市 切换Tab，点击切换显示不同策略的数据。节省空间但无法同时对比。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>指标对比卡片</h3>
+      <p>在现有页面上方增加一组对比卡片(舞CAGR vs 小市CAGR，舞DD vs 小市DD)，下方保留原有详情。</p>
+    </div>
+  </div>
+</div>

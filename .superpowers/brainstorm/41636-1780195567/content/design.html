@@ -1,0 +1,78 @@
+<h2>双策略并行 — 设计方案</h2>
+
+<div class="mockup">
+  <div class="mockup-header">架构总览</div>
+  <div class="mockup-body" style="font-size:13px;">
+    <pre style="background:#f8f8f8;padding:12px;border-radius:4px;overflow-x:auto;">
+quant/
+├── scripts/
+│   ├── run_ml_backtest.py       ← 舞 ML回测 (不动)
+│   ├── run_small_cap_backtest.py ← 小市 事件回测 (新)
+│   ├── run_daily_paper.py       ← 舞 模拟盘 (不动)
+│   └── run_small_cap_paper.py   ← 小市 模拟盘 (新)
+├── portfolio/
+│   ├── paper_engine.py          ← PaperEngine (不动)
+│   └── small_cap_engine.py      ← SmallCapEngine (新)
+├── web/
+│   ├── routes/api.py             ← 加双策略对比API
+│   └── templates/
+│       ├── paper.html            ← 改：左右分栏
+│       └── backtest.html         ← 改：双策略回测列表
+└── DB:
+    ├── strategy_configs: "舞" + "小市"
+    ├── paper_account: id=15(舞) + id=16(小市)
+    └── paper_runs: id=2(舞) + id=3(小市)
+    </pre>
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:16px;">
+  <div class="mockup-header">Web 左右分栏布局</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div style="border:2px solid #1976d2;border-radius:8px;padding:12px;">
+        <h4 style="color:#1976d2;margin:0 0 8px;">舞 (ML因子选股)</h4>
+        <p style="font-size:11px;color:#888;">CAGR: 46.1% | Sharpe: 1.40 | DD: 24.8%</p>
+        <div style="background:#e3f2fd;height:80px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#1976d2;">权益曲线图</div>
+        <p style="font-size:11px;margin-top:8px;">持仓: 10只 | 待执行信号: 10条</p>
+      </div>
+      <div style="border:2px solid #e65100;border-radius:8px;padding:12px;">
+        <h4 style="color:#e65100;margin:0 0 8px;">小市 (事件驱动)</h4>
+        <p style="font-size:11px;color:#888;">CAGR: 待测 | Sharpe: 待测 | DD: 待测</p>
+        <div style="background:#fff3e0;height:80px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#e65100;">权益曲线图</div>
+        <p style="font-size:11px;margin-top:8px;">持仓: 10只 | 入场信号: N条</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:16px;">
+  <div class="mockup-header">每日运行流程</div>
+  <div class="mockup-body" style="font-size:13px;">
+    <p><strong>15:30 收盘后：</strong></p>
+    <code>python scripts/run_daily_paper.py --account-id 15 --run-id 2</code>  ← 舞<br>
+    <code>python scripts/run_small_cap_paper.py --account-id 16 --run-id 3</code>  ← 小市<br>
+    <p style="margin-top:8px;">两条独立运行，互不影响。各自写各自的 paper_* 表。</p>
+  </div>
+</div>
+
+<div class="section">
+  <h3>确认这个设计方案？</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>确认，开始实现</h3>
+      <p>按上述方案：新建3个文件 + 修改2个Web文件 + DB种子数据。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>需要调整</h3>
+      <p>对某些设计有不同想法。</p>
+    </div>
+  </div>
+</div>

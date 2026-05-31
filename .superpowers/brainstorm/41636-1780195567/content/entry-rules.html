@@ -1,0 +1,54 @@
+<h2>小市值事件驱动：入场/出场规则</h2>
+<p class="subtitle">基于参考策略，以下是需要确认的核心参数</p>
+
+<div class="mockup">
+  <div class="mockup-header">入场条件（需全部满足）</div>
+  <div class="mockup-body" style="font-size:13px;line-height:1.8;">
+    ✅ 候选池：最小市值N只（排除688/300/4/8、ST、次新&lt;375天）<br>
+    ✅ 今日开盘 &lt; 昨日最低价<br>
+    ✅ 开盘跌幅 &gt; 0.75%（跳空低开）<br>
+    ✅ 近4日振幅 &lt; 10%（非高波动）<br>
+    ✅ 昨收 &gt; 5日均线（趋势向上）<br>
+    ✅ 昨日非涨停<br>
+    ✅ 行业分散：每行业最多1只
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:16px;">
+  <div class="mockup-header">出场条件</div>
+  <div class="mockup-body" style="font-size:13px;line-height:1.8;">
+    🔴 硬止损：亏损 ≤ -3%<br>
+    🟡 破开盘价：当日收盘价 &lt; 开盘价<br>
+    🟢 线性移动止盈：涨1%→容忍回撤0.5%，涨10%→容忍2%<br>
+    ⚪ 跌停不清仓（延至次日）<br>
+    🔵 季节空仓：1月/4月/12.20-31/3.20-31
+  </div>
+</div>
+
+<div class="section">
+  <h3>需要调整的参数？</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>完全按参考策略 (推荐)</h3>
+      <p>入场7条件 + 出场4条件，参数不变。先跑出基线再迭代。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>简化版</h3>
+      <p>只保留核心3条件(低开>0.75%+趋势向上+行业分散) + 硬止损+移动止盈，去掉振幅和5日均线限制。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>结合ML打分</h3>
+      <p>在入场条件中增加ML预测评分作为筛选，高低开+ML高分才买入。</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,44 @@
+<h2>日内执行模拟</h2>
+<p class="subtitle">参考策略用 9:30 入场 + 11:30/14:50 出场，但我们的 DB 只有日线 OHLCV</p>
+
+<div class="mockup">
+  <div class="mockup-header">可用数据 vs 需要的数据</div>
+  <div class="mockup-body">
+    <table style="width:100%;font-size:13px;">
+      <tr style="background:#f5f5f5;"><th>参考策略需要</th><th>我们有</th><th>替代方案</th></tr>
+      <tr><td>9:30 开盘价入场</td><td>✅ open 列</td><td>直接用开盘价判断信号、收盘价成交</td></tr>
+      <tr><td>盘中最高价(移动止盈)</td><td>✅ high 列</td><td>用当日最高价作为代理</td></tr>
+      <tr><td>11:30 破开盘价清仓</td><td>❌ 无日内价</td><td>收盘价<开盘价→次日开盘清仓</td></tr>
+      <tr><td>14:56 涨停开板监控</td><td>❌ 无分钟线</td><td>收盘价<涨停价→次日开盘清仓</td></tr>
+      <tr><td>买一档口流动性</td><td>❌ 无L2数据</td><td>用日均成交额>500万代替</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="section">
+  <h3>执行时点怎么选？</h3>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>次日开盘执行 (推荐)</h3>
+      <p>T日收盘后扫描→发现信号→T+1日以开盘价买入。出场同理：T日触发→T+1日开盘卖出。更接近实盘，但与参考回测可能有偏差。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>当日收盘执行</h3>
+      <p>T日以当日收盘价模拟入场和出场。与舞策略的回测逻辑一致(回测偏差小)，但实盘无法做到。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>混合：入场当日收盘，出场次日开盘</h3>
+      <p>入场保守(涨停买不到)→当日收盘。出场乐观(跌停卖不掉)→次日开盘。折中方案。</p>
+    </div>
+  </div>
+</div>
