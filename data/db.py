@@ -78,6 +78,28 @@ CREATE TABLE IF NOT EXISTS etf_daily (
 );
 """
 
+# DDL —— ETF 三因子监测结果
+DDL_ETF_MONITOR_DAILY = """
+CREATE TABLE IF NOT EXISTS etf_monitor_daily (
+    id          SERIAL PRIMARY KEY,
+    date        DATE NOT NULL,
+    code        VARCHAR(10) NOT NULL,
+    name        VARCHAR(50),
+    close       DOUBLE PRECISION,
+    chg_pct     DOUBLE PRECISION,
+    volume_ma20 DOUBLE PRECISION,
+    vol_ratio   DOUBLE PRECISION,
+    vol_prob    DOUBLE PRECISION,
+    dir_prob    DOUBLE PRECISION,
+    share_prob  DOUBLE PRECISION,
+    shares_delta_pct DOUBLE PRECISION,
+    composite_prob DOUBLE PRECISION,
+    signal_level VARCHAR(10),
+    idx_chg     DOUBLE PRECISION,
+    UNIQUE (date, code)
+);
+"""
+
 # DDL —— 基金基本信息
 DDL_FUND_BASIC = """
 CREATE TABLE IF NOT EXISTS fund_basic (
@@ -788,6 +810,7 @@ def init_db() -> None:
         # ETF 表已启用
         conn.execute(text(DDL_ETF_BASIC))
         conn.execute(text(DDL_ETF_DAILY))
+        conn.execute(text(DDL_ETF_MONITOR_DAILY))
         # conn.execute(text(DDL_FUND_BASIC))
         # conn.execute(text(DDL_FUND_NAV))
         conn.execute(text(DDL_STOCK_TICK))

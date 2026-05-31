@@ -1,13 +1,16 @@
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+"""ETF 三因子监测页面路由。"""
+import json
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 from data.db import get_engine
-from etf_monitor.config import ETFS
+from web.templates_loader import templates
 
 router = APIRouter()
 
+
 @router.get("/etf", response_class=HTMLResponse)
-async def etf_monitor_page():
+async def etf_monitor_page(request: Request):
     engine = get_engine()
     results = []
     try:
@@ -20,30 +23,49 @@ async def etf_monitor_page():
                 ORDER BY code
             """)).fetchall()
         for r in rows:
-            results.append(dict(zip(
-                ["code","name","close","chg_pct","vol_ratio","vol_prob","dir_prob",
-                 "share_prob","composite_prob","signal_level","date"], r)))
+            d = dict(zip(
+                ["code", "name", "close", "chg_pct", "vol_ratio", "vol_prob",
+                 "dir_prob", "share_prob", "composite_prob", "signal_level", "date"], r))
+            d["signal_color"] = {"high": "#c62828", "mid": "#e65100", "normal": "#2e7d32"}.get(
+                d.get("signal_level", ""), "#666")
+            results.append(d)
     except Exception:
         pass
     engine.dispose()
 
-    rows_html = ""
-    for r in results:
-        sig_color = {"high":"#c62828","mid":"#e65100","normal":"#2e7d32"}.get(r.get("signal_level",""),"#666")
-        sp = f"{r['share_prob']:.0f}" if r.get('share_prob') else "—"
-        rows_html += f"""<tr>
-            <td>{r['code']}</td><td>{r['name']}</td>
-            <td>{r.get('chg_pct',0):+.2f}%</td><td>{r.get('vol_ratio',0):.2f}x</td>
-            <td>{r.get('vol_prob',0):.0f}</td><td>{r.get('dir_prob',0):.0f}</td>
-            <td>{sp}</td>
-            <td style="color:{sig_color};font-weight:bold;">{r.get('composite_prob',0):.0f}%</td>
-            <td>{r.get('signal_level','?')}</td></tr>"""
+    high_count = sum(1 for r in results if r.get("signal_level") == "high")
+    mid_count = sum(1 for r in results if r.get("signal_level") == "mid")
+    normal_count = sum(1 for r in results if r.get("signal_level") == "normal")
 
-    return HTMLResponse(f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>ETF监测</title></head>
-<body style="font-family:-apple-system,sans-serif;max-width:1000px;margin:0 auto;padding:20px;">
-<h2>ETF 三因子监测 — 国家队资金信号</h2>
-<p style="color:#999;">7只宽基ETF × 量能/方向/份额 三维监测</p>
-<table style="width:100%;border-collapse:collapse;font-size:13px;">
-<thead><tr style="background:#f5f5f5;"><th>代码</th><th>名称</th><th>涨跌</th><th>倍量</th><th>量能P</th><th>方向P</th><th>份额P</th><th>综合P</th><th>信号</th></tr></thead>
-<tbody>{rows_html if rows_html else '<tr><td colspan="9" style="color:#999;padding:20px;">暂无数据，运行 scripts/run_etf_monitor.py 生成</td></tr>'}</tbody>
-</table></body></html>""")
+    return templates.TemplateResponse(request, "etf_monitor.html", {
+        "active_page": "etf",
+        "rows": results,
+        "high_count": high_count,
+        "mid_count": mid_count,
+        "normal_count": normal_count,
+    })
+
+
+@router.get("/api/etf/kline/{code}")
+async def etf_kline(code: str, days: int = 60):
+    """返回 ETF K 线数据供 ECharts 渲染。"""
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT trade_date, open, high, low, close, volume
+                FROM etf_daily WHERE code = :code
+                ORDER BY trade_date DESC LIMIT :days
+            """), {"code": code, "days": days}).fetchall()
+            dates = [str(r[0]) for r in reversed(rows)]
+            ohlc = [[float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in reversed(rows)]
+            volumes = [int(r[5]) for r in reversed(rows)]
+            name_row = conn.execute(text("SELECT name FROM etf_basic WHERE code = :code"),
+                                    {"code": code}).fetchone()
+            name = name_row[0] if name_row else code
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"ETF kline error for {code}: {e}")
+        dates, ohlc, volumes, name = [], [], [], code
+    engine.dispose()
+    return JSONResponse({"code": code, "name": name, "dates": dates, "ohlc": ohlc, "volumes": volumes})

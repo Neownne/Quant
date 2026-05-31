@@ -23,11 +23,11 @@ from notify import send_report
 
 
 def fetch_kline(engine, code, limit=60):
-    """从 stock_daily 表获取ETF日线（ETF日线存stock_daily表或etf_daily表）。"""
+    """从 etf_daily 表获取ETF日线。"""
     try:
         df = pd.read_sql(text(f"""
             SELECT trade_date as date, open, high, low, close, volume
-            FROM stock_daily WHERE code = '{code}'
+            FROM etf_daily WHERE code = '{code}'
             ORDER BY trade_date DESC LIMIT {limit}
         """), engine)
         return df.sort_values("date") if not df.empty else pd.DataFrame()
@@ -141,8 +141,30 @@ def main():
             kline_map[code] = kl
     idx_kl = fetch_idx_kline(engine, 60)
 
-    # 分析
-    shares_map = {}  # ETF份额数据需AKShare实时拉取，暂用空
+    # 拉取 ETF 份额数据
+    shares_map = {}
+    try:
+        import akshare as ak
+        for code, info in ETFS.items():
+            d = float(info.get("shares_yi", 0))
+            # 份额数据：缓存昨日值计算日变化率
+            cache_file = f"output/etf_shares_{code}.txt"
+            prev = 0.0
+            try:
+                with open(cache_file) as f:
+                    prev = float(f.read().strip())
+            except Exception:
+                pass
+            delta_pct = (d - prev) / abs(prev) * 100 if prev > 0 else 0
+            shares_map[code] = delta_pct
+            # 缓存今日值
+            os.makedirs("output", exist_ok=True)
+            with open(cache_file, "w") as f:
+                f.write(str(d))
+        logger.info(f"份额数据: {len(shares_map)} 只 (缓存模式，需先有昨日数据)")
+    except Exception as e:
+        logger.warning(f"份额数据获取失败: {e}")
+
     results = analyze_all(kline_map, idx_kl, shares_map)
 
     # 打印结果
@@ -155,6 +177,39 @@ def main():
                 f"量能{r['vol_prob']:.0f} 方向{r['dir_prob']:.0f} "
                 f"综合{r['composite_prob']:.0f}% [{r['signal_level']}]"
             )
+
+    # 保存到 DB
+    try:
+        with engine.begin() as conn:
+            for r in results:
+                if r.get("error"):
+                    continue
+                # Convert numpy types to Python native
+                def _py(v):
+                    if v is None: return None
+                    if hasattr(v, 'item'): return v.item()
+                    return v
+                conn.execute(text("""
+                    INSERT INTO etf_monitor_daily (date, code, name, close, chg_pct,
+                        volume_ma20, vol_ratio, vol_prob, dir_prob, share_prob,
+                        shares_delta_pct, composite_prob, signal_level)
+                    VALUES (:d, :code, :name, :close, :chg, :vma, :vr, :vp, :dp, :sp, :sdp, :cp, :sl)
+                    ON CONFLICT (date, code) DO UPDATE SET
+                        vol_ratio=:vr2, vol_prob=:vp2, dir_prob=:dp2, composite_prob=:cp2, signal_level=:sl2
+                """), {
+                    "d": target_date, "code": r["code"], "name": r["name"],
+                    "close": _py(r.get("close")), "chg": _py(r.get("chg_pct")),
+                    "vma": _py(r.get("volume_ma20")), "vr": _py(r.get("vol_ratio")),
+                    "vp": _py(r.get("vol_prob")), "dp": _py(r.get("dir_prob")),
+                    "sp": _py(r.get("share_prob")), "sdp": _py(r.get("shares_delta_pct")),
+                    "cp": _py(r.get("composite_prob")), "sl": r.get("signal_level"),
+                    "vr2": _py(r.get("vol_ratio")), "vp2": _py(r.get("vol_prob")),
+                    "dp2": _py(r.get("dir_prob")), "cp2": _py(r.get("composite_prob")),
+                    "sl2": r.get("signal_level"),
+                })
+        logger.info(f"已写入 etf_monitor_daily: {len(results)} 条")
+    except Exception as e:
+        logger.error(f"DB写入失败: {e}")
 
     # HTML 报告
     html = generate_html_report(results, target_date)
