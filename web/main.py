@@ -7,7 +7,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from web.routes import dashboard, backtest, paper, data_status, factors, api
+from web.routes import dashboard, backtest, paper, data_status, factors, api, etf_monitor
 
 app = FastAPI(title="Quant Monitor")
 
@@ -19,3 +19,4 @@ app.include_router(paper.router)
 app.include_router(data_status.router)
 app.include_router(factors.router)
 app.include_router(api.router)
+app.include_router(etf_monitor.router)

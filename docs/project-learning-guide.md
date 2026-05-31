@@ -1,17 +1,21 @@
 # Quant 项目学习指南
 
 > 帮助你快速消化理解整个项目的架构、数据流和关键设计决策。
-> 最后更新：2026-05-28 (v1.12)
+> 最后更新：2026-05-31 (v1.4)
 
 ---
 
 ## 一、项目是什么？
 
-一个 **A 股量化交易系统**，核心是一条 ML 选股管线：每天用机器学习模型对全市场股票打分排序，经过排雷过滤和 NDrop 增量调仓，选出最可能上涨的 Top-N 只股票，配合组合级风控（回撤减仓/清仓/指数大跌空仓），模拟实盘买卖。
+一个 **A 股量化交易系统**，包含两条策略线：
+1. **舞**（ML 因子选股）：5 状态市场检测 + Regime 自适应 + 动态多因子，日频调仓
+2. **小市**（事件驱动）：低开反转 + 线性移动止盈（框架就绪，待 QMT 数据）
 
-当前版本：**v1.12**
+外加 **ETF 三因子监测**：追踪 7 只宽基 ETF 的国家队资金信号（量能/方向/份额）。
 
-技术栈：Python + PostgreSQL + FastAPI + HTMX + AKShare/Sina API + backtrader + XGBoost/LightGBM + 多周期集成
+当前版本：**舞 v1.4**（CAGR 46.1%, Sharpe 1.40, MaxDD 24.8%）
+
+技术栈：Python + PostgreSQL + FastAPI + HTMX/ECharts + AKShare + XGBoost/LightGBM + Regime自适应
 
 ---
 
@@ -25,7 +29,7 @@
                            │ data/fetcher.py (获取)
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                   PostgreSQL 数据库（16 张表）                  │
+│                   PostgreSQL 数据库（18 张表）                  │
 │  行情: stock_daily / stock_minute / index_daily / stock_tick     │
 │  基本面: stock_basic / stock_daily_extra / stock_financial       │
 │          stock_shareholder / stock_pledge / stock_industry        │

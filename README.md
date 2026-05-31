@@ -676,6 +676,7 @@ v2.0 完成了从 Streamlit 单体应用到 FastAPI + HTMX 分层架构的迁移
 | 日期 | 变更内容 |
 |---|---|---|
 
+| 2026-05-31 | **ETF 三因子监测**：新增 `etf_monitor/` + `notify/` 模块，追踪7只宽基ETF的国家队资金信号。Web端增加ETF监测页面。邮件通知功能(SMTP QQ邮箱)。 |
 | 2026-05-30 | **v1.4 实盘误差消除**：跌停顺延(防跌停封死无法卖出)、补全extra_data(财务/估值/股东/质押)、模拟盘/回测完全打通。CAGR 46.1%/Sharpe 1.40/MaxDD 24.8%/零清仓。策略定名「舞」。 |
 | 2026-05-30 | **v1.3 舞策略上线**：5状态市场检测(强牛/弱牛/快熊/慢熊/震荡) + 按状态自适应调仓频率/仓位/止损。新增3个纯价格动量因子。模拟盘系统V2(paper_runs/signals/positions)打通,`run_daily_paper.py`每日驱动。回测CAGR 44.6%/Sharpe 1.34/MaxDD 25.8%。Web UI: 权益曲线+持仓明细+市场状态+版本号。 |
 | 2026-05-29 | **v1.12 参数优化：日频网格搜索**：分钟数据覆盖率不足，对日频管线做 6 维 72 组参数网格搜索（多周期/Regime/行业中性化/持仓数/调仓频率）。结论：MH+行业中性化+15只+周度调仓为最优均衡组合（CAGR 110.3%、Sharpe 2.99、MaxDD 16.0%）。`scripts/run_ml_backtest.py` 默认参数更新：`--multi-horizon`/`--industry-neutralize`/`--dynamic` 默认开启，`--top-n` 默认 15，增加 `--no-*` 关闭选项。新增 `scripts/grid_search.py` 通用网格搜索工具。 |

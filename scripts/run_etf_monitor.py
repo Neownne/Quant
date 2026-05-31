@@ -1,0 +1,175 @@
+#!/usr/bin/env python
+"""ETF 三因子监测 — 国家队资金信号扫描。
+
+用法:
+    python scripts/run_etf_monitor.py                    # 最近交易日分析
+    python scripts/run_etf_monitor.py --send             # 分析 + 发邮件
+    python scripts/run_etf_monitor.py --date 2026-05-30  # 指定日期
+    python scripts/run_etf_monitor.py --stats            # DB统计
+"""
+import sys, os, argparse, json
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pandas as pd
+import numpy as np
+from datetime import date, timedelta
+from loguru import logger
+from sqlalchemy import text
+
+from data.db import get_engine
+from etf_monitor.config import ETFS, SIGNAL_HIGH, SIGNAL_MID
+from etf_monitor.engine import analyze_all
+from notify import send_report
+
+
+def fetch_kline(engine, code, limit=60):
+    """从 stock_daily 表获取ETF日线（ETF日线存stock_daily表或etf_daily表）。"""
+    try:
+        df = pd.read_sql(text(f"""
+            SELECT trade_date as date, open, high, low, close, volume
+            FROM stock_daily WHERE code = '{code}'
+            ORDER BY trade_date DESC LIMIT {limit}
+        """), engine)
+        return df.sort_values("date") if not df.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def fetch_idx_kline(engine, limit=60):
+    """获取沪深300指数日线。"""
+    try:
+        df = pd.read_sql(text(f"""
+            SELECT trade_date as date, close FROM index_daily
+            WHERE code = '000300' ORDER BY trade_date DESC LIMIT {limit}
+        """), engine)
+        return df.sort_values("date") if not df.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def generate_html_report(results, target_date):
+    """生成 HTML 报告。"""
+    high_count = sum(1 for r in results if r.get("signal_level") == "high")
+    mid_count = sum(1 for r in results if r.get("signal_level") == "mid")
+    normal_count = sum(1 for r in results if r.get("signal_level") == "normal")
+
+    # Overall signal
+    if high_count >= 3:
+        banner = ("🔴 高确信信号", "#c62828")
+    elif high_count + mid_count >= 3:
+        banner = ("🟡 中等信号", "#e65100")
+    else:
+        banner = ("⚪ 正常", "#2e7d32")
+
+    rows_html = ""
+    for r in results:
+        if r.get("error"):
+            rows_html += f"<tr><td>{r['code']}</td><td>{r['name']}</td><td colspan='10' style='color:#999'>{r['error']}</td></tr>"
+            continue
+        sig_color = {"high": "#c62828", "mid": "#e65100", "normal": "#2e7d32"}.get(r.get("signal_level", ""), "#666")
+        sp = r.get("share_prob") or "—"
+        rows_html += f"""<tr>
+            <td>{r['code']}</td><td>{r['name']}</td>
+            <td>{r.get('chg_pct',0):+.2f}%</td>
+            <td>{r.get('vol_ratio',0):.2f}x</td>
+            <td>{r.get('vol_prob',0):.0f}</td>
+            <td>{r.get('dir_prob',0):.0f}</td>
+            <td>{sp}</td>
+            <td style='color:{sig_color};font-weight:bold;'>{r.get('composite_prob',0):.0f}%</td>
+            <td>{r.get('signal_level','?')}</td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ETF 三因子监测 {target_date}</title>
+<style>
+    body {{ font-family: -apple-system, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }}
+    .banner {{ padding: 16px; border-radius: 8px; color: white; font-size: 18px; margin-bottom: 16px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 20px; }}
+    .card {{ background: #f5f5f5; padding: 12px; border-radius: 6px; text-align: center; }}
+    .card .num {{ font-size: 24px; font-weight: bold; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th,td {{ padding: 6px 8px; text-align: center; border-bottom: 1px solid #eee; }}
+    th {{ background: #f5f5f5; }}
+</style></head><body>
+<h2>ETF 三因子监测 — {target_date}</h2>
+<div class="banner" style="background:{banner[1]};">{banner[0]} (高确信{high_count}/中等{mid_count}/正常{normal_count})</div>
+<div class="cards">
+    <div class="card"><div class="num" style="color:#c62828;">{high_count}</div>高确信</div>
+    <div class="card"><div class="num" style="color:#e65100;">{mid_count}</div>中等</div>
+    <div class="card"><div class="num" style="color:#2e7d32;">{normal_count}</div>正常</div>
+    <div class="card"><div class="num">{len(results)}</div>监控ETF</div>
+</div>
+<table><thead><tr>
+    <th>代码</th><th>名称</th><th>涨跌</th><th>倍量</th><th>量能P</th><th>方向P</th><th>份额P</th><th>综合P</th><th>信号</th>
+</tr></thead><tbody>{rows_html}</tbody></table>
+<p style="color:#999;font-size:11px;margin-top:20px;">Quant 项目自动生成 | 数据来源: AKShare/腾讯财经</p>
+</body></html>"""
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ETF 三因子监测")
+    parser.add_argument("--date", help="分析日期 (YYYY-MM-DD), 默认最近交易日")
+    parser.add_argument("--send", action="store_true", help="发送邮件报告")
+    parser.add_argument("--stats", action="store_true", help="显示数据库统计")
+    args = parser.parse_args()
+
+    engine = get_engine()
+
+    if args.stats:
+        try:
+            cnt = pd.read_sql(text("SELECT COUNT(*) FROM etf_monitor_daily"), engine).iloc[0,0]
+            print(f"etf_monitor_daily: {cnt} 条记录")
+        except Exception as e:
+            print(f"表不存在或查询失败: {e}")
+        engine.dispose()
+        return
+
+    # 确定分析日期
+    if args.date:
+        target_date = args.date
+    else:
+        latest = pd.read_sql(text("SELECT MAX(trade_date) FROM stock_daily"), engine).iloc[0,0]
+        target_date = str(latest)
+
+    logger.info(f"ETF 三因子分析: {target_date}")
+
+    # 获取 K 线数据
+    kline_map = {}
+    for code in ETFS:
+        kl = fetch_kline(engine, code, 60)
+        if not kl.empty:
+            kline_map[code] = kl
+    idx_kl = fetch_idx_kline(engine, 60)
+
+    # 分析
+    shares_map = {}  # ETF份额数据需AKShare实时拉取，暂用空
+    results = analyze_all(kline_map, idx_kl, shares_map)
+
+    # 打印结果
+    for r in results:
+        if r.get("error"):
+            logger.warning(f"  {r['code']} {r['name']}: {r['error']}")
+        else:
+            logger.info(
+                f"  {r['code']} {r['name']}: "
+                f"量能{r['vol_prob']:.0f} 方向{r['dir_prob']:.0f} "
+                f"综合{r['composite_prob']:.0f}% [{r['signal_level']}]"
+            )
+
+    # HTML 报告
+    html = generate_html_report(results, target_date)
+    report_path = f"output/etf_report_{target_date}.html"
+    os.makedirs("output", exist_ok=True)
+    with open(report_path, "w") as f:
+        f.write(html)
+    logger.info(f"报告已保存: {report_path}")
+
+    # 发送邮件
+    if args.send:
+        send_report(html, subject=f"ETF 三因子监测 {target_date}")
+
+    engine.dispose()
+
+
+if __name__ == "__main__":
+    main()

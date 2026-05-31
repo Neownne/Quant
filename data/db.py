@@ -785,9 +785,9 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_BASIC))
         conn.execute(text(DDL_STOCK_DAILY))
         conn.execute(text(DDL_INDEX_DAILY))
-        # -- ETF/基金表暂时禁用 --
-        # conn.execute(text(DDL_ETF_BASIC))
-        # conn.execute(text(DDL_ETF_DAILY))
+        # ETF 表已启用
+        conn.execute(text(DDL_ETF_BASIC))
+        conn.execute(text(DDL_ETF_DAILY))
         # conn.execute(text(DDL_FUND_BASIC))
         # conn.execute(text(DDL_FUND_NAV))
         conn.execute(text(DDL_STOCK_TICK))

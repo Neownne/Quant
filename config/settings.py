@@ -85,3 +85,13 @@ class AccountConfig:
     DEFAULT_STOP_LOSS = TradingConfig.STOP_LOSS_PCT
     DEFAULT_PORTFOLIO_DD = TradingConfig.PORTFOLIO_DD_THRESHOLD
     DEFAULT_MAX_DD = TradingConfig.MAX_DD_LIMIT
+
+
+class NotifyConfig:
+    """SMTP 邮件通知配置"""
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASS = os.getenv("SMTP_PASS", "")
+    EMAIL_FROM = os.getenv("EMAIL_FROM", "")
+    EMAIL_TO = os.getenv("EMAIL_TO", "")
