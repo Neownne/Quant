@@ -1,150 +1,156 @@
-"""ETF 三因子分析引擎：量能/方向/份额 → 综合概率。"""
+"""ETF 三因子分析引擎（与 etf-three-factor-v7.skill 一致）。
 
+量能概率 50% + 方向概率 20% + 份额概率 30%。
+"""
 import numpy as np
 import pandas as pd
-from loguru import logger
 
 
-def compute_volume_prob(vol_ratio: float) -> float:
-    """倍量→概率分段线性映射。
+def vprob(vol_ratio: float) -> float:
+    """量能概率 — 与 etf_v7_threefactor.py:vprob 一致的分段映射。
 
-    1.0x → 50 (正常)
-    1.5x → 65
-    2.0x → 80
-    2.5x → 90
-    3.0x → 100 (钳制上限)
+    <0.5x → 0-5, 0.5-1→5-17, 1-1.3→17-35, 1.3-1.5→35-55,
+    1.5-2→55-80, 2-3→80-95, 3-5→95-98, >5→98-100
     """
-    if vol_ratio <= 1.0:
-        return 50.0
-    if vol_ratio >= 3.0:
-        return 100.0
-    # 线性: 1.0→50, 3.0→100
-    return 50.0 + (vol_ratio - 1.0) / 2.0 * 50.0
+    r = vol_ratio
+    if r < 0.5:   return max(0, r / 0.5 * 5)
+    if r < 1.0:   return 5 + (r - 0.5) / 0.5 * 12
+    if r < 1.3:   return 17 + (r - 1) / 0.3 * 18
+    if r < 1.5:   return 35 + (r - 1.3) / 0.2 * 20
+    if r < 2.0:   return 55 + (r - 1.5) / 0.5 * 25
+    if r < 3.0:   return 80 + (r - 2) / 1.0 * 15
+    if r < 5.0:   return 95 + (r - 3) / 2.0 * 3
+    return min(100, 98 + (r - 5) / 5.0 * 2)
 
 
-def compute_direction_prob(
-    etf_chg: float,
-    t5_etf: float,
-    t5_idx: float,
-    vol_ratio: float,
-    idx_chg: float,
-) -> float:
-    """方向概率 = 4子维度加权 + 普涨折扣。
+def dprob(chg: float, t5_etf: float, t5_idx: float, vr: float, idx_chg: float) -> float:
+    """方向概率 — 与 etf_v7_threefactor.py:dprob 一致。
 
-    子维度:
-    - 当日涨跌 (30%): chg>0→100, chg≤0→0
-    - 近5日强弱 (30%): t5_etf - t5_idx
-    - 量价配合 (20%): chg>0且放量→100
-    - 指数环境 (20%): idx_chg映射
-    普涨折扣: ETF+指数同涨→×0.8 (可能是普涨而非国家队)
+    4子维度(f1/f2/f3/f4)加权 + 普涨折扣(rally_discount)。
     """
-    # 当日涨跌
-    d1 = 100.0 if etf_chg > 0 else 0.0
-
-    # 近5日强弱 (ETF vs 指数)
-    alpha = t5_etf - t5_idx
-    d2 = min(100.0, max(0.0, 50.0 + alpha * 100))
-
-    # 量价配合
-    d3 = 100.0 if (etf_chg > 0 and vol_ratio > 1.2) else (50.0 if vol_ratio > 1.0 else 0.0)
-
-    # 指数环境
-    d4 = min(100.0, max(0.0, 50.0 + idx_chg * 200))
-
-    prob = d1 * 0.30 + d2 * 0.30 + d3 * 0.20 + d4 * 0.20
-
     # 普涨折扣
-    if etf_chg > 0 and idx_chg > 0:
-        prob *= 0.85
+    if idx_chg > 2.0:       rally_discount = 0.60
+    elif idx_chg > 1.5:     rally_discount = 0.70
+    elif idx_chg > 1.0:     rally_discount = 0.80
+    elif idx_chg > 0.5:     rally_discount = 0.90
+    else:                   rally_discount = 1.0
 
-    return min(100.0, max(0.0, prob))
+    # f1: 涨跌×量价×大盘环境
+    if chg > 0.3 and t5_idx < -1:             f1 = 95
+    elif chg > 0 and t5_idx < -0.5:           f1 = 85
+    elif chg > 0 and t5_idx < 0:              f1 = 70
+    elif abs(chg) < 0.15 and t5_idx < -1:     f1 = 80
+    elif abs(chg) < 0.3 and t5_idx < -0.5:    f1 = 65
+    elif chg > 1 and vr > 1.5 and idx_chg > 1: f1 = 25
+    elif chg > 1 and vr > 1.5:                f1 = 45
+    elif chg > 0.5 and vr > 1.3 and idx_chg > 1: f1 = 35
+    elif chg > 0.5 and vr > 1.3:              f1 = 50
+    elif chg > 0:                             f1 = 40
+    elif chg < -1.5 and vr > 2:               f1 = 8
+    elif chg < -0.5 and vr > 1.5:             f1 = 15
+    else:                                     f1 = 25
+
+    # f2: ETF vs 指数超额
+    gap = t5_etf - t5_idx
+    if gap > 3:      f2 = 95
+    elif gap > 2:    f2 = 85
+    elif gap > 1.2:  f2 = 75
+    elif gap > 0.6:  f2 = 60
+    elif gap > 0.2:  f2 = 50
+    elif gap > -0.2: f2 = 40
+    elif gap > -0.6: f2 = 30
+    else:            f2 = 15
+
+    # f3: 指数超跌 bounces
+    if t5_idx < -4:     f3 = 95
+    elif t5_idx < -3:   f3 = 90
+    elif t5_idx < -2:   f3 = 80
+    elif t5_idx < -1:   f3 = 70
+    elif t5_idx < -0.5: f3 = 55
+    elif t5_idx < 0:    f3 = 45
+    elif t5_idx < 1:    f3 = 35
+    elif t5_idx < 3:    f3 = 20
+    else:               f3 = 10
+
+    f4 = 35  # 基准分
+
+    raw = f1 * 0.4 + f2 * 0.3 + f3 * 0.2 + f4 * 0.1
+    return round(raw * rally_discount, 1)
 
 
-def compute_share_prob(delta_pct: float) -> float:
-    """份额变化%→概率映射。
+def sprob(share_delta_pct: float | None) -> float | None:
+    """份额概率 — 与 etf_v7_threefactor.py:sprob 一致。
 
-    0% → 50, 5% → 70, 10% → 85, 15%+ → 95
+    >10%→95, >5%→80-95, >3%→65-80, >1%→45-65, 0-1%→30-45,
+    -1-0%→15-30, -5--1%→5-15, <-5%→0-5
     """
-    if delta_pct <= 0:
-        return 50.0
-    if delta_pct >= 15:
-        return 95.0
-    # 分段线性
-    if delta_pct <= 5:
-        return 50.0 + delta_pct / 5.0 * 20.0
-    if delta_pct <= 10:
-        return 70.0 + (delta_pct - 5.0) / 5.0 * 15.0
-    return 85.0 + (delta_pct - 10.0) / 5.0 * 10.0
+    if share_delta_pct is None:
+        return None
+    ap = abs(share_delta_pct)
+    if share_delta_pct > 10:   return 95.0
+    if share_delta_pct > 5:    return 80 + (share_delta_pct - 5) / 5 * 15
+    if share_delta_pct > 3:    return 65 + (share_delta_pct - 3) / 2 * 15
+    if share_delta_pct > 1:    return 45 + (share_delta_pct - 1) / 2 * 20
+    if share_delta_pct > 0:    return 30 + share_delta_pct / 1 * 15
+    if share_delta_pct > -1:   return 15 + (share_delta_pct + 1) / 1 * 15
+    if share_delta_pct > -5:   return 5 + (share_delta_pct + 5) / 4 * 10
+    return max(0, 5 + (share_delta_pct + 5) / 5 * 5)
 
 
-def analyze_single(
-    code: str, name: str,
-    kline: pd.DataFrame,
-    idx_kline: pd.DataFrame,
-    shares_delta_pct: float | None = None,
-) -> dict:
-    """对单只 ETF 执行三因子分析。"""
-    if kline.empty or len(kline) < 21:
-        return {"code": code, "name": name, "error": "K线数据不足"}
+def analyze_single(code: str, name: str, kline: pd.DataFrame,
+                   idx_kline: pd.DataFrame, shares_delta_pct: float | None = None) -> dict:
+    """单 ETF 三因子分析 — 与 etf_v7_threefactor.py:analyze_all 一致。"""
+    if kline.empty or len(kline) < 22:
+        return {"code": code, "name": name, "error": "K线数据不足(需≥22天)"}
 
     close = kline["close"].astype(float)
     volume = kline["volume"].astype(float)
-    latest_close = close.iloc[-1]
-    prev_close = close.iloc[-2]
+    idx_close = idx_kline["close"].astype(float) if not idx_kline.empty else None
 
-    # 量能因子
-    vol_ma20 = volume.rolling(20).mean().iloc[-1]
-    vol_ratio = volume.iloc[-1] / vol_ma20 if vol_ma20 > 0 else 1.0
-    vol_prob = compute_volume_prob(vol_ratio)
-
-    # 方向因子
-    etf_chg = (latest_close / prev_close - 1) * 100
-    t5_etf = (close.iloc[-1] / close.iloc[-6] - 1) * 100 if len(close) >= 6 else 0
-    idx_chg = 0.0
+    i = len(close) - 1  # latest day index
+    v = volume.iloc[i] / 10000
+    ma = volume.iloc[i-20:i].mean() / 10000
+    vr = v / ma if ma > 0 else 1.0
+    pc = close.iloc[i-1]
+    chg = (close.iloc[i] - pc) / pc * 100 if pc > 0 else 0
+    t5_etf = (close.iloc[i] - close.iloc[i-5]) / close.iloc[i-5] * 100 if i >= 5 and close.iloc[i-5] > 0 else 0
     t5_idx = 0.0
-    if not idx_kline.empty and len(idx_kline) >= 6:
-        idx_close = idx_kline["close"].astype(float)
-        idx_chg = (idx_close.iloc[-1] / idx_close.iloc[-2] - 1) * 100
-        t5_idx = (idx_close.iloc[-1] / idx_close.iloc[-6] - 1) * 100
-    dir_prob = compute_direction_prob(etf_chg, t5_etf, t5_idx, vol_ratio, idx_chg)
+    idx_chg = 0.0
+    if idx_close is not None and len(idx_close) > i:
+        ii = i
+        if len(idx_close) > ii and idx_close.iloc[ii-1] > 0:
+            idx_chg = (idx_close.iloc[ii] - idx_close.iloc[ii-1]) / idx_close.iloc[ii-1] * 100
+        if ii >= 5 and idx_close.iloc[ii-5] > 0:
+            t5_idx = (idx_close.iloc[ii] - idx_close.iloc[ii-5]) / idx_close.iloc[ii-5] * 100
 
-    # 份额因子
-    share_prob = compute_share_prob(shares_delta_pct) if shares_delta_pct is not None else None
+    vp = vprob(vr)
+    dp = dprob(chg, t5_etf, t5_idx, vr, idx_chg)
+    sp = sprob(shares_delta_pct)
 
-    # 综合概率
-    if share_prob is not None:
-        composite = vol_prob * 0.50 + dir_prob * 0.20 + share_prob * 0.30
+    if sp is not None:
+        cp = round(vp * 0.5 + dp * 0.2 + sp * 0.3, 1)
     else:
-        composite = vol_prob * 0.70 + dir_prob * 0.30
+        cp = round(vp * 0.7 + dp * 0.3, 1)
 
-    # 信号分级
-    if composite >= 70:
-        signal = "high"
-    elif composite >= 50:
-        signal = "mid"
-    else:
-        signal = "normal"
+    signal = "high" if cp >= 70 else ("mid" if cp >= 50 else "normal")
 
     return {
         "code": code, "name": name,
-        "close": round(float(latest_close), 3),
-        "chg_pct": round(etf_chg, 2),
-        "volume_ma20": round(float(vol_ma20), 0),
-        "vol_ratio": round(vol_ratio, 2),
-        "vol_prob": round(vol_prob, 1),
-        "dir_prob": round(dir_prob, 1),
-        "share_prob": round(share_prob, 1) if share_prob is not None else None,
+        "close": round(float(close.iloc[-1]), 3),
+        "chg_pct": round(chg, 2),
+        "volume_ma20": round(float(ma * 10000), 0),
+        "vol_ratio": round(vr, 2),
+        "vol_prob": round(vp, 1),
+        "dir_prob": round(dp, 1),
+        "share_prob": round(sp, 1) if sp is not None else None,
         "shares_delta_pct": round(shares_delta_pct, 2) if shares_delta_pct is not None else None,
-        "composite_prob": round(composite, 1),
+        "composite_prob": round(cp, 1),
         "signal_level": signal,
     }
 
 
-def analyze_all(
-    kline_map: dict[str, pd.DataFrame],
-    idx_kline: pd.DataFrame,
-    shares_map: dict[str, float],
-) -> list[dict]:
+def analyze_all(kline_map: dict[str, pd.DataFrame], idx_kline: pd.DataFrame,
+                shares_map: dict[str, float]) -> list[dict]:
     """批量分析全部 ETF。"""
     from etf_monitor.config import ETFS
     results = []
@@ -153,7 +159,6 @@ def analyze_all(
         if kl is None or kl.empty:
             results.append({"code": code, "name": info["name"], "error": "无K线数据"})
             continue
-        shares_delta = shares_map.get(code)
-        r = analyze_single(code, info["name"], kl, idx_kline, shares_delta)
+        r = analyze_single(code, info["name"], kl, idx_kline, shares_map.get(code))
         results.append(r)
     return results
