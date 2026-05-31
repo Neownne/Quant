@@ -105,7 +105,7 @@ class SmallCapEngine:
         """兼容DataFrame index和column的取值"""
         if hasattr(data, 'index') and code in data.index:
             return data.loc[code]
-        elif hasattr(data, 'loc'):
+        elif hasattr(data, 'loc') and 'code' in data.columns:
             rows = data[data["code"] == code]
             if not rows.empty:
                 return rows.iloc[0]
