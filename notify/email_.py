@@ -11,21 +11,26 @@ from config.settings import NotifyConfig
 
 
 def send_report(html_body: str, subject: str = "ETF 三因子监测报告") -> bool:
-    """发送 HTML 邮件报告。
+    """发送 HTML 邮件报告。支持逗号分隔的多收件人。
 
     返回 True 表示发送成功，失败返回 False（不抛异常）。
     """
+    recipients = [e.strip() for e in NotifyConfig.EMAIL_TO.split(",") if e.strip()]
+    if not recipients:
+        logger.error("未配置收件人")
+        return False
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = NotifyConfig.EMAIL_FROM
-    msg["To"] = NotifyConfig.EMAIL_TO
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         with smtplib.SMTP_SSL(NotifyConfig.SMTP_HOST, NotifyConfig.SMTP_PORT) as server:
             server.login(NotifyConfig.SMTP_USER, NotifyConfig.SMTP_PASS)
-            server.sendmail(NotifyConfig.EMAIL_FROM, [NotifyConfig.EMAIL_TO], msg.as_string())
-        logger.info(f"邮件已发送: {subject}")
+            server.sendmail(NotifyConfig.EMAIL_FROM, recipients, msg.as_string())
+        logger.info(f"邮件已发送: {subject} → {len(recipients)} 人")
         return True
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")

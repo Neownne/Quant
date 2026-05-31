@@ -219,9 +219,13 @@ def main():
         f.write(html)
     logger.info(f"报告已保存: {report_path}")
 
-    # 发送邮件
+    # 发送邮件（仅高确信时发送）
     if args.send:
-        send_report(html, subject=f"ETF 三因子监测 {target_date}")
+        hc = sum(1 for r in results if r.get("signal_level") == "high")
+        if hc > 0:
+            send_report(html, subject=f"ETF 三因子监测 {target_date} — {hc}只高确信")
+        else:
+            logger.info("无高确信信号，跳过邮件发送")
 
     engine.dispose()
 
