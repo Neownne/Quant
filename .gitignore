@@ -11,4 +11,5 @@ build/
 .vscode/
 .claude/
 output/
-learning/
+learning/__pycache__/
+output/

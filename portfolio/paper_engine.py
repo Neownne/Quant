@@ -81,7 +81,7 @@ class PaperEngine:
         # 交易成本
         self.commission = TradingConfig.COMMISSION
         self.stamp_duty = TradingConfig.STAMP_DUTY
-        self.slippage = 0.0015  # 模拟盘更保守(0.15%),含冲击成本
+        self.slippage = TradingConfig.SLIPPAGE  # 与回测一致(0.1%)
 
     # ── 公开接口 ──────────────────────────────────────────
 
@@ -303,7 +303,8 @@ class PaperEngine:
         for code in result["code"].unique():
             hist = ohlcv_lookup.get(code)
             if hist is not None:
-                prev_rows = hist[hist["trade_date"] <= trade_date].tail(1)
+                # 前日收盘价：trade_date 之前的最后一天
+                prev_rows = hist[hist["trade_date"] < trade_date].tail(1)
                 if not prev_rows.empty:
                     prev_close_map[code] = float(prev_rows["close"].iloc[0])
             day_data = ohlcv_data[
@@ -511,10 +512,12 @@ class PaperEngine:
                     r = conn.execute(text("""
                         INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                         VALUES (:rid, :sd, :sc, :ps, :rk)
+                        ON CONFLICT (run_id, signal_date, stock_code) DO UPDATE SET predicted_score=:ps2, rank=:rk2
                         RETURNING id
                     """), {
                         "rid": self.run_id, "sd": dt,
                         "sc": code, "ps": float(score), "rk": rank,
+                        "ps2": float(score), "rk2": rank,
                     }).fetchone()
                     signal_id = r[0]
                     daily_signals.append({

@@ -24,14 +24,24 @@
     <div id="paper-msg"></div>
 </div>
 
+<!-- 上排: v1.4 | v1.5 -->
 <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
     <div>
-        <h2 style="color:#1976d2;margin-bottom:12px;">舞 (ML因子选股)</h2>
+        <h2 style="color:#1976d2;margin-bottom:4px;">舞 v1.4</h2>
+        <p style="color:#888;font-size:11px;margin:0 0 10px 0;">ML因子选股 · account=15</p>
         <div hx-get="/api/paper-run/2?account_id=15" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
     <div>
-        <h2 style="color:#e65100;margin-bottom:12px;">小市 (事件驱动)</h2>
-        <div hx-get="/api/paper-run/3?account_id=16" hx-trigger="load" hx-swap="innerHTML"></div>
+        <h2 style="color:#7b1fa2;margin-bottom:4px;">舞 v1.5</h2>
+        <p style="color:#888;font-size:11px;margin:0 0 10px 0;">ML因子选股 + 日内增强 · account=17</p>
+        <div hx-get="/api/paper-run/4?account_id=17" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
+</div>
+
+<!-- 下排: 小市值 全宽 -->
+<div style="margin-top:24px;">
+    <h2 style="color:#e65100;margin-bottom:4px;">小市值 v1.0</h2>
+    <p style="color:#888;font-size:11px;margin:0 0 10px 0;">事件驱动 · 低开反转 · account=16</p>
+    <div hx-get="/api/paper-run/3?account_id=16" hx-trigger="load" hx-swap="innerHTML"></div>
 </div>
 {% endblock %}

@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""ML 选股端到端回测验证。
+"""ML 选股端到端回测验证 — 舞 v1.5。
 
 用法:
-    python scripts/run_ml_backtest.py                              # 默认: MH+行业中性化+动态+top15+周度
+    python scripts/run_ml_backtest.py                              # 默认: Regime+板块打分+动态+top15
+    python scripts/run_ml_backtest.py --no-sector-model            # 关闭板块打分
     python scripts/run_ml_backtest.py --no-multi-horizon --forward-days 5  # 单周期 T+5
     python scripts/run_ml_backtest.py --no-dynamic                 # 关闭动态反馈
     python scripts/run_ml_backtest.py --no-industry-neutralize     # 关闭行业中性化
-    python scripts/run_ml_backtest.py --regime --no-multi-horizon  # 分状态训练（需关闭MH）
     python scripts/run_ml_backtest.py --optuna                     # 启用贝叶斯超参搜索
 """
 import argparse
@@ -31,6 +31,7 @@ from factors import ALL_FACTORS
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from models.regime import detect_regime, REGIME_PARAMS
 from portfolio.selector import select_topk_ndrop
+from portfolio.sector_filter import filter_by_top_sectors
 from portfolio.risk import check_drawdown_limit, check_index_crash
 
 
@@ -250,6 +251,13 @@ def main():
     parser.add_argument("--multi-horizon", action="store_true", default=False, help="启用多周期预测 (T+1, T+5, T+20)")
     parser.add_argument("--no-multi-horizon", action="store_false", dest="multi_horizon", help="禁用多周期预测（同默认）")
     parser.add_argument("--horizon-weights", default="0.5,0.3,0.2", help="多周期权重, 逗号分隔")
+    parser.add_argument("--sector-model", action="store_true", default=False, help="启用板块打分预筛选（实验性）")
+    parser.add_argument("--no-sector-model", action="store_false", dest="sector_model", help="禁用板块打分")
+    parser.add_argument("--sector-top-n", type=int, default=0, help="板块预筛选保留前N个板块，0=自动(n_sectors-1)")
+    parser.add_argument("--sector-train-years", type=int, default=3, help="板块模型训练窗口年数")
+    parser.add_argument("--rl-model", action="store_true", default=False, help="使用 PPO 强化学习替代 XGBoost+LGB")
+    parser.add_argument("--rl-timesteps", type=int, default=100_000, help="每窗口 PPO 训练步数")
+    parser.add_argument("--rl-sector", action="store_true", default=False, help="使用 RL 板块恐贪打分（MPS GPU）替代动量/ML")
     args = parser.parse_args()
 
     # Resolve factor preset (--factor-preset overrides --factors if given)
@@ -439,6 +447,59 @@ def main():
     except Exception as e:
         logger.warning(f"  行业数据加载失败 (Feature 2 跳过): {e}")
 
+    # ── 全市场宽度数据（Feature 3）──
+    from factors.market_breadth import build_market_breadth_extra
+    mkt_breadth = build_market_breadth_extra(ohlcv, codes)
+    mkt_features = [c for c in mkt_breadth.columns if c.startswith("mkt_")]
+    for col in mkt_features:
+        extra_data[col] = mkt_breadth[["code", "trade_date", col]]
+    logger.info(f"  市场宽度: {mkt_breadth['trade_date'].nunique()} 天, {len(mkt_features)} 个特征")
+
+    # ── 板块分类映射（用于板块打分模型）──
+    sector_map: dict[str, str] = {}
+    csi300_members: set[str] = set()
+    if args.sector_model:
+        from config.sector_map import classify_stock
+        try:
+            # 获取沪深300成分股（只保留在候选池中的）
+            csi300_df = pd.read_sql(
+                "SELECT con_code FROM index_constituent WHERE idx_code = '000300'",
+                engine,
+            )
+            csi300_members = set(csi300_df["con_code"].values) & set(codes)
+        except Exception:
+            csi300_members = set()
+
+        # 红利股：传统高股息行业 + 低PB
+        dividend_stocks: set[str] = set()
+        try:
+            # 高股息行业（申万一级代码）：金融(银行保险)、采掘(煤炭)、公用事业、钢铁、交运
+            high_div_industries = ["J 金融业", "B 采矿业", "D 水电煤气", "G 运输仓储"]
+            div_df = pd.read_sql(
+                "SELECT code FROM stock_industry WHERE industry_sw1 = ANY(:inds)",
+                engine, params={"inds": high_div_industries},
+            )
+            div_stocks = set(div_df["code"].values) & set(codes)
+            # 再叠加低PB筛选（PB<1.5）
+            low_pb = pd.read_sql(
+                "SELECT DISTINCT code FROM stock_daily_extra "
+                "WHERE trade_date = (SELECT MAX(trade_date) FROM stock_daily_extra) "
+                "AND pb > 0 AND pb < 1.5",
+                engine,
+            )
+            low_pb_set = set(low_pb["code"].values) & set(codes)
+            dividend_stocks = div_stocks | low_pb_set
+        except Exception:
+            pass
+
+        # 构建板块映射
+        for code in codes:
+            sector_map[code] = classify_stock(code, csi300_members, dividend_stocks)
+
+        from collections import Counter
+        sector_counts = Counter(sector_map.values())
+        logger.info(f"  板块映射: {len(sector_map)} 只股票 → {dict(sector_counts)}")
+
     # ── 排雷系统：加载财务 & 质押数据 ──
     quality_pass: dict[str, set[str]] = {}
     try:
@@ -593,7 +654,15 @@ def main():
     # 3. Walk-forward 训练
     use_ensemble = not args.no_ensemble
 
-    if multi_horizon and use_ensemble:
+    if args.rl_model:
+        from rl.trainer import walk_forward_train_rl
+        logger.info(f"使用 PPO 强化学习模型 (timesteps={args.rl_timesteps})")
+        results = walk_forward_train_rl(
+            dataset, factor_cols,
+            train_years=args.train_years, val_years=args.val_years,
+            total_timesteps=args.rl_timesteps,
+        )
+    elif multi_horizon and use_ensemble:
         from models.trainer import walk_forward_train_multihorizon
         weights_raw = [float(w) for w in args.horizon_weights.split(",")]
         h_weights = {h: w for h, w in zip(horizons, weights_raw)}
@@ -626,6 +695,24 @@ def main():
         )
 
     logger.info(f"完成 {len(results)} 个 walk-forward 窗口")
+
+    # ── RL 板块恐贪打分训练 ──
+    rl_sector_results: list[dict] = []
+    if args.rl_sector and sector_map:
+        from rl.sector_trainer import walk_forward_train_rl_sector
+        logger.info("RL 板块恐贪打分训练 (MPS GPU)...")
+        try:
+            rl_sector_results = walk_forward_train_rl_sector(
+                ohlcv, sector_map,
+                forward_days=args.forward_days,
+                train_years=args.train_years,
+                val_years=args.val_years,
+                total_timesteps=50000,
+            )
+            logger.info(f"RL板块: {len(rl_sector_results)} 个窗口")
+        except Exception as e:
+            logger.warning(f"RL板块训练失败: {e}")
+            rl_sector_results = []
 
     # 汇总
     all_metrics = []
@@ -804,6 +891,11 @@ def main():
                       f"因子: {len(active)}个, 阈值: {best_t:.2f}",
         })
 
+        # ── RL 板块模型：选择当前窗口 ──
+        rl_sector_model = None
+        if rl_sector_results and window_idx < len(rl_sector_results):
+            rl_sector_model = rl_sector_results[window_idx].get("model")
+
         val_dates = sorted(val_data["trade_date"].unique())
 
         if ensemble is not None:
@@ -973,6 +1065,48 @@ def main():
                         continue
                     if month == 3 and day >= 20:
                         continue
+
+                # ── 板块预筛选（RL恐贪 or 动量排序）──
+                if (args.sector_model or args.rl_sector) and sector_map:
+                    try:
+                        from factors.sector_fear_greed import compute_sector_fear_greed
+                        from factors.sector_breadth import compute_breadth_features
+                        dt_date = pd.Timestamp(dt)
+
+                        if args.rl_sector and rl_sector_model is not None:
+                            # RL 恐贪打分
+                            fg_feats = compute_sector_fear_greed(ohlcv, sector_map, dt_date)
+                            if fg_feats:
+                                sector_rows = [{"sector": sec, **feats} for sec, feats in fg_feats.items()]
+                                sector_df = pd.DataFrame(sector_rows)
+                                sector_scores = rl_sector_model.predict(sector_df)
+                            else:
+                                sector_scores = None
+                        else:
+                            # 动量排序（回退方案）
+                            sector_feats = compute_breadth_features(ohlcv, sector_map, dt_date, lookback_days=20)
+                            if sector_feats:
+                                sector_rows = []
+                                for sec, feats in sector_feats.items():
+                                    score = feats.get("sector_mom_5", 0) * 0.6 + feats.get("sector_mom_20", 0) * 0.4
+                                    sector_rows.append({"sector": sec, "score": score})
+                                sector_df = pd.DataFrame(sector_rows)
+                                sector_scores = sector_df.sort_values("score", ascending=False).reset_index(drop=True)
+                                sector_scores["rank"] = range(1, len(sector_scores) + 1)
+                            else:
+                                sector_scores = None
+
+                        if sector_scores is not None and not sector_scores.empty:
+                            effective_top_n = args.sector_top_n if args.sector_top_n > 0 else max(1, len(sector_scores) - 1)
+                            preds = filter_by_top_sectors(
+                                preds, sector_scores, sector_map,
+                                top_n_sectors=effective_top_n,
+                            )
+                    except Exception:
+                        pass
+
+                if preds.empty:
+                    continue
 
                 # ── NDrop 选股 ──
                 reg_top_n = reg_params["top_n"]

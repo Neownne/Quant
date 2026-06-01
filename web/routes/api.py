@@ -916,35 +916,137 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     except Exception:
         pass
 
-    # 权益曲线
+    # 权益曲线 + 基准叠加 + 每日盈亏
     chart_html = ""
     try:
         with engine.connect() as conn:
             eq_rows = conn.execute(text("""
-                SELECT trade_date, total_value FROM paper_daily_pnl
+                SELECT trade_date, total_value, daily_return FROM paper_daily_pnl
                 WHERE account_id = :aid ORDER BY trade_date
             """), {"aid": account_id}).fetchall()
         if len(eq_rows) > 1:
+            import json as _json
             dates = [str(r[0]) for r in eq_rows]
             values = [float(r[1]) for r in eq_rows]
-            import json as _json
-            chart_opt = _json.dumps({
-                "tooltip": {"trigger": "axis"},
-                "grid": {"left": 60, "right": 20, "top": 20, "bottom": 30},
-                "xAxis": {"type": "category", "data": dates, "axisLabel": {"rotate": 45, "fontSize": 10}},
+            daily_rets = [float(r[2] or 0) for r in eq_rows]
+            start_val = values[0]
+
+            # 基准：上证指数归一化
+            benchmark_values = []
+            try:
+                bench_rows = conn.execute(text(f"""
+                    SELECT trade_date, close FROM index_daily WHERE code='000001'
+                    AND trade_date BETWEEN :d1 AND :d2 ORDER BY trade_date
+                """), {"d1": eq_rows[0][0], "d2": eq_rows[-1][0]}).fetchall()
+                if bench_rows and len(bench_rows) > 1:
+                    b0 = float(bench_rows[0][1])
+                    b_dates = {str(r[0]): float(r[1]) / b0 * start_val for r in bench_rows}
+                    benchmark_values = [b_dates.get(d, None) for d in dates]
+            except Exception:
+                pass
+
+            # 权益曲线（双线）
+            series = [{"name": "策略净值", "type": "line", "data": values,
+                        "lineStyle": {"color": "#26a69a"}, "areaStyle": {"color": "rgba(38,166,154,0.1)"}}]
+            if any(v is not None for v in benchmark_values):
+                series.append({"name": "上证基准", "type": "line", "data": benchmark_values,
+                               "lineStyle": {"color": "#ccc", "type": "dashed"}, "areaStyle": {"opacity": 0}})
+
+            eq_chart = _json.dumps({
+                "tooltip": {"trigger": "axis"}, "legend": {"data": ["策略净值", "上证基准"]},
+                "grid": {"left": 60, "right": 20, "top": 30, "bottom": 30},
+                "xAxis": {"type": "category", "data": dates, "axisLabel": {"rotate": 45, "fontSize": 9}},
                 "yAxis": {"type": "value", "name": "净值"},
-                "series": [{"name": "权益", "type": "line", "data": values,
-                            "lineStyle": {"color": "#26a69a"}, "areaStyle": {"color": "rgba(38,166,154,0.1)"},
-                            "markLine": {"data": [{"yAxis": values[0], "label": {"formatter": "初始"}, "lineStyle": {"type": "dashed"}}]}}]
+                "series": series,
             })
-            chart_html = f'<div class="card"><h3>权益曲线</h3><div class="chart-container" data-chart=\'{chart_opt}\' style="width:100%;height:350px;"></div></div>'
+
+            # 每日盈亏柱状图
+            bar_colors = [{"value": v, "itemStyle": {"color": "#c62828" if v < 0 else "#2e7d32"}} for v in daily_rets]
+            pnl_chart = _json.dumps({
+                "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                "grid": {"left": 60, "right": 20, "top": 20, "bottom": 30},
+                "xAxis": {"type": "category", "data": dates, "axisLabel": {"rotate": 45, "fontSize": 9}},
+                "yAxis": {"type": "value", "name": "日收益"},
+                "series": [{"name": "日收益", "type": "bar", "data": daily_rets,
+                            "itemStyle": {"color": "function(p){return p.data>=0?'#2e7d32':'#c62828';}"}}],
+            })
+
+            chart_html = (
+                f'<div class="card"><h3>权益曲线</h3><div class="chart-container" data-chart=\'{eq_chart}\' style="width:100%;height:350px;"></div></div>'
+                f'<div class="card"><h3>每日盈亏</h3><div class="chart-container" data-chart=\'{pnl_chart}\' style="width:100%;height:250px;"></div></div>'
+            )
     except Exception:
         pass
 
+    # 持仓行业分布
+    sector_html = ""
+    try:
+        with engine.connect() as conn:
+            sec_rows = conn.execute(text("""
+                SELECT COALESCE(si.industry_sw1, '未知') as sector, SUM(pp.quantity) as total_qty
+                FROM paper_positions pp
+                LEFT JOIN stock_industry si ON pp.stock_code = si.code
+                WHERE pp.run_id = :rid AND pp.exit_date IS NULL
+                GROUP BY COALESCE(si.industry_sw1, '未知') ORDER BY total_qty DESC
+            """), {"rid": run_id}).fetchall()
+        if sec_rows:
+            import json as _json
+            sec_data = [{"name": r[0], "value": int(r[1])} for r in sec_rows]
+            sec_chart = _json.dumps({
+                "tooltip": {"trigger": "item", "formatter": "{b}: {c} 股 ({d}%)"},
+                "series": [{"type": "pie", "radius": ["30%", "70%"], "data": sec_data,
+                            "label": {"fontSize": 10}, "emphasis": {"itemStyle": {"shadowBlur": 10}}}],
+            })
+            sector_html = f'<div class="card"><h3>持仓行业分布</h3><div class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
+    except Exception:
+        pass
+
+    # ── 汇总 + 历史日收益 ──
+    summary_card = ""
+    try:
+        with engine.connect() as conn:
+            daily_rows = conn.execute(text("""
+                SELECT trade_date, total_value, daily_return, drawdown
+                FROM paper_daily_pnl WHERE account_id = :aid ORDER BY trade_date
+            """), {"aid": account_id}).fetchall()
+        if daily_rows:
+            latest = daily_rows[-1]
+            tv = float(latest[1]); dr_val = float(latest[2] or 0)
+            first_tv = float(daily_rows[0][1])
+            total_ret = (tv - first_tv) / first_tv if first_tv > 0 else 0
+            max_dd = min((float(r[3]) for r in daily_rows if r[3] is not None), default=0)
+
+            summary_card = f"""<div class="card"><h3>汇总</h3>
+            <table style="width:100%"><tr>
+                <td>总资产: <strong>{tv:,.0f}</strong></td>
+                <td>日收益: <span class="{'up' if dr_val>0 else 'down'}">{dr_val:+.2%}</span></td>
+                <td>累计收益: <span class="{'up' if total_ret>0 else 'down'}">{total_ret:+.2%}</span></td>
+                <td>最大回撤: <span class="down">{max_dd:.2%}</span></td>
+            </tr></table>"""
+            if total_pnl != 0 or len(closed_pos) > 0:
+                summary_card += f"<p style='margin-top:8px;'>已平仓盈亏: <span class=\"{'up' if total_pnl > 0 else 'down'}\">{total_pnl:+,.0f}</span> | 胜率: {wins}/{len(closed_pos)} ({wins/max(len(closed_pos),1)*100:.0f}%)</p>"
+            summary_card += "</div>"
+
+            # 历史日收益表
+            recent = daily_rows[-20:]
+            history_html = '<div class="card"><h3>每日估值记录</h3><table><thead><tr><th>日期</th><th>总资产</th><th>日收益</th><th>回撤</th></tr></thead><tbody>'
+            for d in reversed(recent):
+                dr_c = "up" if (d[2] or 0) > 0 else "down"
+                history_html += f'<tr><td>{d[0]}</td><td>{d[1]:,.0f}</td><td class="{dr_c}">{(d[2] or 0):+.2%}</td><td class="down">{(d[3] or 0):.2%}</td></tr>'
+            history_html += '</tbody></table></div>'
+        else:
+            history_html = ""
+    except Exception:
+        summary_card = ""
+        history_html = ""
+
     html = f"""{pnl_summary}
+    {summary_card}
+    {history_html}
+    <div class="card"><h3>当前持仓 ({len(open_pos)}只)</h3>{open_html or '<p>无持仓</p>'}</div>
     {chart_html}
     {pending_html}
-    <div class="card"><h3>当前持仓 ({len(open_pos)}只)</h3>{open_html or '<p>无持仓</p>'}</div>
+    {sector_html}
     <div class="card"><h3>已平仓交易 ({len(closed_pos)}笔)</h3>{pos_html.replace('<th>代码</th><th>入场日</th>', '<th>代码</th><th>入场日</th><th>出场日</th><th>出场价</th>')
     if not closed_pos else pos_html}</div>
     <div class="card"><h3>近期信号</h3>{sig_html}</div>

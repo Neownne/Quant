@@ -16,6 +16,7 @@ from factors.alpha191_vol import ALPHA191_VOL
 from factors.alpha191_liquidity import ALPHA191_LIQUIDITY
 from factors.fundamental import FUNDAMENTAL_FACTORS
 from factors.intraday_minute import INTRADAY_MINUTE_FACTORS
+from factors.market_breadth import MARKET_BREADTH_FACTORS
 
 ALL_FACTORS: dict = {
     **ALPHA101_FUNCTIONS,
@@ -28,6 +29,7 @@ ALL_FACTORS: dict = {
     **ALPHA191_LIQUIDITY,
     **FUNDAMENTAL_FACTORS,
     **INTRADAY_MINUTE_FACTORS,
+    **MARKET_BREADTH_FACTORS,
 }
 
 __all__ = ["FactorEngine", "ALL_FACTORS"]

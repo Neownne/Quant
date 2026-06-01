@@ -34,7 +34,7 @@
 │  基本面: stock_basic / stock_daily_extra / stock_financial       │
 │          stock_shareholder / stock_pledge / stock_industry        │
 │  模拟盘: paper_account / paper_orders / paper_positions           │
-│          paper_daily_pnl / backtest_results                       │
+│          paper_daily_pnl / backtest_results                       │465（SSL加密）或587（TLS加密）
 │  策略配置: ml_strategy_config                                     │
 └──────────────────────────┬───────────────────────────────────┘
                            │

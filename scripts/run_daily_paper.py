@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """日频模拟盘每日驱动：拉数据 → 训练 → 预测 → 执行 → 写DB。
 
+支持多策略并行运行（由 config/paper_strategies.py 配置）。
+
 用法:
     python scripts/run_daily_paper.py                        # 今日收盘后跑
     python scripts/run_daily_paper.py --date 2026-06-01      # 指定日期
-    python scripts/run_daily_paper.py --date 2026-06-01 --backfill  # 回填历史
     python scripts/run_daily_paper.py --dry-run              # 试运行（不写DB）
+    python scripts/run_daily_paper.py --strategies v1.4      # 只跑指定版本
 
 初始化（首次）:
     python scripts/init_paper_trading.py    # 创建 paper_account + paper_runs
@@ -15,20 +17,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 from loguru import logger
 from sqlalchemy import text
 
 from data.db import get_engine
 from models.dataset import build_factor_dataset
 from models.trainer import walk_forward_train_by_regime
-from models.regime import detect_regime
+from models.regime import detect_regime, REGIME_PARAMS
 from factors import ALL_FACTORS
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 from portfolio.paper_engine import PaperEngine
+from portfolio.risk import check_drawdown_limit, check_index_crash
 from config.settings import TradingConfig
+from config.paper_strategies import PAPER_STRATEGIES
 
-# ── 因子预设：与回测保持一致的66因子集（通过IC+正交自动筛选） ──
+# ── 因子定义 ──
 _FACTOR_PRESET_NAMES = [
     *["mom_20", "mom_60", "ema_ratio_5_20", "macd_dif", "macd_signal", "macd_hist",
       "vwap_ratio", "vpt", "money_flow", "force_index", "cwt", "vwap_momentum",
@@ -42,10 +46,14 @@ _FACTOR_PRESET_NAMES = [
     *["turnover_5", "turnover_skew", "turnover_cv", "turnover_breakout",
       "volume_climax", "obv_roc", "amihud_5", "dollar_volume",
       "bid_ask_proxy", "illiquidity"],
-    # v1.13 新增 - 纯价格动量
     *["price_mom_5", "price_mom_10", "price_accel"],
+    # v1.5 新增日内分钟因子
+    *["close_auction_strength", "pm_ret", "intra_vol_skew", "corr_c_v", "am_ret",
+      "volume_concentration", "vwap_gap", "am_pm_divergence"],
+    # v1.5 市场宽度因子
+    *["mkt_adv_dec_ratio", "mkt_limit_up_n", "mkt_limit_down_n", "mkt_up_vol_ratio",
+      "mkt_ret_mean", "mkt_ret_std", "mkt_turnover_mean", "mkt_active_pct"],
 ]
-# 基本面因子（需 extra_data: 财务/估值/质押数据）
 _FUNDAMENTAL_NAMES = [
     "log_mcap", "pb_pct", "sh_change",
     "fin_cashflow_gap", "fin_roe_quality", "fin_profit_cv",
@@ -53,12 +61,12 @@ _FUNDAMENTAL_NAMES = [
     "fin_eps_growth", "fin_debt_ratio", "fin_goodwill_ratio",
     "fin_pledge_risk", "fin_audit_score",
 ]
-FACTOR_NAMES = [f for f in _FACTOR_PRESET_NAMES + _FUNDAMENTAL_NAMES if f in ALL_FACTORS]
+FACTOR_NAMES_STANDARD = [f for f in _FACTOR_PRESET_NAMES[:47] + _FUNDAMENTAL_NAMES if f in ALL_FACTORS]
+FACTOR_NAMES_FULL = [f for f in _FACTOR_PRESET_NAMES + _FUNDAMENTAL_NAMES if f in ALL_FACTORS]
 
 
 def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
-    """加载 OHLCV + 指数 + 行业 + 估值数据。"""
-    # 候选池：按成交额排序取 top-N（排除 ST）
+    """加载 OHLCV + 指数 + extra_data（所有策略共享一次加载）。"""
     codes = pd.read_sql(
         f"SELECT d.code FROM stock_daily d "
         f"JOIN stock_basic b ON d.code = b.code AND b.is_st = FALSE "
@@ -68,18 +76,15 @@ def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
     )["code"].tolist()
     code_list = ",".join([f"'{c}'" for c in codes])
 
-    # OHLCV
     ohlcv = pd.read_sql(f"""
         SELECT code, trade_date, open, high, low, close, volume, amount, turnover
-        FROM stock_daily
-        WHERE code IN ({code_list})
-          AND trade_date BETWEEN '{start_date}' AND '{end_date}'
+        FROM stock_daily WHERE code IN ({code_list})
+        AND trade_date BETWEEN '{start_date}' AND '{end_date}'
         ORDER BY code, trade_date
     """, engine)
     ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"])
     logger.info(f"OHLCV: {len(ohlcv)} 行, {ohlcv['code'].nunique()} 只")
 
-    # 指数
     index_df = pd.read_sql(f"""
         SELECT trade_date, close FROM index_daily
         WHERE code = '000001' AND trade_date BETWEEN '{start_date}' AND '{end_date}'
@@ -87,298 +92,273 @@ def load_data(engine, start_date: str, end_date: str, universe_size: int = 500):
     """, engine)
     index_df["trade_date"] = pd.to_datetime(index_df["trade_date"])
     regime_df = detect_regime(index_df) if not index_df.empty else None
-    if regime_df is not None:
-        logger.info(f"市场状态: {regime_df['regime'].value_counts().to_dict()}")
 
-    # extra_data
     extra_data = {}
-
-    # 行业分类
+    # 行业
     try:
-        ind_df = pd.read_sql(f"""
-            SELECT code, industry_sw1 FROM stock_industry WHERE code IN ({code_list})
-        """, engine)
+        ind_df = pd.read_sql(f"SELECT code, industry_sw1 FROM stock_industry WHERE code IN ({code_list})", engine)
         if not ind_df.empty:
             all_dates = sorted(ohlcv["trade_date"].unique())
-            extra_data["industry_sw1"] = ind_df.merge(
-                pd.DataFrame({"trade_date": all_dates}), how="cross"
-            )[["code", "trade_date", "industry_sw1"]]
-    except Exception:
-        pass
+            extra_data["industry_sw1"] = ind_df.merge(pd.DataFrame({"trade_date": all_dates}), how="cross")[["code", "trade_date", "industry_sw1"]]
+    except Exception: pass
 
-    # 估值数据（log_mcap, pb）
+    # 估值
     try:
-        extra_df = pd.read_sql(f"""
-            SELECT code, trade_date, market_cap, pb FROM stock_daily_extra
-            WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'
-        """, engine)
+        extra_df = pd.read_sql(f"SELECT code, trade_date, market_cap, pb FROM stock_daily_extra WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'", engine)
         if not extra_df.empty:
             extra_df["log_mcap"] = np.log(extra_df["market_cap"].replace(0, np.nan))
             extra_data["log_mcap"] = extra_df[["code", "trade_date", "log_mcap"]]
             extra_data["pb"] = extra_df[["code", "trade_date", "pb"]]
-            logger.info(f"  估值数据: {len(extra_df)} 行")
-    except Exception as e:
-        logger.warning(f"  估值数据跳过: {e}")
+    except Exception: pass
 
-    # 股东户数
+    # 股东
     try:
-        sh_df = pd.read_sql(f"""
-            SELECT code, end_date AS trade_date, shareholder_count
-            FROM stock_shareholder WHERE code IN ({code_list})
-            AND end_date BETWEEN '{start_date}' AND '{end_date}'
-        """, engine)
+        sh_df = pd.read_sql(f"SELECT code, end_date AS trade_date, shareholder_count FROM stock_shareholder WHERE code IN ({code_list}) AND end_date BETWEEN '{start_date}' AND '{end_date}'", engine)
         if not sh_df.empty:
             extra_data["shareholder_count"] = sh_df[["code", "trade_date", "shareholder_count"]]
-            logger.info(f"  股东数据: {len(sh_df)} 行")
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 质押数据
+    # 质押
     try:
-        pledge_df = pd.read_sql(f"""
-            SELECT code, trade_date, pledge_ratio FROM stock_pledge
-            WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'
-        """, engine)
+        pledge_df = pd.read_sql(f"SELECT code, trade_date, pledge_ratio FROM stock_pledge WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'", engine)
         if not pledge_df.empty:
             extra_data["pledge_ratio"] = pledge_df[["code", "trade_date", "pledge_ratio"]]
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 财务数据（fin_* 因子需要）
+    # 财务
     try:
         fin_cols = ["net_profit", "roe", "bps", "net_margin", "revenue", "eps",
                      "cash_flow", "operating_cash_flow", "total_assets", "total_liability",
                      "goodwill", "holder_equity", "adjusted_profit"]
-        fin_df = pd.read_sql(f"""
-            SELECT code, report_date, {','.join(fin_cols)}
-            FROM stock_financial WHERE code IN ({code_list})
-            AND report_date >= '2018-01-01'
-            ORDER BY code, report_date
-        """, engine)
+        fin_df = pd.read_sql(f"SELECT code, report_date, {','.join(fin_cols)} FROM stock_financial WHERE code IN ({code_list}) AND report_date >= '2018-01-01' ORDER BY code, report_date", engine)
         if not fin_df.empty:
             for col in fin_cols:
                 if col in fin_df.columns:
-                    extra_data[col] = fin_df[["code", "report_date", col]].copy()  # 保留report_date供asof merge
-            logger.info(f"  财务数据: {len(fin_df)} 行, {len(fin_cols)} 列")
-    except Exception as e:
-        logger.warning(f"  财务数据跳过: {e}")
+                    extra_data[col] = fin_df[["code", "report_date", col]].copy()
+    except Exception: pass
 
-    return ohlcv, index_df, regime_df, extra_data, codes
+    # 市场宽度
+    try:
+        from factors.market_breadth import build_market_breadth_extra
+        mkt = build_market_breadth_extra(ohlcv, codes)
+        for col in [c for c in mkt.columns if c.startswith("mkt_")]:
+            extra_data[col] = mkt[["code", "trade_date", col]]
+    except Exception: pass
+
+    # 日内因子
+    try:
+        minute_sql = f"SELECT code, trade_time, period, open, high, low, close, volume, amount FROM stock_minute WHERE code IN ({code_list}) AND trade_time >= '{start_date}'::timestamp AND trade_time < ('{end_date}'::date + interval '1 day')::timestamp ORDER BY code, trade_time"
+        minute_df = pd.read_sql(minute_sql, engine)
+        if not minute_df.empty:
+            from factors.intraday_minute import build_intraday_daily_features
+            minute_extra = build_intraday_daily_features(minute_df)
+            extra_data.update(minute_extra)
+    except Exception: pass
+
+    return ohlcv, index_df, regime_df, extra_data
+
+
+def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame,
+                 regime_df: pd.DataFrame, extra_data: dict, trade_date: pd.Timestamp,
+                 dry_run: bool = False):
+    """执行单个策略的日频流程：训练 → 预测 → 信号保存 → T+1执行。"""
+    name = strategy_cfg["name"]
+    ver = strategy_cfg["version"]
+    account_id = strategy_cfg["account_id"]
+    run_id = strategy_cfg["run_id"]
+    forward_days = strategy_cfg["forward_days"]
+    train_years = strategy_cfg["train_years"]
+    top_n = strategy_cfg["top_n"]
+
+    factor_names = FACTOR_NAMES_FULL if strategy_cfg.get("factor_mode") == "full" else FACTOR_NAMES_STANDARD
+    logger.info(f"[{name} {ver}] 因子数: {len(factor_names)}, account={account_id}, run={run_id}")
+
+    # 构建数据集
+    dataset = build_factor_dataset(
+        ohlcv, factor_names, label_mode="binary", forward_days=forward_days,
+        extra_data=extra_data if extra_data else None, industry_neutralize=False,
+    )
+
+    # IC + 正交筛选
+    factor_cols = filter_factors_by_ic(dataset, factor_names)
+    if len(factor_cols) < 3:
+        factor_cols = factor_names[:min(12, len(factor_names))]
+    selected = select_orthogonal_factors(dataset, factor_cols, threshold=0.7)
+    logger.info(f"[{name} {ver}] 因子: {len(factor_names)} → IC{len(factor_cols)} → 正交{len(selected)}")
+
+    # 训练
+    if regime_df is None:
+        logger.error(f"[{name} {ver}] 无法检测市场状态，跳过")
+        return None
+
+    results = walk_forward_train_by_regime(dataset, selected, regime_df, train_years=train_years, val_years=1)
+    if not results:
+        logger.error(f"[{name} {ver}] Regime训练无结果，跳过")
+        return None
+
+    # 合并多窗口模型
+    from models.trainer import RegimeAwareEnsemble
+    merged_ensembles, merged_factors = {}, []
+    for r in results:
+        ens = r.get("ensemble")
+        if ens:
+            for reg, model in ens.ensembles.items():
+                if reg not in merged_ensembles:
+                    merged_ensembles[reg] = model
+            if not merged_factors:
+                merged_factors = ens.factor_names
+    if not merged_ensembles:
+        logger.error(f"[{name} {ver}] 无有效模型，跳过")
+        return None
+    any_model = next(iter(merged_ensembles.values()))
+    for reg in ["bull", "bear", "sideways"]:
+        if reg not in merged_ensembles:
+            merged_ensembles[reg] = any_model
+    ensemble = RegimeAwareEnsemble(merged_ensembles, merged_factors or selected)
+
+    # 今日市场状态
+    engine = get_engine()
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
+    latest_date = pd.Timestamp(r[0]) if r else trade_date
+    today_regime = "sideways"
+    if regime_df is not None:
+        tr = regime_df[regime_df["trade_date"] <= latest_date]
+        if not tr.empty:
+            today_regime = str(tr["regime"].iloc[-1])
+
+    # 今日因子截面
+    pred_date = dataset["trade_date"].max()
+    today_factor = dataset[dataset["trade_date"] == pred_date].copy()
+    if today_factor.empty:
+        logger.error(f"[{name} {ver}] 无今日因子数据，跳过")
+        return None
+    today_factor["regime"] = today_regime
+
+    # T+1 执行：处理待执行信号
+    if not dry_run:
+        with engine.connect() as conn:
+            prev = conn.execute(text("""
+                SELECT DISTINCT ps.signal_date FROM paper_signals ps
+                WHERE ps.run_id = :rid AND NOT EXISTS (
+                    SELECT 1 FROM paper_positions pp
+                    WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
+                ) ORDER BY ps.signal_date
+            """), {"rid": run_id}).fetchall()
+        for prow in prev:
+            prev_date = pd.Timestamp(prow[0])
+            prev_factor = dataset[dataset["trade_date"] == prev_date].copy()
+            if prev_factor.empty:
+                continue
+            prev_regime = str(regime_df[regime_df["trade_date"] <= prev_date]["regime"].iloc[-1])
+            prev_factor["regime"] = prev_regime
+            eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=ensemble,
+                              top_n=top_n, rebalance_mode="ndrop")
+            result = eng.run_daily(trade_date=prev_date, factor_df=prev_factor,
+                                   ohlcv_data=ohlcv, index_ohlcv=index_df, regime=prev_regime)
+            if result:
+                logger.info(f"[{name} {ver}] T+1执行 {prev_date.date()}: 总资产={result['total_value']:,.0f}, "
+                            f"买{result['n_buy_orders']}/卖{result['n_sell_orders']}")
+
+    # 预测今日信号
+    preds = ensemble.predict(today_factor)
+    preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
+
+    # 保存信号
+    if dry_run:
+        logger.info(f"[{name} {ver}] DRY RUN — 信号不保存")
+        return {"preds": preds, "top_n": top_n, "regime": today_regime}
+    else:
+        with engine.begin() as conn:
+            existing = conn.execute(text(
+                "SELECT COUNT(*) FROM paper_signals WHERE run_id = :rid AND signal_date = :sd"
+            ), {"rid": run_id, "sd": pred_date.date()}).fetchone()[0]
+            if existing == 0:
+                for rank, (_, row) in enumerate(preds.head(top_n).iterrows()):
+                    conn.execute(text("""
+                        INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
+                        VALUES (:rid, :sd, :sc, :ps, :rk)
+                    """), {"rid": run_id, "sd": pred_date.date(), "sc": row["code"],
+                           "ps": float(row["score"]), "rk": rank + 1})
+                logger.info(f"[{name} {ver}] 信号已保存: {min(top_n, len(preds))} 只")
+            else:
+                logger.info(f"[{name} {ver}] 信号已存在 ({existing}条)")
+
+            # 首次建仓：如无任何持仓，用最新有信号的日期立即建仓
+            pos_count = conn.execute(text(
+                "SELECT COUNT(*) FROM paper_positions WHERE run_id = :rid"
+            ), {"rid": run_id}).fetchone()[0]
+            if pos_count == 0:
+                # 用最早的有信号日期建仓
+                first_sig = conn.execute(text(
+                    "SELECT MIN(signal_date) FROM paper_signals WHERE run_id = :rid"
+                ), {"rid": run_id}).fetchone()[0]
+                if first_sig:
+                    logger.info(f"[{name} {ver}] 首次建仓 (信号日={first_sig}) ...")
+                    first_factor = dataset[dataset["trade_date"] == pd.Timestamp(first_sig)].copy()
+                    if not first_factor.empty:
+                        first_regime = str(regime_df[regime_df["trade_date"] <= pd.Timestamp(first_sig)]["regime"].iloc[-1])
+                        first_factor["regime"] = first_regime
+                        eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=ensemble,
+                                          top_n=top_n, rebalance_mode="ndrop")
+                        result = eng.run_daily(trade_date=pd.Timestamp(first_sig), factor_df=first_factor,
+                                               ohlcv_data=ohlcv, index_ohlcv=index_df, regime=first_regime)
+                        if result:
+                            logger.info(f"[{name} {ver}] 建仓完成: 总资产={result['total_value']:,.0f}, "
+                                        f"买{result['n_buy_orders']}/卖{result['n_sell_orders']}")
+
+    return {"ensemble": ensemble, "preds": preds, "top_n": top_n, "regime": today_regime}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="日频模拟盘每日驱动")
+    parser = argparse.ArgumentParser(description="日频模拟盘每日驱动 — 多策略")
     parser.add_argument("--date", help="交易日（YYYY-MM-DD），默认今天")
-    parser.add_argument("--account-id", type=int, default=1, help="paper_account.id")
-    parser.add_argument("--run-id", type=int, default=1, help="paper_runs.id")
-    parser.add_argument("--train-years", type=int, default=3)
-    parser.add_argument("--forward-days", type=int, default=5)
-    parser.add_argument("--top-n", type=int, default=TradingConfig.TOP_N)
-    parser.add_argument("--universe-size", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true", help="试运行不写DB")
-    parser.add_argument("--backfill", action="store_true", help="从 paper_runs.start_date 回填到指定日期")
     parser.add_argument("--no-sync", action="store_true", help="跳过数据同步")
+    parser.add_argument("--strategies", default="", help="只跑指定版本（逗号分隔，如 v1.4,v1.5）")
     args = parser.parse_args()
 
     trade_date = pd.Timestamp(args.date) if args.date else pd.Timestamp.now().normalize()
     if trade_date.date() >= date.today():
-        trade_date = pd.Timestamp(date.today())  # 防止未来日期
+        trade_date = pd.Timestamp(date.today())
     logger.info(f"交易日: {trade_date.date()}")
 
-    engine = get_engine()
+    # 确定要跑的策略
+    target_versions = set(v.strip() for v in args.strategies.split(",") if v.strip())
+    strategies = [s for s in PAPER_STRATEGIES if not target_versions or s["version"] in target_versions]
+    if not strategies:
+        logger.warning("没有匹配的策略，跳过")
+        return
 
-    # ── 检查账户和 run ──
-    with engine.connect() as conn:
-        acc = conn.execute(text("SELECT id, cash FROM paper_account WHERE id = :aid"), {"aid": args.account_id}).fetchone()
-        run = conn.execute(text("SELECT id, start_date, strategy_id, version_id FROM paper_runs WHERE id = :rid"), {"rid": args.run_id}).fetchone()
-    if not acc or not run:
-        logger.error("账户或 run 不存在，请先运行 init_paper_trading.py")
-        sys.exit(1)
-    logger.info(f"账户 id={acc[0]}, 现金={acc[1]:,.0f}, run={run[0]}")
+    logger.info(f"策略: {len(strategies)} 个 ({[s['version'] for s in strategies]})")
 
-    # 始终加载足够历史数据用于训练（至少 train_years + val_years）
-    start_dt = trade_date - pd.DateOffset(years=args.train_years + 2)  # 多留 2 年余量
+    # 数据同步（每次运行都检查并同步到最新）
+    if not args.no_sync:
+        try:
+            engine = get_engine()
+            with engine.connect() as c:
+                latest = c.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
+            from data.sync import sync_stock_daily
+            sync_start = (latest[0] - timedelta(days=3)).strftime("%Y%m%d") if latest and latest[0] else (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+            logger.info(f"数据同步: {sync_start} → 最新")
+            sync_stock_daily(engine, start_date=sync_start, workers=1)
+            engine.dispose()
+        except Exception as e:
+            logger.warning(f"同步跳过: {e}")
+
+    # 加载数据（所有策略共享）
+    start_dt = trade_date - pd.DateOffset(years=5)  # 多留余量
     start_str = start_dt.strftime("%Y%m%d")
     end_str = trade_date.strftime("%Y%m%d")
+    ohlcv, index_df, regime_df, extra_data = load_data(get_engine(), start_str, end_str)
 
-    # ── 1. 增量同步日线数据 ──
-    try:
-        from data.sync import main as sync_main
-    except ImportError:
-        sync_main = None
-    if not args.no_sync:
-        logger.info("检查数据新鲜度 ...")
-    try:
-        sync_engine = get_engine()
-        with sync_engine.connect() as c:
-            latest = c.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
-        if latest and latest[0]:
-            days_behind = (date.today() - latest[0]).days
-            if days_behind > 3:
-                logger.info(f"  数据落后 {days_behind} 天，执行增量同步 ...")
-                from data.sync import sync_stock_daily as do_sync
-                do_sync(sync_engine, start_date=(date.today() - timedelta(days=max(days_behind, 5))).strftime("%Y%m%d"), workers=1)
-            else:
-                logger.info(f"  数据已是最新 ({latest[0]})，跳过同步")
-        sync_engine.dispose()
-    except Exception as e:
-        logger.warning(f"  数据检查跳过: {e}")
+    # 逐策略执行
+    for cfg in strategies:
+        try:
+            run_strategy(cfg, ohlcv, index_df, regime_df, extra_data, trade_date, dry_run=args.dry_run)
+        except Exception as e:
+            logger.error(f"[{cfg['name']} {cfg['version']}] 执行失败: {e}")
 
-    # ── 2. 加载数据 ──
-    ohlcv, index_df, regime_df, extra_data, codes = load_data(
-        engine, start_str, end_str, args.universe_size)
-
-    with engine.connect() as conn:
-        trade_date_dt = conn.execute(
-            text("SELECT MAX(trade_date) FROM stock_daily")
-        ).fetchone()
-    latest_date = pd.Timestamp(trade_date_dt[0])
-    logger.info(f"最新数据日: {latest_date.date()}")
-
-    # ── 3. 构建因子数据集 ──
-    dataset = build_factor_dataset(
-        ohlcv, FACTOR_NAMES,
-        label_mode="binary", forward_days=args.forward_days,
-        extra_data=extra_data if extra_data else None,
-        industry_neutralize=False,
-    )
-
-    # ── 4. IC + 正交筛选 ──
-    factor_cols = filter_factors_by_ic(dataset, FACTOR_NAMES)
-    if len(factor_cols) < 3:
-        factor_cols = FACTOR_NAMES[:min(12, len(FACTOR_NAMES))]
-    selected = select_orthogonal_factors(dataset, factor_cols, threshold=0.7)
-    logger.info(f"因子: {len(FACTOR_NAMES)} → IC{len(factor_cols)} → 正交{len(selected)}")
-
-    # ── 5. 训练模型（Regime 模式，用 walk-forward 最后一个窗口的模型） ──
-    if regime_df is not None:
-        logger.info("Regime 训练 ...")
-        results = walk_forward_train_by_regime(
-            dataset, selected, regime_df,
-            train_years=args.train_years, val_years=1,
-        )
-        if results:
-            # Merge models from all windows: pick best ensemble per regime
-            from models.trainer import RegimeAwareEnsemble
-            merged_ensembles = {}
-            merged_factors = []
-            all_trained = set()
-            for r in results:
-                ens = r.get("ensemble")
-                if ens:
-                    for reg, model in ens.ensembles.items():
-                        if reg not in merged_ensembles:
-                            merged_ensembles[reg] = model
-                            all_trained.add(reg)
-                    if not merged_factors:
-                        merged_factors = ens.factor_names
-            # Fallback: use any available model for missing regimes
-            if merged_ensembles:
-                any_model = next(iter(merged_ensembles.values()))
-                for reg in ["bull", "bear", "sideways"]:
-                    if reg not in merged_ensembles:
-                        merged_ensembles[reg] = any_model
-            ensemble = RegimeAwareEnsemble(merged_ensembles, merged_factors or selected)
-            trained_regimes = list(all_trained)
-            logger.info(f"模型就绪: regimes={trained_regimes} (merged from {len(results)} windows)")
-        else:
-            logger.error("Regime 训练无结果")
-            sys.exit(1)
-    else:
-        logger.error("无法检测市场状态")
-        sys.exit(1)
-
-    # ── 6. 获取今日市场状态 ──
-    today_regime = "sideways"
-    if regime_df is not None:
-        today_rows = regime_df[regime_df["trade_date"] <= latest_date]
-        if not today_rows.empty:
-            today_regime = str(today_rows["regime"].iloc[-1])
-    logger.info(f"今日市场状态: {today_regime}")
-
-    # ── 7. 构建今日因子截面（用于预测） ──
-    pred_date = dataset["trade_date"].max()
-    today_factor = dataset[dataset["trade_date"] == pred_date].copy()
-    if today_factor.empty:
-        logger.error(f"无 {pred_date.date()} 的因子数据")
-        sys.exit(1)
-
-    # 注入 regime
-    today_factor["regime"] = today_regime
-
-    # ── 8. T+1执行：先处理上一个交易日的待执行信号 ──
-    prev_signals = None
-    prev_date = None
-    if not args.dry_run:
-        with engine.connect() as conn:
-            prev = conn.execute(text("""
-                SELECT DISTINCT ps.signal_date FROM paper_signals ps
-                WHERE ps.run_id = :rid
-                AND NOT EXISTS (
-                    SELECT 1 FROM paper_positions pp
-                    WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
-                )
-                ORDER BY ps.signal_date LIMIT 1
-            """), {"rid": args.run_id}).fetchone()
-        if prev:
-            prev_date = pd.Timestamp(prev[0])
-            logger.info(f"发现待执行信号: {prev_date.date()}，T+1执行中...")
-            # Load signals from that date
-            prev_signals = pd.read_sql(f"""
-                SELECT signal_date, stock_code, predicted_score, rank
-                FROM paper_signals WHERE run_id = {args.run_id}
-                AND signal_date = '{prev_date.date()}'
-                ORDER BY rank
-            """, engine)
-            # Build factor data for that date
-            prev_factor = dataset[dataset["trade_date"] == prev_date].copy()
-            if not prev_factor.empty:
-                prev_regime = str(regime_df[regime_df["trade_date"] <= prev_date]["regime"].iloc[-1]) if regime_df is not None else "sideways"
-                prev_factor["regime"] = prev_regime
-                engine_paper_prev = PaperEngine(
-                    account_id=args.account_id, run_id=args.run_id,
-                    predictor=ensemble, top_n=args.top_n, rebalance_mode="ndrop",
-                )
-                result_prev = engine_paper_prev.run_daily(
-                    trade_date=prev_date, factor_df=prev_factor,
-                    ohlcv_data=ohlcv, index_ohlcv=index_df, regime=prev_regime,
-                )
-                if result_prev:
-                    logger.info(f"T+1执行完成: 总资产={result_prev['total_value']:,.0f}, "
-                                f"买入={result_prev['n_buy_orders']}, 卖出={result_prev['n_sell_orders']}")
-
-    # ── 9. 预测今日信号（仅生成，不执行） ──
-    preds = ensemble.predict(today_factor)
-    preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
-    logger.info(f"预测: {len(preds)} 只, Top-5: {preds['code'].head(5).tolist()}")
-
-    # ── 10. 保存信号到 paper_signals（等待下一个交易日执行） ──
-    if args.dry_run:
-        logger.info("[DRY RUN] 跳过写入")
-        print(f"\n=== 今日信号 ({pred_date.date()}) === 市场: {today_regime}")
-        for i, row in preds.head(args.top_n).iterrows():
-            print(f"  {i+1}. {row['code']}  score={row['score']:.4f}")
-    else:
-        from sqlalchemy import text as sqltxt
-        with engine.begin() as conn:
-            # Check if signals for this date already exist
-            existing = conn.execute(sqltxt(
-                "SELECT COUNT(*) FROM paper_signals WHERE run_id = :rid AND signal_date = :sd"
-            ), {"rid": args.run_id, "sd": pred_date.date()}).fetchone()[0]
-            if existing == 0:
-                for rank, (_, row) in enumerate(preds.head(args.top_n).iterrows()):
-                    conn.execute(sqltxt("""
-                        INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
-                        VALUES (:rid, :sd, :sc, :ps, :rk)
-                    """), {
-                        "rid": args.run_id, "sd": pred_date.date(),
-                        "sc": row["code"], "ps": float(row["score"]), "rk": rank + 1,
-                    })
-                logger.info(f"信号已保存: {min(args.top_n, len(preds))} 只, 等待T+1执行")
-            else:
-                logger.info(f"信号已存在 ({existing}条), 跳过")
-
-    engine.dispose()
     logger.info("Done.")
 
 
