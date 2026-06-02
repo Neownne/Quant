@@ -972,8 +972,8 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             })
 
             chart_html = (
-                f'<div class="card"><h3>权益曲线</h3><div class="chart-container" data-chart=\'{eq_chart}\' style="width:100%;height:350px;"></div></div>'
-                f'<div class="card"><h3>每日盈亏</h3><div class="chart-container" data-chart=\'{pnl_chart}\' style="width:100%;height:250px;"></div></div>'
+                f'<div class="card"><h3>权益曲线</h3><div id="eq-chart-{run_id}" class="chart-container" data-chart=\'{eq_chart}\' style="width:100%;height:350px;"></div></div>'
+                f'<div class="card"><h3>每日盈亏</h3><div id="pnl-chart-{run_id}" class="chart-container" data-chart=\'{pnl_chart}\' style="width:100%;height:250px;"></div></div>'
             )
     except Exception:
         pass
@@ -997,7 +997,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 "series": [{"type": "pie", "radius": ["30%", "70%"], "data": sec_data,
                             "label": {"fontSize": 10}, "emphasis": {"itemStyle": {"shadowBlur": 10}}}],
             })
-            sector_html = f'<div class="card"><h3>持仓行业分布</h3><div class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
+            sector_html = f'<div class="card"><h3>持仓行业分布</h3><div id="sector-chart-{run_id}" class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
     except Exception:
         pass
 
