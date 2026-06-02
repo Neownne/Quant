@@ -299,11 +299,10 @@ class PaperEngine:
         result = filter_suspended(result, ohlcv_lookup, trade_date)
 
         prev_close_map: dict[str, float] = {}
-        close_map = {}
+        cur_price_map = {}
         for code in result["code"].unique():
             hist = ohlcv_lookup.get(code)
             if hist is not None:
-                # 前日收盘价：trade_date 之前的最后一天
                 prev_rows = hist[hist["trade_date"] < trade_date].tail(1)
                 if not prev_rows.empty:
                     prev_close_map[code] = float(prev_rows["close"].iloc[0])
@@ -311,11 +310,12 @@ class PaperEngine:
                 (ohlcv_data["code"] == code) & (ohlcv_data["trade_date"] == trade_date)
             ]
             if not day_data.empty:
-                close_map[code] = float(day_data["close"].iloc[0])
+                # T+1执行用开盘价
+                cur_price_map[code] = float(day_data["open"].iloc[0]) if "open" in day_data.columns else float(day_data["close"].iloc[0])
                 if code not in prev_close_map:
-                    prev_close_map[code] = close_map[code]
+                    prev_close_map[code] = cur_price_map[code]
 
-        result["close"] = result["code"].map(close_map)
+        result["close"] = result["code"].map(cur_price_map)
         result = filter_limit_up_down(result, prev_close_map)
         valid_codes = set(factor_df["code"].unique())
         result = result[result["code"].isin(valid_codes)]
@@ -417,10 +417,12 @@ class PaperEngine:
             self.portfolio_dd_threshold, self.portfolio_dd_reduce_to)
         return stop_codes, reduced, new_pos
 
-    def _get_price_map(self, day_ohlcv: pd.DataFrame) -> dict[str, float]:
+    def _get_price_map(self, day_ohlcv: pd.DataFrame, use_open: bool = True) -> dict[str, float]:
+        """获取当日价格。T+1执行用开盘价(模拟次日开盘买入)，回测用收盘价。"""
         if day_ohlcv.empty:
             return {}
-        return dict(zip(day_ohlcv["code"].astype(str), day_ohlcv["close"].astype(float)))
+        col = "open" if use_open and "open" in day_ohlcv.columns else "close"
+        return dict(zip(day_ohlcv["code"].astype(str), day_ohlcv[col].astype(float)))
 
     def _generate_orders(
         self, target: pd.DataFrame, positions: dict[str, dict],
