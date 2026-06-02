@@ -343,7 +343,7 @@ def main():
                 from data.sync import sync_stock_daily
                 sync_start = (latest[0] - timedelta(days=3)).strftime("%Y%m%d")
                 logger.info(f"数据同步: {sync_start} → 最新")
-                sync_stock_daily(engine, start_date=sync_start, workers=4)
+                sync_stock_daily(engine, start_date=sync_start, workers=8)
             else:
                 logger.info(f"数据已最新 ({latest[0] if latest else '?'}), 跳过同步")
             engine.dispose()
