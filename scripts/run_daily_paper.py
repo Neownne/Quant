@@ -286,28 +286,7 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
             else:
                 logger.info(f"[{name} {ver}] 信号已存在 ({existing}条)")
 
-            # 首次建仓：如无任何持仓，用最新有信号的日期立即建仓
-            pos_count = conn.execute(text(
-                "SELECT COUNT(*) FROM paper_positions WHERE run_id = :rid"
-            ), {"rid": run_id}).fetchone()[0]
-            if pos_count == 0:
-                # 用最早的有信号日期建仓
-                first_sig = conn.execute(text(
-                    "SELECT MIN(signal_date) FROM paper_signals WHERE run_id = :rid"
-                ), {"rid": run_id}).fetchone()[0]
-                if first_sig:
-                    logger.info(f"[{name} {ver}] 首次建仓 (信号日={first_sig}) ...")
-                    first_factor = dataset[dataset["trade_date"] == pd.Timestamp(first_sig)].copy()
-                    if not first_factor.empty:
-                        first_regime = str(regime_df[regime_df["trade_date"] <= pd.Timestamp(first_sig)]["regime"].iloc[-1])
-                        first_factor["regime"] = first_regime
-                        eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=ensemble,
-                                          top_n=top_n, rebalance_mode="ndrop")
-                        result = eng.run_daily(trade_date=pd.Timestamp(first_sig), factor_df=first_factor,
-                                               ohlcv_data=ohlcv, index_ohlcv=index_df, regime=first_regime)
-                        if result:
-                            logger.info(f"[{name} {ver}] 建仓完成: 总资产={result['total_value']:,.0f}, "
-                                        f"买{result['n_buy_orders']}/卖{result['n_sell_orders']}")
+            # 注意：首次建仓需先手动 seed 信号（见 scripts/seed_paper_signals.py）
 
     return {"ensemble": ensemble, "preds": preds, "top_n": top_n, "regime": today_regime}
 

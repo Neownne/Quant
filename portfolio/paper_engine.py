@@ -550,8 +550,14 @@ class PaperEngine:
                             break
                         lot_qty = int(lot[1])
                         close_qty = min(remaining, lot_qty)
-                        pnl = close_qty * (o["price"] - float(lot[2]))
-                        pnl_pct = (o["price"] / float(lot[2]) - 1) if float(lot[2]) > 0 else 0
+                        entry_p = float(lot[2])
+                        exit_p = o["price"]
+                        # PnL = 价差 - 买入成本 - 卖出成本
+                        gross = close_qty * (exit_p - entry_p)
+                        buy_cost = close_qty * entry_p * (self.commission + self.slippage)
+                        sell_cost = close_qty * exit_p * (self.commission + self.stamp_duty + self.slippage)
+                        pnl = gross - buy_cost - sell_cost
+                        pnl_pct = pnl / (close_qty * entry_p) if entry_p > 0 else 0
                         if close_qty >= lot_qty:
                             conn.execute(text("""
                                 UPDATE paper_positions

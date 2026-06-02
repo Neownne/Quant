@@ -867,28 +867,28 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     except Exception:
         pass
 
-    # 当前持仓（含名称+当日涨幅+份额权重）
+    # 当前持仓（含名称+当日涨幅+份额+市值+浮动盈亏）
     open_html = ""
     if open_pos:
-        total_qty = sum(p[5] for p in open_pos)
-        open_html = "<table><thead><tr><th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>现价</th><th>当日涨幅</th><th>份额</th><th>权重</th><th>浮动盈亏</th></tr></thead><tbody>"
+        open_html = "<table><thead><tr><th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>现价</th><th>股数</th><th>市值</th><th>浮动盈亏</th></tr></thead><tbody>"
         for p in open_pos:
             code, ed, ep, xd, xp, qty, pnl, pct = p
             price_info = price_map.get(code, (ep, 0))
             cur_price, chg_pct = price_info
-            weight = qty / max(total_qty, 1) * 100
-            float_pnl = (cur_price / ep - 1) * 100 if ep > 0 else 0
+            market_value = cur_price * qty
+            cost_value = ep * qty
+            float_pnl = (cur_price - ep) * qty if ep > 0 else 0
+            float_pnl_pct = (cur_price / ep - 1) * 100 if ep > 0 else 0
             pnl_class = "up" if float_pnl > 0 else "down"
-            chg_class = "up" if chg_pct > 0 else "down"
             open_html += f"""<tr>
                 <td><strong>{code}</strong></td><td>{name_map.get(code, '?')}</td><td>{ed}</td>
                 <td>{ep:.2f}</td><td>{cur_price:.2f}</td>
-                <td class="{chg_class}">{chg_pct:+.2f}%</td>
-                <td>{qty}股</td><td>{weight:.1f}%</td>
-                <td class="{pnl_class}">{float_pnl:+.2f}%</td>
+                <td>{qty}股</td><td>{market_value:,.0f}</td>
+                <td class="{pnl_class}">{float_pnl:+,.0f} ({float_pnl_pct:+.2f}%)</td>
             </tr>"""
+        total_mv = sum(p[5] * price_map.get(p[0], (p[2], 0))[0] for p in open_pos)
         open_html += "</tbody></table>"
-        open_html += f"<p style='margin-top:8px;color:#888;'>等权分配，每只约 {100/max(len(open_pos),1):.0f}% 仓位</p>"
+        open_html += f"<p style='margin-top:8px;color:#888;'>总市值: {total_mv:,.0f} | 等权分配，每只约 {100/max(len(open_pos),1):.0f}% 仓位</p>"
 
     # ── 待执行信号（T+1：已生成但未入场） ──
     pending_html = ""
@@ -1016,11 +1016,21 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             total_ret = (tv - first_tv) / first_tv if first_tv > 0 else 0
             max_dd = min((float(r[3]) for r in daily_rows if r[3] is not None), default=0)
 
+            # 现金和持仓市值
+            try:
+                with engine.connect() as conn2:
+                    cash_r = conn2.execute(text('SELECT cash FROM paper_account WHERE id=:aid'), {'aid': account_id}).fetchone()
+                    cash_val = float(cash_r[0]) if cash_r else 0
+            except Exception:
+                cash_val = 0
+            pos_mv = sum(p[5] * price_map.get(p[0], (p[2], 0))[0] for p in open_pos) if open_pos else 0
+
             summary_card = f"""<div class="card"><h3>汇总</h3>
             <table style="width:100%"><tr>
                 <td>总资产: <strong>{tv:,.0f}</strong></td>
+                <td>现金: {cash_val:,.0f}</td>
+                <td>股票市值: {pos_mv:,.0f}</td>
                 <td>日收益: <span class="{'up' if dr_val>0 else 'down'}">{dr_val:+.2%}</span></td>
-                <td>累计收益: <span class="{'up' if total_ret>0 else 'down'}">{total_ret:+.2%}</span></td>
                 <td>最大回撤: <span class="down">{max_dd:.2%}</span></td>
             </tr></table>"""
             if total_pnl != 0 or len(closed_pos) > 0:
