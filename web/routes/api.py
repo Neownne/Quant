@@ -960,15 +960,14 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 "series": series,
             })
 
-            # 每日盈亏柱状图
-            bar_colors = [{"value": v, "itemStyle": {"color": "#c62828" if v < 0 else "#2e7d32"}} for v in daily_rets]
+            # 每日盈亏柱状图（预计算颜色，避免JSON中的JS函数）
+            bar_data = [{"value": round(v, 6), "itemStyle": {"color": "#c62828" if v >= 0 else "#2e7d32"}} for v in daily_rets]
             pnl_chart = _json.dumps({
                 "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
                 "grid": {"left": 60, "right": 20, "top": 20, "bottom": 30},
                 "xAxis": {"type": "category", "data": dates, "axisLabel": {"rotate": 45, "fontSize": 9}},
                 "yAxis": {"type": "value", "name": "日收益"},
-                "series": [{"name": "日收益", "type": "bar", "data": daily_rets,
-                            "itemStyle": {"color": "function(p){return p.data>=0?'#2e7d32':'#c62828';}"}}],
+                "series": [{"name": "日收益", "type": "bar", "data": bar_data}],
             })
 
             chart_html = (
@@ -978,26 +977,38 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     except Exception:
         pass
 
-    # 持仓行业分布
+    # 持仓板块分布（5板块：科创/主板大盘/主板小盘/红利）
     sector_html = ""
     try:
+        from config.sector_map import classify_stock
+        from collections import Counter
         with engine.connect() as conn:
-            sec_rows = conn.execute(text("""
-                SELECT COALESCE(si.industry_sw1, '未知') as sector, SUM(pp.quantity) as total_qty
-                FROM paper_positions pp
-                LEFT JOIN stock_industry si ON pp.stock_code = si.code
-                WHERE pp.run_id = :rid AND pp.exit_date IS NULL
-                GROUP BY COALESCE(si.industry_sw1, '未知') ORDER BY total_qty DESC
-            """), {"rid": run_id}).fetchall()
-        if sec_rows:
+            # 获取CSI300和红利股票列表
+            csi300 = set()
+            try:
+                csi_rows = conn.execute(text("SELECT con_code FROM index_constituent WHERE idx_code='000300'")).fetchall()
+                csi300 = {r[0] for r in csi_rows}
+            except Exception: pass
+            dividend = set()
+            try:
+                div_rows = conn.execute(text("SELECT DISTINCT code FROM stock_daily_extra WHERE trade_date=(SELECT MAX(trade_date) FROM stock_daily_extra) AND pb>0 AND pb<1.5")).fetchall()
+                dividend = {r[0] for r in div_rows}
+            except Exception: pass
+            # 持仓股票
+            pos_codes = conn.execute(text("SELECT stock_code, SUM(quantity) FROM paper_positions WHERE run_id=:rid AND exit_date IS NULL GROUP BY stock_code"), {"rid": run_id}).fetchall()
+        if pos_codes:
+            sector_qty = Counter()
+            for code, qty in pos_codes:
+                sec = classify_stock(code, csi300, dividend)
+                sector_qty[sec] += int(qty)
             import json as _json
-            sec_data = [{"name": r[0], "value": int(r[1])} for r in sec_rows]
+            sec_data = [{"name": k, "value": v} for k, v in sector_qty.most_common()]
             sec_chart = _json.dumps({
                 "tooltip": {"trigger": "item", "formatter": "{b}: {c} 股 ({d}%)"},
                 "series": [{"type": "pie", "radius": ["30%", "70%"], "data": sec_data,
                             "label": {"fontSize": 10}, "emphasis": {"itemStyle": {"shadowBlur": 10}}}],
             })
-            sector_html = f'<div class="card"><h3>持仓行业分布</h3><div id="sector-chart-{run_id}" class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
+            sector_html = f'<div class="card"><h3>持仓板块分布</h3><div id="sector-chart-{run_id}" class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
     except Exception:
         pass
 
