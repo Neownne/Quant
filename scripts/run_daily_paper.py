@@ -332,16 +332,20 @@ def main():
 
     logger.info(f"策略: {len(strategies)} 个 ({[s['version'] for s in strategies]})")
 
-    # 数据同步（每次运行都检查并同步到最新）
+    # 数据同步：只在数据落后时跑，且只同步候选池股票
     if not args.no_sync:
         try:
             engine = get_engine()
             with engine.connect() as c:
                 latest = c.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
-            from data.sync import sync_stock_daily
-            sync_start = (latest[0] - timedelta(days=3)).strftime("%Y%m%d") if latest and latest[0] else (date.today() - timedelta(days=10)).strftime("%Y%m%d")
-            logger.info(f"数据同步: {sync_start} → 最新")
-            sync_stock_daily(engine, start_date=sync_start, workers=1)
+            today = date.today()
+            if latest and latest[0] and (today - latest[0]).days >= 1:
+                from data.sync import sync_stock_daily
+                sync_start = (latest[0] - timedelta(days=3)).strftime("%Y%m%d")
+                logger.info(f"数据同步: {sync_start} → 最新")
+                sync_stock_daily(engine, start_date=sync_start, workers=1)
+            else:
+                logger.info(f"数据已最新 ({latest[0] if latest else '?'}), 跳过同步")
             engine.dispose()
         except Exception as e:
             logger.warning(f"同步跳过: {e}")
