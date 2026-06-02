@@ -1,25 +1,161 @@
 # 项目规范
 
-## Superpowers 工作流
+## 快速参考
 
-在每次会话开始时，你必须：
-1. 检查当前任务是否适用任何 skill（即使只有 1% 的可能性）
-2. 如果适用，先加载 skill，再执行任何操作
-3. 遵循 skill 中的检查清单和流程
+```bash
+# 每日模拟盘
+python scripts/run_daily_paper.py                    # 数据同步 + 双策略执行
+python scripts/run_daily_paper.py --no-sync           # 跳过同步
+python scripts/run_daily_paper.py --strategies v1.5   # 只跑 v1.5
 
-## 可用 Skills 目录
+# 回测
+python scripts/run_ml_backtest.py --strategy 舞
 
-项目 skills 位于 `.claude/skills/` 目录下：
-- `using-superpowers` - 元技能（必须先加载）
-- `brainstorming` - 需求澄清
-- `writing-plans` - 制定计划
-- `executing-plans` - 执行计划
-- `test-driven-development` - TDD 流程
-- `systematic-debugging` - 系统调试
+# Web
+python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
+# → http://localhost:8899/paper   模拟盘
+# → http://localhost:8899/backtest 回测
 
-## Skill 加载指令
+# 数据库
+pg_ctl -D /opt/homebrew/var/postgresql@18 -l /opt/homebrew/var/log/postgresql.log start
+pg_ctl -D /opt/homebrew/var/postgresql@18 stop
+```
 
-当需要加载 skill 时，使用 Skill 工具调用对应的 skill 名称。
+## 架构总览
+
+```
+┌─ 数据层 ─────────────────────────────────────────────┐
+│  PostgreSQL (localhost:5432)                          │
+│  stock_daily (5524只, 2015~今)                        │
+│  stock_minute (1472只, 2024-03~今)                    │
+│  index_constituent (CSI300成分股)                      │
+│  paper_* (模拟盘: account/signals/positions/daily_pnl) │
+└──────────────────────────────────────────────────────┘
+          │                    ▲
+          ▼                    │
+┌─ 因子层 ─────────────────────────────────────────────┐
+│  FactorEngine → IC Gate → Orthogonal Screening        │
+│  86+ 因子 (alpha101/191/custom/fundamental/intraday)   │
+└──────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─ 模型层 ─────────────────────────────────────────────┐
+│  Walk-Forward (3yr train / 1yr val, annual step)      │
+│  XGBoost + LightGBM → EnsemblePredictor                │
+│  RegimeAwareEnsemble (5状态自适应)                      │
+└──────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─ 组合层 ─────────────────────────────────────────────┐
+│  select_topk_ndrop(K=15,N=2) → 等权分配                │
+│  风控: 个股-8% / 组合-20%减仓 / -25%清仓               │
+└──────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─ 模拟盘层 ──────────────────────────────────────────┐
+│  PaperEngine: 信号→T+1执行→DB写入                     │
+│  每日流程: 同步数据→训练→预测→执行信号→保存新信号     │
+└──────────────────────────────────────────────────────┘
+```
+
+## 模拟盘数据流
+
+```
+Day T 收盘后:
+  1. sync_stock_daily (增量, 8并发)
+  2. load_data (OHLCV + extra + 分钟 + 日内特征)
+  3. build_factor_dataset → IC筛选 → 正交筛选
+  4. walk_forward_train_by_regime (XGBoost+LGB per regime)
+  5. T+1执行: 找到 signal_date < today 且无对应 position 的信号 → run_daily()
+  6. 预测今日: ensemble.predict() → 取Top-15 → 保存为待执行信号
+  7. 首次无持仓时自动建仓
+
+Day T+1:
+  脚本再次运行 → 步骤5执行T日的信号 → NDrop调仓 → 生成T+1的新信号
+```
+
+## 模拟盘数据库表
+
+| 表 | 说明 | 关键列 |
+|----|------|--------|
+| paper_account | 账户现金 | id, cash, initial_capital |
+| paper_runs | 策略运行记录 | id, strategy_id, version_id |
+| paper_signals | 每日信号 | run_id, signal_date, stock_code, score, rank |
+| paper_positions | 逐笔持仓 | run_id, stock_code, entry_date, entry_price, exit_date, pnl |
+| paper_daily_pnl | 每日估值 | account_id, trade_date, total_value, daily_return |
+| paper_orders | 订单审计 | account_id, code, direction, price, volume |
+
+**v1.4**: account_id=15, run_id=2
+**v1.5**: account_id=17, run_id=4
+**小市值**: account_id=16, run_id=3
+
+## Web 模拟盘页面结构
+
+```
+http://localhost:8899/paper
+┌──────────────┬──────────────┐
+│  舞 v1.4      │  舞 v1.5      │  ← /api/paper-run/{run_id}?account_id={aid}
+│  [汇总]       │  [汇总]       │
+│  [每日估值]    │  [每日估值]    │
+│  [持仓表]      │  [持仓表]      │
+│  [权益+基准]   │  [权益+基准]   │
+│  [每日盈亏]    │  [每日盈亏]    │
+│  [待执行信号]  │  [待执行信号]  │
+│  [行业饼图]    │  [行业饼图]    │
+├──────────────┴──────────────┤
+│  小市值 v1.0  account=16     │
+└─────────────────────────────┘
+```
+
+## 策略配置
+
+`config/paper_strategies.py` 定义每日跑数的策略参数：
+
+```python
+PAPER_STRATEGIES = [
+    {"name": "舞", "version": "v1.4", "account_id": 15, "run_id": 2,
+     "factor_mode": "standard", ...},
+    {"name": "舞", "version": "v1.5", "account_id": 17, "run_id": 4,
+     "factor_mode": "full", ...},
+]
+```
+
+- `factor_mode: "standard"` → 47个技术因子 + 14个基本面
+- `factor_mode: "full"` → 全部因子（含日内分钟+市场宽度）
+
+## v1.4 vs v1.5 差异
+
+| | v1.4 | v1.5 |
+|------|------|------|
+| 因子集 | standard (~61个) | full (~85个) |
+| 日内因子 | 无 | close_auction_strength, pm_ret, intra_vol_skew 等 |
+| IC筛选后 | ~6-7个 | ~11个 |
+| 滑点 | 0.1% | 0.1% |
+
+## 验证检查清单
+
+每次修改后必须验证：
+
+- [ ] `python scripts/run_daily_paper.py --dry-run --no-sync` 不报错
+- [ ] Web 页面三区加载正常 (v1.4 / v1.5 / 小市值)
+- [ ] 待执行信号(T+1)区域有数据
+- [ ] 持仓表显示 entry_price ≠ 当前价（有浮盈浮亏）
+- [ ] 权益曲线显示多天数据
+- [ ] 每日盈亏柱状图有红绿柱
+- [ ] 行业分布饼图有数据
+- [ ] 汇总区显示总资产/日收益/累计/回撤
+- [ ] v1.4 和 v1.5 持仓不完全相同
+- [ ] `python -m pytest tests/ -q --ignore=tests/test_overfit_check.py --ignore=tests/test_regime.py` 全绿
+
+## 常见问题
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| PostgreSQL 连不上 | 电脑重启后 PG 没启动 | `pg_ctl -D /opt/homebrew/var/postgresql@18 start` |
+| 待执行信号为空 | 脚本跑了多次，信号被提前执行 | 删掉当日信号重跑 |
+| 纸面资产腰斩 | paper_daily_pnl 的日收益算错 | 用累计盈亏法重建 |
+| 数据同步太慢 | 全量 5524 只 | 8 并发，每天只差 1 天，2-3 分钟 |
+| 两个策略持仓一样 | 用了同一个模型 | 确保 factor_mode 不同 |
 
 ## 回测统一参数
 
@@ -31,51 +167,10 @@
 | COMMISSION | 0.00009 | 万0.9 佣金（买卖双向） |
 | STAMP_DUTY | 0.0005 | 万5 印花税（卖出单向） |
 | SLIPPAGE | 0.001 | 0.1% 滑点 |
-| REBALANCE_FREQ | 5 | 默认周度调仓 |
 | NDROP_N | 2 | NDrop 每次替换最差2只 |
 | STOP_LOSS_PCT | 0.08 | 个股止损-8% |
 | MAX_DD_LIMIT | 0.25 | 组合最大回撤-25%清仓 |
 
-选股管线：预测打分 → 排雷过滤(8项检查，允许≤3项违规) → NDrop剔除最差(保留K-N，替换N) → Top-N选股 → 等权持有
+选股管线：预测打分 → 排雷过滤(8项检查，允许≤3项违规) → NDrop剔除最差 → Top-N选股 → 等权持有
 
-风控管线：每日检查持仓 → 个股止损-8%(硬止损) → 组合回撤-20%减仓 → 组合回撤-25%清仓(10天冷静期+重置peak) → 指数15日跌超12%空仓
-
-## 策略
-
-舞 v1.5 — 5状态自适应ML日频策略。详见 VERSION.md。
-
-## 项目结构
-
-| 目录 | 说明 |
-|------|------|
-| `config/` | 配置: settings.py(交易参数), sector_map.py(板块分类) |
-| `data/` | 数据: db.py(表定义), sync.py(同步), fetcher.py(抓取) |
-| `factors/` | 因子: engine.py, alpha101/191, market_breadth, sector_fear_greed 等 |
-| `models/` | 模型: trainer.py(XGBoost+LGB), regime.py, sector_model.py 等 |
-| `portfolio/` | 组合: selector.py(NDrop), risk.py(风控), paper_engine.py(模拟盘) |
-| `rl/` | 强化学习: environment, models, predictor, sector_env(实验) |
-| `scripts/` | 脚本: run_ml_backtest.py(回测), run_daily_paper.py(每日模拟) |
-| `web/` | Web: FastAPI(routes/), Jinja2(templates/), ECharts(app.js) |
-| `tests/` | 测试: pytest |
-| `output/` | 产出: backtests/, etf/, reports/ |
-| `docs/` | 文档 |
-
-## 版本历史
-
-### v1.5 (2026-06-01)
-- 日内因子引入: 尾盘集合竞价强度、下午收益率、日内波动偏度
-- IC筛选偶然选中更好因子组合，CAGR 提升至 53.2%
-- 板块分类设施: CSI300成分股(index_constituent表)、红利/大盘/小盘分类
-- 板块宽度特征: sector_breadth.py(15特征)、sector_fear_greed.py(恐贪指数)
-- 实验性RL板块打分: rl/ 模块(MPS GPU可用)
-- 回测 CAGR 53.2%, Sharpe 1.59, MaxDD 20.6%
-
-### v1.4 (2026-05-30)
-- 跌停顺延(防实盘跌停无法卖出) + 去OHLCV污染
-- 模拟盘上线: run_daily_paper.py + 小市值 run_small_cap_paper.py
-- 回测 CAGR 46.1%, Sharpe 1.40, MaxDD 24.8%
-
-### v1.3 (2026-05-30)
-- 5状态市场检测 + Regime自适应调仓/仓位/止损
-- 新增纯价格动量因子(price_mom_5/10/accel)
-- 回测 CAGR 44.6%, Sharpe 1.34, MaxDD 25.8%
+风控管线：个股止损-8% → 组合回撤-20%减仓 → 组合回撤-25%清仓 → 指数15日跌超12%空仓

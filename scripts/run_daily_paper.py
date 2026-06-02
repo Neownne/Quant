@@ -235,16 +235,18 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
         return None
     today_factor["regime"] = today_regime
 
-    # T+1 执行：处理待执行信号
+    # T+1 执行：只执行严格早于今天的待执行信号
     if not dry_run:
         with engine.connect() as conn:
+            today_str = pred_date.strftime("%Y-%m-%d")
             prev = conn.execute(text("""
                 SELECT DISTINCT ps.signal_date FROM paper_signals ps
-                WHERE ps.run_id = :rid AND NOT EXISTS (
+                WHERE ps.run_id = :rid AND ps.signal_date < :today
+                AND NOT EXISTS (
                     SELECT 1 FROM paper_positions pp
                     WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
                 ) ORDER BY ps.signal_date
-            """), {"rid": run_id}).fetchall()
+            """), {"rid": run_id, "today": today_str}).fetchall()
         for prow in prev:
             prev_date = pd.Timestamp(prow[0])
             prev_factor = dataset[dataset["trade_date"] == prev_date].copy()
