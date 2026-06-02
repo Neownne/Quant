@@ -901,7 +901,8 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 WHERE ps.run_id = :rid
                 AND NOT EXISTS (
                     SELECT 1 FROM paper_positions pp
-                    WHERE pp.run_id = ps.run_id AND pp.entry_date > ps.signal_date
+                    WHERE pp.run_id = ps.run_id AND pp.stock_code = ps.stock_code
+                    AND pp.entry_date > ps.signal_date
                 )
                 ORDER BY ps.signal_date DESC, ps.rank
                 LIMIT 15

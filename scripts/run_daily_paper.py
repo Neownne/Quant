@@ -304,6 +304,7 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
                 conn.execute(text("""
                     INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                     VALUES (:rid, :sd, :sc, :ps, :rk)
+                    ON CONFLICT (run_id, signal_date, stock_code) DO NOTHING
                 """), {"rid": run_id, "sd": pred_date.date(), "sc": row["code"],
                        "ps": float(row["score"]), "rk": rank + 1})
             logger.info(f"[{name} {ver}] 信号: {min(top_n, len(preds))}只")
@@ -340,10 +341,11 @@ def main():
                 latest = c.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
             today = date.today()
             if latest and latest[0] and (today - latest[0]).days >= 1:
-                from data.sync import sync_stock_daily
+                from data.sync import sync_stock_daily, sync_index_daily
                 sync_start = (latest[0] - timedelta(days=3)).strftime("%Y%m%d")
                 logger.info(f"数据同步: {sync_start} → 最新")
                 sync_stock_daily(engine, start_date=sync_start, workers=8)
+                sync_index_daily(engine, start_date=sync_start)
             else:
                 logger.info(f"数据已最新 ({latest[0] if latest else '?'})")
             engine.dispose()

@@ -141,8 +141,8 @@ class PaperEngine:
         if target.empty:
             return self._skip_day(trade_date, cash, positions, day_ohlcv)
 
-        # 4. 获取今日价格
-        today_prices = self._get_price_map(day_ohlcv)
+        # 4. 获取今日价格（T+1执行用开盘价）
+        today_prices = self._get_price_map(day_ohlcv, use_open=True)
 
         # 5. 风控检查
         stop_codes, portfolio_reduced, reduced_positions = self._check_risk(
@@ -315,7 +315,7 @@ class PaperEngine:
                 if code not in prev_close_map:
                     prev_close_map[code] = cur_price_map[code]
 
-        result["close"] = result["code"].map(cur_price_map)
+        result["price"] = result["code"].map(cur_price_map)
         result = filter_limit_up_down(result, prev_close_map)
         valid_codes = set(factor_df["code"].unique())
         result = result[result["code"].isin(valid_codes)]
@@ -357,7 +357,7 @@ class PaperEngine:
         alloc = equal_weight(codes, cash)
         result = apply_position_limits(alloc, industry_map or {}, self.max_single, self.max_industry)
 
-        price_map = dict(zip(candidates["code"], candidates.get("close", pd.Series())))
+        price_map = dict(zip(candidates["code"], candidates.get("price", pd.Series())))
         weight_per_code = dict(zip(result["code"], result["weight"]))
         for i, row in result.iterrows():
             code = row["code"]
@@ -645,7 +645,7 @@ class PaperEngine:
         self, trade_date: pd.Timestamp, cash: float,
         positions: dict[str, dict], day_ohlcv: pd.DataFrame,
     ) -> dict:
-        today_prices = self._get_price_map(day_ohlcv)
+        today_prices = self._get_price_map(day_ohlcv, use_open=False)
         position_value = sum(
             pos["shares"] * today_prices.get(code, pos["cost_basis"])
             for code, pos in positions.items()
@@ -671,7 +671,7 @@ class PaperEngine:
         logger.warning(f"{trade_date.date()} 指数大跌触发，空仓")
         cash, positions, _ = self._load_state()
         day_ohlcv = ohlcv_data[ohlcv_data["trade_date"] == trade_date]
-        today_prices = self._get_price_map(day_ohlcv)
+        today_prices = self._get_price_map(day_ohlcv, use_open=False)
 
         crash_orders = []
         for code in list(positions.keys()):
