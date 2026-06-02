@@ -44,12 +44,34 @@ from data.fetcher import (
 
 # ---------- 工具 ----------
 
+_TRADING_CALENDAR: set[str] | None = None
+
+def _get_trading_calendar() -> set[str]:
+    """获取 A 股交易日历（缓存）。"""
+    global _TRADING_CALENDAR
+    if _TRADING_CALENDAR is None:
+        try:
+            import akshare as ak
+            df = ak.tool_trade_date_hist_sina()
+            _TRADING_CALENDAR = set(str(d) for d in df["trade_date"])
+        except Exception:
+            _TRADING_CALENDAR = set()
+    return _TRADING_CALENDAR
+
+
 def _latest_trading_day() -> date:
-    """最近的交易日（简单版：跳过周末，不考虑节假日）。"""
+    """最近的 A 股交易日（使用真实交易日历）。"""
     today = date.today()
-    if today.weekday() == 5:       # 周六 → 周五
+    calendar = _get_trading_calendar()
+    # 回退最多 10 天找最近交易日
+    for offset in range(10):
+        d = today - timedelta(days=offset)
+        if str(d) in calendar:
+            return d
+    # fallback: 跳过周末
+    if today.weekday() == 5:
         return today - timedelta(days=1)
-    if today.weekday() == 6:       # 周日 → 周五
+    if today.weekday() == 6:
         return today - timedelta(days=2)
     return today
 
@@ -175,13 +197,18 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
     cutoff = _latest_trading_day().strftime("%Y%m%d")
 
-    # 过滤：跳过已覆盖到最近交易日的股票
+    # 批量查询所有股票的已有日期（避免 N+1 问题）
+    existing_df = pd.read_sql(
+        "SELECT code, MAX(trade_date) AS latest FROM stock_daily GROUP BY code",
+        engine,
+    )
+    existing_map = dict(zip(existing_df["code"], existing_df["latest"].astype(str)))
+
     to_fetch: list[tuple[str, str, set]] = []
     for code in codes:
-        existing = get_existing_dates("stock_daily", code, engine)
-        latest = max(existing).strftime("%Y%m%d") if existing else start_date
+        latest = existing_map.get(code, start_date)
         if latest < cutoff:
-            to_fetch.append((code, latest, existing))
+            to_fetch.append((code, latest, set()))
 
     logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
 
