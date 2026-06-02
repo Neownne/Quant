@@ -235,7 +235,7 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
         return None
     today_factor["regime"] = today_regime
 
-    # T+1 执行：只执行严格早于今天的待执行信号
+    # T+1 执行：用今天的价格执行昨天的信号
     if not dry_run:
         with engine.connect() as conn:
             today_str = pred_date.strftime("%Y-%m-%d")
@@ -244,22 +244,23 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
                 WHERE ps.run_id = :rid AND ps.signal_date < :today
                 AND NOT EXISTS (
                     SELECT 1 FROM paper_positions pp
-                    WHERE pp.run_id = ps.run_id AND pp.entry_date = ps.signal_date
+                    WHERE pp.run_id = ps.run_id AND pp.entry_date > ps.signal_date
                 ) ORDER BY ps.signal_date
             """), {"rid": run_id, "today": today_str}).fetchall()
         for prow in prev:
             prev_date = pd.Timestamp(prow[0])
-            prev_factor = dataset[dataset["trade_date"] == prev_date].copy()
-            if prev_factor.empty:
+            # 用今天的数据执行（T+1：昨天信号，今天价格）
+            today_factor_exec = dataset[dataset["trade_date"] == pred_date].copy()
+            if today_factor_exec.empty:
                 continue
-            prev_regime = str(regime_df[regime_df["trade_date"] <= prev_date]["regime"].iloc[-1])
-            prev_factor["regime"] = prev_regime
+            today_regime_exec = str(regime_df[regime_df["trade_date"] <= pred_date]["regime"].iloc[-1])
+            today_factor_exec["regime"] = today_regime_exec
             eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=ensemble,
                               top_n=top_n, rebalance_mode="ndrop")
-            result = eng.run_daily(trade_date=prev_date, factor_df=prev_factor,
-                                   ohlcv_data=ohlcv, index_ohlcv=index_df, regime=prev_regime)
+            result = eng.run_daily(trade_date=pred_date, factor_df=today_factor_exec,
+                                   ohlcv_data=ohlcv, index_ohlcv=index_df, regime=today_regime_exec)
             if result:
-                logger.info(f"[{name} {ver}] T+1执行 {prev_date.date()}: 总资产={result['total_value']:,.0f}, "
+                logger.info(f"[{name} {ver}] T+1执行({prev_date.date()}信号→{pred_date.date()}执行): 总资产={result['total_value']:,.0f}, "
                             f"买{result['n_buy_orders']}/卖{result['n_sell_orders']}")
 
     # 预测今日信号

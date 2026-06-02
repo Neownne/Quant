@@ -598,12 +598,16 @@ class PaperEngine:
                         "ed": dt, "ep": o["price"], "qty": o["volume"],
                     })
 
-                # 5. 更新现金
+                # 5. 更新现金（含交易成本）
                 buy_total = sum(o["price"] * o["volume"] for o in buy_orders)
                 sell_total = sum(o["price"] * o["volume"] for o in sell_orders + [r for r in risk_orders if r["direction"] == "SELL"])
+                cost = (
+                    buy_total * (self.commission + self.slippage) +
+                    sell_total * (self.commission + self.stamp_duty + self.slippage)
+                )
                 conn.execute(text(
-                    "UPDATE paper_account SET cash = cash + :sell - :buy WHERE id = :aid"
-                ), {"sell": sell_total, "buy": buy_total, "aid": self.account_id})
+                    "UPDATE paper_account SET cash = cash + :sell - :buy - :cost WHERE id = :aid"
+                ), {"sell": sell_total, "buy": buy_total, "cost": cost, "aid": self.account_id})
 
         finally:
             engine.dispose()
