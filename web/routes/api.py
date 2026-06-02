@@ -773,7 +773,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         with engine.connect() as conn:
             positions = conn.execute(text("""
                 SELECT stock_code, entry_date, entry_price, exit_date, exit_price, quantity, pnl, pnl_pct
-                FROM paper_positions WHERE run_id = :rid ORDER BY entry_date DESC LIMIT 50
+                FROM paper_positions WHERE run_id = :rid ORDER BY entry_date DESC
             """), {"rid": run_id}).fetchall()
             signals = conn.execute(text("""
                 SELECT ps.signal_date, ps.stock_code, ps.predicted_score, ps.rank
@@ -1014,7 +1014,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             tv = float(latest[1]); dr_val = float(latest[2] or 0)
             first_tv = float(daily_rows[0][1])
             total_ret = (tv - first_tv) / first_tv if first_tv > 0 else 0
-            max_dd = min((float(r[3]) for r in daily_rows if r[3] is not None), default=0)
+            max_dd = max((float(r[3] or 0) for r in daily_rows), default=0)
 
             # 现金和持仓市值
             try:
@@ -1033,8 +1033,8 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 <td>日收益: <span class="{'up' if dr_val>0 else 'down'}">{dr_val:+.2%}</span></td>
                 <td>最大回撤: <span class="down">{max_dd:.2%}</span></td>
             </tr></table>"""
-            if total_pnl != 0 or len(closed_pos) > 0:
-                summary_card += f"<p style='margin-top:8px;'>已平仓盈亏: <span class=\"{'up' if total_pnl > 0 else 'down'}\">{total_pnl:+,.0f}</span> | 胜率: {wins}/{len(closed_pos)} ({wins/max(len(closed_pos),1)*100:.0f}%)</p>"
+            win_rate = f"{wins/max(len(closed_pos),1)*100:.0f}%" if closed_pos else "N/A"
+            summary_card += f"<p style='margin-top:8px;'>已平仓盈亏: <span class=\"{'up' if total_pnl > 0 else 'down'}\">{total_pnl:+,.0f}</span> | 胜率: {wins}/{len(closed_pos)} ({win_rate})</p>"
             summary_card += "</div>"
 
             # 历史日收益表

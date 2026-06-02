@@ -652,8 +652,10 @@ class PaperEngine:
         self.peak_value = max(self.peak_value or total_value, total_value)
 
         if not self.signal_only:
+            prev_total = self.peak_value or total_value
+            daily_ret = (total_value / prev_total - 1) if prev_total > 0 else 0
             drawdown = ((self.peak_value - total_value) / self.peak_value) if self.peak_value and self.peak_value > 0 else 0
-            self._record_daily_pnl(trade_date, cash, position_value, total_value, 0.0, drawdown)
+            self._record_daily_pnl(trade_date, cash, position_value, total_value, daily_ret, drawdown)
 
         return {
             "date": trade_date, "n_candidates": 0, "n_selected": 0,
