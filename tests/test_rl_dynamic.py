@@ -173,6 +173,79 @@ import numpy as np
 import pandas as pd
 
 
+from rl_dynamic.predictor import RLDynamicPredictor
+import numpy as np
+
+
+class TestPredictor:
+    """RLDynamicPredictor 测试。"""
+
+    def test_predict_returns_dataframe(self):
+        from rl_dynamic.policy_net import FactorWeightNet
+        from rl_dynamic.state_builder import StateBuilder
+        net = FactorWeightNet(state_dim=10, n_factors=3)
+        builder = StateBuilder(n_factors=3)
+        predictor = RLDynamicPredictor(net, ["f0", "f1", "f2"], builder)
+
+        df = pd.DataFrame({
+            "code": ["000001", "000002", "000003"],
+            "f0": [1.0, 2.0, 0.5],
+            "f1": [-0.5, 0.3, 1.2],
+            "f2": [0.2, 0.8, -0.3],
+        })
+        result = predictor.predict(df)
+        assert "code" in result.columns
+        assert "score" in result.columns
+        assert "rank" in result.columns
+        assert len(result) == 3
+        assert result["rank"].min() == 1
+
+    def test_predict_sorted_descending(self):
+        from rl_dynamic.policy_net import FactorWeightNet
+        from rl_dynamic.state_builder import StateBuilder
+        net = FactorWeightNet(state_dim=5, n_factors=2)
+        builder = StateBuilder(n_factors=2)
+        predictor = RLDynamicPredictor(net, ["f0", "f1"], builder)
+
+        df = pd.DataFrame({
+            "code": ["A", "B", "C"],
+            "f0": [10.0, 1.0, 5.0],
+            "f1": [0.1, 10.0, 0.1],
+        })
+        result = predictor.predict(df)
+        scores = result["score"].values
+        for i in range(len(scores) - 1):
+            assert scores[i] >= scores[i + 1]
+
+    def test_predict_with_market_state(self):
+        from rl_dynamic.policy_net import FactorWeightNet
+        from rl_dynamic.state_builder import StateBuilder
+        net = FactorWeightNet(state_dim=10, n_factors=3)
+        builder = StateBuilder(n_factors=3)
+        predictor = RLDynamicPredictor(net, ["f0", "f1", "f2"], builder)
+
+        df = pd.DataFrame({
+            "code": ["000001", "000002"],
+            "f0": [1.0, -1.0],
+            "f1": [0.5, 0.0],
+            "f2": [0.3, 0.3],
+        })
+        state = np.zeros(10, dtype=np.float32)
+        result = predictor.predict(df, market_state=state)
+        assert len(result) == 2
+        assert "score" in result.columns
+
+    def test_empty_dataframe(self):
+        from rl_dynamic.policy_net import FactorWeightNet
+        from rl_dynamic.state_builder import StateBuilder
+        net = FactorWeightNet(state_dim=5, n_factors=2)
+        builder = StateBuilder(n_factors=2)
+        predictor = RLDynamicPredictor(net, ["f0", "f1"], builder)
+        df = pd.DataFrame(columns=["code", "f0", "f1"])
+        result = predictor.predict(df)
+        assert result.empty
+
+
 class TestEnv:
     """WeightLearningEnv 测试。"""
 
