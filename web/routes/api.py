@@ -867,22 +867,29 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     except Exception:
         pass
 
-    # 当前持仓（含名称+当日涨幅+份额+市值+浮动盈亏）
+    # 当前持仓（入场价标注入场日+开盘价，现价标注最新收盘日）
     open_html = ""
     if open_pos:
-        open_html = "<table><thead><tr><th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>现价</th><th>股数</th><th>市值</th><th>浮动盈亏</th></tr></thead><tbody>"
+        # 获取最新行情日期
+        try:
+            with engine.connect() as conn:
+                latest_d = conn.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()[0]
+                latest_str = str(latest_d) if latest_d else "?"
+        except Exception:
+            latest_str = "?"
+        open_html = f"<table><thead><tr><th>代码</th><th>名称</th><th>入场价</th><th>现价</th><th>股数</th><th>市值</th><th>浮动盈亏</th></tr></thead><tbody>"
         for p in open_pos:
             code, ed, ep, xd, xp, qty, pnl, pct = p
             price_info = price_map.get(code, (ep, 0))
             cur_price, chg_pct = price_info
             market_value = cur_price * qty
-            cost_value = ep * qty
             float_pnl = (cur_price - ep) * qty if ep > 0 else 0
             float_pnl_pct = (cur_price / ep - 1) * 100 if ep > 0 else 0
             pnl_class = "up" if float_pnl > 0 else "down"
             open_html += f"""<tr>
-                <td><strong>{code}</strong></td><td>{name_map.get(code, '?')}</td><td>{ed}</td>
-                <td>{ep:.2f}</td><td>{cur_price:.2f}</td>
+                <td><strong>{code}</strong></td><td>{name_map.get(code, '?')}</td>
+                <td>{ep:.2f} <span style='color:#999;font-size:10px'>({ed} 开盘)</span></td>
+                <td>{cur_price:.2f} <span style='color:#999;font-size:10px'>({latest_str} 收盘)</span></td>
                 <td>{qty}股</td><td>{market_value:,.0f}</td>
                 <td class="{pnl_class}">{float_pnl:+,.0f} ({float_pnl_pct:+.2f}%)</td>
             </tr>"""

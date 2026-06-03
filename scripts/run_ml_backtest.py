@@ -249,6 +249,7 @@ def main():
     parser.add_argument("--rebalance-freq", type=int, default=1, help="调仓频率（交易日），默认1=日频")
     parser.add_argument("--universe-size", type=int, default=500, help="候选池上限，0=全市场非ST")
     parser.add_argument("--small-cap", action="store_true", help="小市值策略模式（按市值升序选股+行业分散+季节空仓）")
+    parser.add_argument("--take-profit", type=float, default=0.5, help="个股止盈阈值, 0=不启用 (默认50%%)")
     parser.add_argument("--dd-reduce", type=float, default=0.20, help="组合回撤减仓阈值")
     parser.add_argument("--dd-liquidate", type=float, default=0.25, help="组合回撤清仓阈值")
     parser.add_argument("--index-crash", type=float, default=-0.12, help="指数大跌阈值")
@@ -1193,10 +1194,11 @@ def main():
             day_counter += 1
             top_codes = current_holdings
 
-            # ── 个股止损：固定比例止损（跌停封死则顺延） ──
+            # ── 个股止损/止盈 ──
             next_prices = price_lookup.get(str(next_dt)[:10], {})
             today_prices_sell = price_lookup.get(str(dt)[:10], {})
             stopped_out: list[str] = []
+            take_profit_pct = args.take_profit
             for code in top_codes[:]:
                 if code in cost_basis and code in next_prices and cost_basis[code] > 0:
                     pnl_pct = (next_prices[code] - cost_basis[code]) / cost_basis[code]
@@ -1204,14 +1206,27 @@ def main():
                     limit_down = today_prices_sell.get(code, 0) * (0.80 if code.startswith('3') else 0.90) * 0.995
                     if next_prices.get(code, 0) <= limit_down and next_prices.get(code, 0) > 0:
                         continue  # 跌停封死，推迟到次日
+                    # 止损
                     if pnl_pct <= -reg_stop:
                         stopped_out.append(code)
                         stop_loss_events.append({
-                            "date": str(next_dt)[:10],
-                            "code": code,
+                            "date": str(next_dt)[:10], "code": code,
                             "entry_price": round(cost_basis[code], 3),
                             "exit_price": round(next_prices[code], 3),
-                            "pnl_pct": round(pnl_pct, 4),
+                            "pnl_pct": round(pnl_pct, 4), "reason": "止损",
+                        })
+                        current_holdings.remove(code)
+                        cost_basis.pop(code, None)
+                        peak_price.pop(code, None)
+                        position_entry_day.pop(code, None)
+                    # 止盈
+                    elif pnl_pct >= take_profit_pct:
+                        stopped_out.append(code)
+                        stop_loss_events.append({
+                            "date": str(next_dt)[:10], "code": code,
+                            "entry_price": round(cost_basis[code], 3),
+                            "exit_price": round(next_prices[code], 3),
+                            "pnl_pct": round(pnl_pct, 4), "reason": "止盈",
                         })
                         current_holdings.remove(code)
                         cost_basis.pop(code, None)
