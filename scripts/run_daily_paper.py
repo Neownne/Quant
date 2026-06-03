@@ -172,7 +172,10 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
     forward_days, train_years, top_n = strategy_cfg["forward_days"], strategy_cfg["train_years"], strategy_cfg["top_n"]
 
     # 因子选择
-    if strategy_cfg.get("factor_mode") == "full":
+    mode = strategy_cfg.get("factor_mode", "standard")
+    if mode == "all":
+        factor_names = list(ALL_FACTORS.keys())
+    elif mode == "full":
         factor_names = [f for f in V15_FACTOR_NAMES if f in ALL_FACTORS]
     else:
         factor_names = [f for f in V14_FACTOR_NAMES if f in ALL_FACTORS]
