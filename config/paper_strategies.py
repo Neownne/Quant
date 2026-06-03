@@ -15,7 +15,7 @@ PAPER_STRATEGIES = [
         "forward_days": 5,
         "train_years": 3,
         "top_n": TradingConfig.TOP_N,
-        "factor_mode": "all",  # 全量因子(IC自动筛选最优)
+        "factor_mode": "all",
     },
     {
         "name": "舞",
@@ -26,6 +26,17 @@ PAPER_STRATEGIES = [
         "forward_days": 5,
         "train_years": 3,
         "top_n": TradingConfig.TOP_N,
-        "factor_mode": "full",  # 69因子(含日内分钟)
+        "factor_mode": "full",
+    },
+    {
+        "name": "RL-Dynamic",
+        "version": "v1.0",
+        "account_id": 18,
+        "run_id": 5,
+        "universe_size": 500,
+        "forward_days": 5,
+        "train_years": 3,
+        "top_n": TradingConfig.TOP_N,
+        "factor_mode": "all",
     },
 ]
