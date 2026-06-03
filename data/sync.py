@@ -637,7 +637,7 @@ def main():
     logger.success("全部同步任务完成")
 
     # 同步完成后执行质量校验，不通过则阻断下游因子计算
-    today = date.today()
+    today = _latest_trading_day()
     passed = _run_quality_gate(today)
     if not passed:
         logger.warning("质量校验未通过！下游因子计算应暂停，待数据问题修复后重跑。")

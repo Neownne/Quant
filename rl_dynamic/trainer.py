@@ -88,31 +88,13 @@ def walk_forward_train_rl_weights(
             logger.warning(f"PPO训练失败: {e}")
             continue
 
-        # 从 PPO 提取学到的策略 → FactorWeightNet
-        net = FactorWeightNet(builder.state_dim, pool.n_factors)
-        try:
-            ppo_sd = model.policy.state_dict()
-            # 只复制 feature extractor 的共享层
-            own_sd = net.state_dict()
-            for key in own_sd:
-                # 尝试匹配 PPO 的 mlp_extractor 或 policy_net
-                for ppo_key in [
-                    f"mlp_extractor.policy_net.{key}",
-                    f"mlp_extractor.shared_net.{key}",
-                ]:
-                    if ppo_key in ppo_sd and own_sd[key].shape == ppo_sd[ppo_key].shape:
-                        own_sd[key] = ppo_sd[ppo_key]
-                        break
-            net.load_state_dict(own_sd, strict=False)
-        except Exception:
-            pass  # 回退到随机初始化
-        net.to(device)
-
+        # 直接保存 PPO 模型（不再尝试拷贝权重）
         results.append({
-            "policy_net": net,
-            "ppo_model": model,  # 保留PPO模型备用
+            "ppo_model": model,
+            "builder": builder,
             "factor_names": pool.get_factor_names(),
             "state_dim": builder.state_dim,
+            "n_factors": pool.n_factors,
             "train_end": train_df["trade_date"].max(),
             "val_end": val_df["trade_date"].max(),
         })

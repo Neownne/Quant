@@ -371,6 +371,18 @@ def main():
         return
     logger.info(f"策略: {[s['version'] for s in strategies]}")
 
+    # 首次引导：确保 paper_account 存在
+    engine = get_engine()
+    with engine.begin() as c:
+        for cfg in strategies:
+            aid = cfg["account_id"]
+            exists = c.execute(text("SELECT 1 FROM paper_account WHERE id=:aid"), {"aid": aid}).fetchone()
+            if not exists:
+                c.execute(text("INSERT INTO paper_account (id, name, initial_capital, cash) VALUES (:aid, :n, :cap, :cap)"),
+                          {"aid": aid, "n": f"{cfg['name']}-{cfg['version']}", "cap": TradingConfig.INITIAL_CASH})
+                logger.info(f"创建 paper_account id={aid}")
+    engine.dispose()
+
     # 数据同步
     if not args.no_sync:
         try:

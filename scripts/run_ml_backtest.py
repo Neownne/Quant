@@ -1218,17 +1218,18 @@ def main():
                         peak_price.pop(code, None)
                         position_entry_day.pop(code, None)
 
-            if stopped_out:
-                # 止损卖出成本：佣金 + 印花税 + 滑点
-                stop_cost = len(stopped_out) * (COMM + STAMP + SLIP) / max(len(top_codes) + len(stopped_out), 1)
-                cost += stop_cost
-
             daily_costs.append(cost)
             turnover_rates.append(turnover_rate)
 
             # 持仓收益：用 dt 的 ret_1d（= close[next_dt]/close[dt]-1）
             selected_dt = day_data[day_data["code"].isin(top_codes)]
             if selected_dt.empty:
+                # 空仓也要记录 NAV（缓存现金）
+                nav *= 1.0
+                peak_nav = max(peak_nav, nav)
+                all_dates.append(str(next_dt)[:10])
+                all_navs.append(round(nav, 6))
+                day_counter += 1
                 continue
 
             daily_ret = float(selected_dt["ret_1d"].mean())

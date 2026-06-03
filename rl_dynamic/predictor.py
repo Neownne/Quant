@@ -1,55 +1,37 @@
-"""RL动态因子权重预测器。"""
+"""RL 动态因子权重预测器 — 用训练好的 PPO 直接推理。"""
 import numpy as np
 import pandas as pd
-import torch
 
 
 class RLDynamicPredictor:
-    """用RL学习到的因子权重给股票打分。
+    """PPO 模型 → 因子权重 → 加权打分。
 
-    实现标准 predict() 接口，与 EnsemblePredictor 兼容。
+    实现标准 predict() 接口。
     """
 
-    def __init__(self, policy_net, factor_names: list[str],
-                 builder, device: str = "cpu"):
-        self.net = policy_net
+    def __init__(self, ppo_model, factor_names: list[str], builder, device: str = "cpu"):
+        self.ppo_model = ppo_model
         self.factor_names = list(factor_names)
         self.builder = builder
         self.device = device
-        self.net.to(device)
-        self.net.eval()
 
     def predict(self, factor_df: pd.DataFrame,
                 market_state: np.ndarray = None) -> pd.DataFrame:
-        """对股票打分排序。
-
-        Args:
-            factor_df: 含 code + 因子列
-            market_state: 市场状态向量（可选，None则等权）
-
-        Returns:
-            DataFrame[code, score, rank] 按score降序
-        """
         if factor_df.empty:
             return pd.DataFrame(columns=["code", "score", "rank"])
 
-        # 获取因子权重
         if market_state is not None:
-            state_t = torch.tensor(market_state, dtype=torch.float32,
-                                   device=self.device).unsqueeze(0)
-            with torch.no_grad():
-                weights = self.net(state_t).squeeze(0).cpu().numpy()
+            action, _ = self.ppo_model.predict(market_state, deterministic=True)
+            weights = np.clip(action, 0, None)
+            weights = weights / max(weights.sum(), 1e-10)
         else:
             weights = np.ones(len(self.factor_names)) / len(self.factor_names)
 
-        # 构建因子矩阵
         cols = [f for f in self.factor_names if f in factor_df.columns]
-        col_indices = [i for i, f in enumerate(self.factor_names) if f in cols]
+        col_idx = [i for i, f in enumerate(self.factor_names) if f in cols]
         X = factor_df[cols].fillna(0).replace([np.inf, -np.inf], 0).values.astype(np.float32)
-        w = np.array([weights[i] for i in col_indices], dtype=np.float32)
+        w = np.array([weights[i] for i in col_idx], dtype=np.float32)
         w = w / max(w.sum(), 1e-10)
-
-        # 加权打分
         scores = X @ w
 
         result = pd.DataFrame({"code": factor_df["code"].values, "score": scores})
