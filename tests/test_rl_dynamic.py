@@ -49,3 +49,48 @@ class TestPaperAccount:
             assert r[1] == 15  # strategy_id = 15 (舞)
             assert r[3] == 'running'
         e.dispose()
+
+
+class TestStateBuilder:
+    """StateBuilder 市场状态特征构建器测试。"""
+
+    def test_state_dim(self):
+        """测试 state_dim 属性等于基本特征数 + 因子IC维度数。"""
+        from rl_dynamic.state_builder import StateBuilder, FEATURE_NAMES
+
+        builder = StateBuilder(n_factors=10)
+        assert builder.state_dim == len(FEATURE_NAMES) + 10
+        assert builder.state_dim >= 31  # 21 base + 10 ic
+
+    def test_build_returns_valid_array(self):
+        """测试 build() 返回有效的 float32 ndarray，无 NaN/Inf。"""
+        from rl_dynamic.state_builder import StateBuilder
+        import pandas as pd
+        import numpy as np
+
+        builder = StateBuilder(n_factors=3)
+        dates = pd.date_range("2026-01-02", periods=100, freq="B")
+        ohlcv = pd.DataFrame({
+            "code": ["000001"] * 100,
+            "trade_date": dates,
+            "close": 10 + np.cumsum(np.random.randn(100) * 0.1),
+            "amount": np.random.rand(100) * 1e8,
+            "turnover": np.random.rand(100) * 0.05,
+        })
+        idx = pd.DataFrame({
+            "trade_date": dates,
+            "close": 3000 + np.cumsum(np.random.randn(100) * 10),
+        })
+        state = builder.build(ohlcv, idx, {0: 0.02, 1: -0.01, 2: 0.03}, dates[-1])
+        assert isinstance(state, np.ndarray)
+        assert state.dtype == np.float32
+        assert len(state) == builder.state_dim
+        assert not np.any(np.isnan(state))
+        assert not np.any(np.isinf(state))
+
+    def test_feature_names_match_dim(self):
+        """测试 feature_names 列表长度与 state_dim 一致。"""
+        from rl_dynamic.state_builder import StateBuilder
+
+        builder = StateBuilder(n_factors=5)
+        assert len(builder.feature_names) == builder.state_dim
