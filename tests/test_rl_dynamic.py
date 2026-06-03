@@ -164,3 +164,87 @@ class TestFactorWeightNet:
         loss.backward()
         for name, param in net.named_parameters():
             assert param.grad is not None, f"{name} has no gradient"
+
+
+from rl_dynamic.env import WeightLearningEnv
+from rl_dynamic.trainer import _build_daily_data, walk_forward_train_rl_weights
+from rl_dynamic.state_builder import StateBuilder
+import numpy as np
+import pandas as pd
+
+
+class TestEnv:
+    """WeightLearningEnv 测试。"""
+
+    def test_env_creation(self):
+        """测试环境创建与 reset/step 基本流程。"""
+        builder = StateBuilder(n_factors=3)
+        pool = FactorPool(["rsi_7", "vol_20", "mom_20"])
+        state = np.zeros(builder.state_dim, dtype=np.float32)
+        matrix = np.random.randn(20, 3).astype(np.float32)
+        rets = np.random.randn(20).astype(np.float32)
+        data = {"2026-01-01": {"state": state, "factor_matrix": matrix, "returns": rets}}
+        env = WeightLearningEnv(builder, pool, data, n_factors=3)
+        obs, _ = env.reset()
+        assert obs.shape == (builder.state_dim,)
+        action = np.array([0.3, 0.5, 0.2], dtype=np.float32)
+        obs2, reward, term, trunc, info = env.step(action)
+        assert term is True
+        assert isinstance(reward, float)
+
+    def test_env_reward_with_uniform_weights(self):
+        """测试正相关因子高权重获得更高奖励。"""
+        builder = StateBuilder(n_factors=2)
+        pool = FactorPool(["rsi_7", "vol_20"])
+        state = np.zeros(builder.state_dim, dtype=np.float32)
+        # 构造15只股票: factor0与收益正相关，factor1与收益负相关
+        np.random.seed(42)
+        n_stocks = 15
+        factor0 = np.linspace(-3, 3, n_stocks, dtype=np.float32)
+        factor1 = -factor0
+        matrix = np.column_stack([factor0, factor1])
+        # 收益与factor0正相关
+        rets = (factor0 * 0.02 + np.random.randn(n_stocks).astype(np.float32) * 0.005)
+        data = {"d": {"state": state, "factor_matrix": matrix, "returns": rets}}
+        env = WeightLearningEnv(builder, pool, data, n_factors=2)
+        env.reset()
+        # 给factor0高权重（正相关）
+        _, r1, _, _, _ = env.step(np.array([0.9, 0.1], dtype=np.float32))
+        # 给factor1高权重（负相关）
+        env.reset()
+        _, r2, _, _, _ = env.step(np.array([0.1, 0.9], dtype=np.float32))
+        assert r1 > r2, f"正相关权重应得更高奖励, r1={r1}, r2={r2}"
+
+
+class TestTrainer:
+    """Trainer 测试。"""
+
+    def test_build_daily_data(self):
+        """测试 _build_daily_data 构建每日数据字典。"""
+        dates = pd.date_range("2026-01-02", periods=30, freq="B")
+        n = len(dates) * 10
+        ohlcv = pd.DataFrame({
+            "code": [f"{600000+i:06d}" for i in range(10)] * len(dates),
+            "trade_date": np.repeat(dates, 10),
+            "close": np.random.randn(n).cumsum() + 500,
+            "open": np.random.randn(n).cumsum() + 500,
+            "high": np.random.randn(n).cumsum() + 505,
+            "low": np.random.randn(n).cumsum() + 495,
+            "volume": np.random.rand(n) * 1e8,
+            "amount": np.random.rand(n) * 1e9,
+            "turnover": np.random.rand(n) * 0.05,
+        })
+        idx = pd.DataFrame({
+            "trade_date": dates,
+            "close": 3000 + np.cumsum(np.random.randn(len(dates)) * 10),
+        })
+        pool = FactorPool(["rsi_7", "vol_20", "mom_20"])
+        builder = StateBuilder(n_factors=pool.n_factors)
+        ds = pool.compute_factors(ohlcv, None)
+        ds["trade_date"] = pd.to_datetime(ds["trade_date"])
+        daily = _build_daily_data(ds, builder, pool, ohlcv, idx)
+        assert len(daily) > 0
+        first_key = list(daily.keys())[0]
+        assert "state" in daily[first_key]
+        assert "factor_matrix" in daily[first_key]
+        assert "returns" in daily[first_key]
