@@ -32,7 +32,7 @@ class TestPaperAccount:
             assert r is not None, "paper_account id=18 does not exist"
             assert r[0] == 18
             assert r[1] == 'RL-Dynamic'
-            assert r[2] == 1_000_000
+            assert r[2] > 0  # cash may vary from trading
         e.dispose()
 
     def test_paper_run_exists(self):
@@ -181,11 +181,12 @@ class TestPredictor:
     """RLDynamicPredictor 测试。"""
 
     def test_predict_returns_dataframe(self):
-        from rl_dynamic.policy_net import FactorWeightNet
         from rl_dynamic.state_builder import StateBuilder
-        net = FactorWeightNet(state_dim=10, n_factors=3)
+        class MockPPO:
+            def predict(self, obs, deterministic=True):
+                return (np.array([0.3, 0.3, 0.4]), None)
         builder = StateBuilder(n_factors=3)
-        predictor = RLDynamicPredictor(net, ["f0", "f1", "f2"], builder)
+        predictor = RLDynamicPredictor(MockPPO(), ["f0", "f1", "f2"], builder)
 
         df = pd.DataFrame({
             "code": ["000001", "000002", "000003"],
@@ -201,11 +202,12 @@ class TestPredictor:
         assert result["rank"].min() == 1
 
     def test_predict_sorted_descending(self):
-        from rl_dynamic.policy_net import FactorWeightNet
         from rl_dynamic.state_builder import StateBuilder
-        net = FactorWeightNet(state_dim=5, n_factors=2)
+        class MockPPO:
+            def predict(self, obs, deterministic=True):
+                return (np.array([0.5, 0.5]), None)
         builder = StateBuilder(n_factors=2)
-        predictor = RLDynamicPredictor(net, ["f0", "f1"], builder)
+        predictor = RLDynamicPredictor(MockPPO(), ["f0", "f1"], builder)
 
         df = pd.DataFrame({
             "code": ["A", "B", "C"],
@@ -218,11 +220,13 @@ class TestPredictor:
             assert scores[i] >= scores[i + 1]
 
     def test_predict_with_market_state(self):
-        from rl_dynamic.policy_net import FactorWeightNet
         from rl_dynamic.state_builder import StateBuilder
-        net = FactorWeightNet(state_dim=10, n_factors=3)
+        # mock PPO model
+        class MockPPO:
+            def predict(self, obs, deterministic=True):
+                return (np.array([0.5, 0.3, 0.2]), None)
         builder = StateBuilder(n_factors=3)
-        predictor = RLDynamicPredictor(net, ["f0", "f1", "f2"], builder)
+        predictor = RLDynamicPredictor(MockPPO(), ["f0", "f1", "f2"], builder)
 
         df = pd.DataFrame({
             "code": ["000001", "000002"],
@@ -236,11 +240,12 @@ class TestPredictor:
         assert "score" in result.columns
 
     def test_empty_dataframe(self):
-        from rl_dynamic.policy_net import FactorWeightNet
         from rl_dynamic.state_builder import StateBuilder
-        net = FactorWeightNet(state_dim=5, n_factors=2)
+        class MockPPO:
+            def predict(self, obs, deterministic=True):
+                return (np.array([0.6, 0.4]), None)
         builder = StateBuilder(n_factors=2)
-        predictor = RLDynamicPredictor(net, ["f0", "f1"], builder)
+        predictor = RLDynamicPredictor(MockPPO(), ["f0", "f1"], builder)
         df = pd.DataFrame(columns=["code", "f0", "f1"])
         result = predictor.predict(df)
         assert result.empty

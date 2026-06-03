@@ -112,51 +112,57 @@ def main():
     SLIP = TradingConfig.SLIPPAGE
     STAMP = TradingConfig.STAMP_DUTY
 
-    # ── 仿真（仅用最后一个窗口的模型，覆盖其验证期）──
+    # ── 仿真（所有窗口串联，每个窗口用各自模型）──
     nav = INIT
     positions = {}
     nav_history = [nav]
     daily_rets = []
+    all_val_dates = []
+    first_window = True
 
-    wr = train_results[-1]
-    builder = wr["builder"]
-    predictor = RLDynamicPredictor(wr["ppo_model"], wr["factor_names"], builder)
-    val_dates = [d for d in all_dates if wr["train_end"] < d <= wr["val_end"]]
-
-    for dt in val_dates:
-        day = ds[ds["trade_date"] == dt]
-        if len(day) < 10:
+    for wr in train_results:
+        # 跳过训练数据不足的窗口
+        val_dates_w = [d for d in all_dates if wr["train_end"] < d <= wr["val_end"]]
+        if len(val_dates_w) < 20:
             continue
 
-        state = builder.build(ohlcv, index_df, {}, dt)
-        day_factor = day[["code"] + factor_cols].fillna(0).replace([np.inf, -np.inf], 0)
-        preds = predictor.predict(day_factor, market_state=state)
-        scores = pd.Series(preds["score"].values, index=preds["code"].values).sort_values(ascending=False)
-        new_holdings, to_buy, to_sell = select_topk_ndrop(
-            scores, set(positions.keys()), K=args.top_n, N=args.ndrop_n)
+        # 用该窗口的模型仿真其验证期
+        builder = wr["builder"]
+        predictor = RLDynamicPredictor(wr["ppo_model"], wr["factor_names"], builder)
 
-        day_ret = 0.0
-        cost = 0.0
-        if dt in close_map.index:
-            for code in new_holdings:
-                if code in close_map.columns:
-                    p = close_map.loc[dt, code]
-                    if not np.isnan(p) and p > 0:
-                        if code in positions:
-                            day_ret += (p / positions[code] - 1)
-                        positions[code] = p
-                        cost += p * (COMM + SLIP)
+        for dt in val_dates_w:
+            day = ds[ds["trade_date"] == dt]
+            if len(day) < 10:
+                continue
+            all_val_dates.append(dt)
 
-        day_ret = day_ret / max(len(new_holdings), 1) if new_holdings else 0
-        cost += sum(close_map.loc[dt, c] * (STAMP + COMM + SLIP)
-                    for c in to_sell if dt in close_map.index and c in close_map.columns
-                    and not np.isnan(close_map.loc[dt, c]))
-        cost_ratio = cost / max(INIT, 1)
-        net_ret = day_ret - cost_ratio
+            state = builder.build(ohlcv, index_df, {}, dt)
+            day_factor = day[["code"] + factor_cols].fillna(0).replace([np.inf, -np.inf], 0)
+            preds = predictor.predict(day_factor, market_state=state)
+            scores = pd.Series(preds["score"].values, index=preds["code"].values).sort_values(ascending=False)
+            new_holdings, to_buy, to_sell = select_topk_ndrop(
+                scores, set(positions.keys()), K=args.top_n, N=args.ndrop_n)
 
-        nav *= (1 + net_ret)
-        nav_history.append(nav)
-        daily_rets.append(net_ret)
+            day_ret = 0.0; cost = 0.0
+            if dt in close_map.index:
+                for code in new_holdings:
+                    if code in close_map.columns:
+                        p = close_map.loc[dt, code]
+                        if not np.isnan(p) and p > 0:
+                            if code in positions:
+                                day_ret += (p / positions[code] - 1)
+                            positions[code] = p
+                            cost += p * (COMM + SLIP)
+
+            day_ret = day_ret / max(len(new_holdings), 1) if new_holdings else 0
+            cost += sum(close_map.loc[dt, c] * (STAMP + COMM + SLIP)
+                        for c in to_sell if dt in close_map.index and c in close_map.columns
+                        and not np.isnan(close_map.loc[dt, c]))
+            net_ret = day_ret - cost / max(INIT, 1)
+
+            nav *= (1 + net_ret)
+            nav_history.append(nav)
+            daily_rets.append(net_ret)
 
     # ── 指标 ──
     nav = np.array(nav_history)
@@ -173,15 +179,17 @@ def main():
     pk = np.maximum.accumulate(nav)
     mdd = float(np.max((pk - nav) / pk) * 100)
 
+    sim_start = all_val_dates[0] if all_val_dates else "N/A"
+    sim_end = all_val_dates[-1] if all_val_dates else "N/A"
     print(f"\n{'='*50}")
-    print(f"RL-Dynamic 回测结果 (qfq前复权)")
+    print(f"RL-Dynamic v2.0 回测结果 (qfq前复权)")
     print(f"{'='*50}")
     print(f"总收益:    {total_ret:.1f}%")
     print(f"年化收益:  {cagr:.1f}%")
     print(f"Sharpe:    {sh:.2f}")
     print(f"最大回撤:  {mdd:.1f}%")
     print(f"交易天数:  {td}")
-    print(f"仿真区间:  {val_start.date()} ~ {val_end.date()}")
+    print(f"仿真区间:  {sim_start.date() if hasattr(sim_start,'date') else sim_start} ~ {sim_end.date() if hasattr(sim_end,'date') else sim_end}")
 
     engine.dispose()
 

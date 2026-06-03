@@ -24,22 +24,17 @@
     <div id="paper-msg"></div>
 </div>
 
-<!-- 上排: v1.6 | v1.5 | RL-Dynamic -->
-<div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+<!-- 上排: v1.6 | 小市值 -->
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
     <div>
         <h2 style="color:#1976d2;margin-bottom:4px;">舞 v1.6</h2>
-        <p style="color:#888;font-size:10px;margin:0 0 8px 0;">全因子IC筛选 · account=15</p>
+        <p style="color:#888;font-size:11px;margin:0 0 10px 0;">全因子IC筛选 · account=15</p>
         <div hx-get="/api/paper-run/2?account_id=15" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
     <div>
-        <h2 style="color:#7b1fa2;margin-bottom:4px;">舞 v1.5</h2>
-        <p style="color:#888;font-size:10px;margin:0 0 8px 0;">69因子+日内增强 · account=17</p>
-        <div hx-get="/api/paper-run/4?account_id=17" hx-trigger="load" hx-swap="innerHTML"></div>
-    </div>
-    <div>
-        <h2 style="color:#00897b;margin-bottom:4px;">RL-Dynamic v1.0</h2>
-        <p style="color:#888;font-size:10px;margin:0 0 8px 0;">RL动态因子权重 · account=18</p>
-        <div hx-get="/api/paper-run/5?account_id=18" hx-trigger="load" hx-swap="innerHTML"></div>
+        <h2 style="color:#e65100;margin-bottom:4px;">小市值 v1.0</h2>
+        <p style="color:#888;font-size:11px;margin:0 0 10px 0;">事件驱动 · 低开反转 · account=16</p>
+        <div hx-get="/api/paper-run/3?account_id=16" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
 </div>
 
