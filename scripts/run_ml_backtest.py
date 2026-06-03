@@ -158,24 +158,30 @@ def retrain_at_point(ohlcv: pd.DataFrame, current_date: str, factor_cols: list[s
 
     logger.info(f"重训因子筛选: {len(factor_cols)} → IC{len(passing)} → 正交{len(selected)}")
 
-    # 训练
+    # 训练（按时间顺序 80/20 分割训练/验证集）
     feature_cols = selected if selected else passing
-    X = dataset[feature_cols].fillna(0)
-    y = dataset["label"]
+    df = dataset[feature_cols + ["label"]].fillna(0)
+    split = int(len(df) * 0.8)
+    if len(df) < 500 or split < 100:
+        logger.warning(f"重训数据不足({len(df)}行), 跳过")
+        return None
+    train_df = df.iloc[:split]; val_df = df.iloc[split:]
+    X_tr = train_df[feature_cols]; y_tr = train_df["label"]
+    X_v = val_df[feature_cols]; y_v = val_df["label"]
 
     try:
         if use_ensemble:
-            xgb, _ = train_xgboost(X, y, X, y)
-            lgb, _ = train_lightgbm(X, y, X, y)
+            xgb, _ = train_xgboost(X_tr, y_tr, X_v, y_v)
+            lgb, _ = train_lightgbm(X_tr, y_tr, X_v, y_v)
             from models.trainer import EnsemblePredictor
             ensemble = EnsemblePredictor([xgb, lgb])
             ensemble.factor_names = feature_cols
             return {"ensemble": ensemble, "active_cols": feature_cols, "factor_cols": selected}
         elif model_type == "xgboost":
-            model, _ = train_xgboost(X, y, X, y)
+            model, _ = train_xgboost(X_tr, y_tr, X_v, y_v)
             return {"model": model, "active_cols": feature_cols}
         else:
-            model, _ = train_lightgbm(X, y, X, y)
+            model, _ = train_lightgbm(X_tr, y_tr, X_v, y_v)
             return {"model": model, "active_cols": feature_cols}
     except Exception as e:
         logger.warning(f"重训模型失败: {e}")
@@ -641,13 +647,17 @@ def main():
     )
     ret_col = "ret_1d"  # IC 筛选始终用 T+1
 
-    # 1. IC 门禁
+    # 1. IC 门禁（仅在首个训练窗口数据上做，避免前视偏差）
+    dataset["trade_date"] = pd.to_datetime(dataset["trade_date"])
+    first_train_start = dataset["trade_date"].min()
+    first_train_end = first_train_start + pd.DateOffset(years=args.train_years)
+    ic_dataset = dataset[dataset["trade_date"] < first_train_end]
     if not args.no_ic_gate:
-        factor_names = filter_factors_by_ic(dataset, factor_names, ret_col=ret_col)
+        factor_names = filter_factors_by_ic(ic_dataset, factor_names, ret_col=ret_col)
 
     # 2. 正交筛选
     if not args.no_orthogonal:
-        factor_cols = select_orthogonal_factors(dataset, factor_names, threshold=0.7)
+        factor_cols = select_orthogonal_factors(ic_dataset, factor_names, threshold=0.7)
     else:
         factor_cols = factor_names
 
