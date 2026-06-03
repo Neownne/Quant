@@ -104,8 +104,9 @@ def main():
     factor_cols = [c for c in fn if c in ds.columns]
     all_dates = sorted(ds["trade_date"].unique())
 
-    # 股价索引（ohlcv 中的 close）
+    # 股价索引（ohlcv 中的 close）+ 前日收盘价
     close_map = ohlcv.pivot_table(index="trade_date", columns="code", values="close", aggfunc="last")
+    prev_close = close_map.shift(1)  # 每只股票的前一日收盘价
 
     INIT = TradingConfig.INITIAL_CASH
     COMM = TradingConfig.COMMISSION
@@ -146,13 +147,13 @@ def main():
             day_ret = 0.0; cost = 0.0
             if dt in close_map.index:
                 for code in new_holdings:
-                    if code in close_map.columns:
-                        p = close_map.loc[dt, code]
-                        if not np.isnan(p) and p > 0:
-                            if code in positions:
-                                day_ret += (p / positions[code] - 1)
-                            positions[code] = p
-                            cost += p * (COMM + SLIP)
+                    if code in close_map.columns and dt in prev_close.index:
+                        p_today = close_map.loc[dt, code]
+                        p_yesterday = prev_close.loc[dt, code]
+                        if (not np.isnan(p_today) and p_today > 0 and
+                            not np.isnan(p_yesterday) and p_yesterday > 0):
+                            day_ret += (p_today / p_yesterday - 1)
+                            cost += p_today * (COMM + SLIP)
 
             day_ret = day_ret / max(len(new_holdings), 1) if new_holdings else 0
             cost += sum(close_map.loc[dt, c] * (STAMP + COMM + SLIP)
