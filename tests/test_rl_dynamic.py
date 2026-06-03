@@ -321,3 +321,10 @@ class TestTrainer:
         assert "state" in daily[first_key]
         assert "factor_matrix" in daily[first_key]
         assert "returns" in daily[first_key]
+
+
+class TestBacktest:
+    def test_load_data_function(self):
+        """验证数据加载函数可以import。"""
+        from scripts.run_rl_backtest import load_data
+        assert callable(load_data)
