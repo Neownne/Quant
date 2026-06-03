@@ -125,8 +125,8 @@ def walk_forward_train(
             continue
         cols_to_use = active_cols + ["label"]
 
-        train_clean = train_df[cols_to_use].dropna()
-        val_clean = val_df[cols_to_use].dropna()
+        train_clean = train_df[cols_to_use].replace([np.inf, -np.inf], np.nan).replace([np.inf, -np.inf], np.nan).dropna()
+        val_clean = val_df[cols_to_use].replace([np.inf, -np.inf], np.nan).replace([np.inf, -np.inf], np.nan).dropna()
 
         if len(train_clean) < 100 or len(val_clean) < 50:
             continue
@@ -163,7 +163,7 @@ class EnsemblePredictor:
             raise KeyError(f"缺少因子列: {missing}")
 
         X = factor_df[self.factor_names].copy()
-        X = X.fillna(X.mean())
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(X.mean())
 
         xgb_prob = self.xgb_model.predict_proba(X)[:, 1]
         lgb_prob = self.lgb_model.predict_proba(X)[:, 1]
@@ -204,8 +204,8 @@ def walk_forward_train_ensemble(
             continue
         cols_to_use = active_cols + ["label"]
 
-        train_clean = train_df[cols_to_use].dropna()
-        val_clean = val_df[cols_to_use].dropna()
+        train_clean = train_df[cols_to_use].replace([np.inf, -np.inf], np.nan).replace([np.inf, -np.inf], np.nan).dropna()
+        val_clean = val_df[cols_to_use].replace([np.inf, -np.inf], np.nan).replace([np.inf, -np.inf], np.nan).dropna()
 
         if len(train_clean) < 100 or len(val_clean) < 50:
             continue
@@ -342,7 +342,7 @@ def walk_forward_train_by_regime(
                 continue
 
             cols_to_use = active_cols + ["label"]
-            train_clean = train_reg[cols_to_use].dropna()
+            train_clean = train_reg[cols_to_use].replace([np.inf, -np.inf], np.nan).dropna()
             if len(train_clean) < 100:
                 continue
 
@@ -350,7 +350,7 @@ def walk_forward_train_by_regime(
             y_tr = train_clean["label"]
 
             val_reg = val_df[val_df["regime"] == reg]
-            val_clean = val_reg[cols_to_use].dropna() if len(val_reg) > 10 else train_clean.tail(100)
+            val_clean = val_reg[cols_to_use].replace([np.inf, -np.inf], np.nan).dropna() if len(val_reg) > 10 else train_clean.tail(100)
             X_v = val_clean[active_cols] if len(val_clean) > 10 else X_tr
             y_v = val_clean["label"] if len(val_clean) > 10 else y_tr
 
@@ -371,7 +371,7 @@ def walk_forward_train_by_regime(
             continue
 
         # 全验证集评估
-        val_all = val_df[active_cols + ["label", "regime", "code"]].dropna()
+        val_all = val_df[active_cols + ["label", "regime", "code"]].replace([np.inf, -np.inf], np.nan).dropna()
         if len(val_all) < 50:
             continue
 
@@ -519,8 +519,8 @@ def walk_forward_train_multihorizon(
                 continue
 
             cols_to_use = active_cols + [label_col]
-            train_clean = train_df[cols_to_use].dropna()
-            val_clean = val_df[cols_to_use].dropna()
+            train_clean = train_df[cols_to_use].replace([np.inf, -np.inf], np.nan).dropna()
+            val_clean = val_df[cols_to_use].replace([np.inf, -np.inf], np.nan).dropna()
 
             if len(train_clean) < 100 or len(val_clean) < 50:
                 logger.warning(f"  跳过 horizon T+{h}: 数据不足 (train={len(train_clean)}, val={len(val_clean)})")

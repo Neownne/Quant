@@ -132,7 +132,7 @@ def fetch_stock_daily(
     end_date: str | None = None,
 ) -> pd.DataFrame:
     """
-    下载单只股票的日线行情（后复权）。
+    下载单只股票的日线行情（前复权）。
     数据源：腾讯财经。
 
     参数
@@ -153,7 +153,7 @@ def fetch_stock_daily(
         symbol=tx_symbol,
         start_date=start_date,
         end_date=end,
-        adjust="hfq",
+        adjust="qfq",
     )
 
     if raw.empty:

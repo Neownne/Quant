@@ -197,18 +197,13 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
     cutoff = _latest_trading_day().strftime("%Y%m%d")
 
-    # 批量查询所有股票的已有日期（避免 N+1 问题）
-    existing_df = pd.read_sql(
-        "SELECT code, MAX(trade_date) AS latest FROM stock_daily GROUP BY code",
-        engine,
-    )
-    existing_map = dict(zip(existing_df["code"], existing_df["latest"].astype(str)))
-
+    # 过滤：跳过已覆盖到最近交易日的股票
     to_fetch: list[tuple[str, str, set]] = []
     for code in codes:
-        latest = existing_map.get(code, start_date)
+        existing = get_existing_dates("stock_daily", code, engine)
+        latest = max(existing).strftime("%Y%m%d") if existing else start_date
         if latest < cutoff:
-            to_fetch.append((code, latest, set()))
+            to_fetch.append((code, latest, existing))
 
     logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
 
