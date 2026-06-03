@@ -33,10 +33,12 @@ PAPER_STRATEGIES = [
         "version": "v1.0",
         "account_id": 18,
         "run_id": 5,
+        "type": "rl",
         "universe_size": 500,
         "forward_days": 5,
         "train_years": 3,
         "top_n": TradingConfig.TOP_N,
         "factor_mode": "all",
+        "rl_timesteps": 3000,
     },
 ]

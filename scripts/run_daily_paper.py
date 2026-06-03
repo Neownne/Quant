@@ -193,17 +193,27 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
     selected = select_orthogonal_factors(dataset, factor_cols, threshold=0.7)
     logger.info(f"[{name} {ver}] 因子: {len(factor_names)}→IC{len(factor_cols)}→正交{len(selected)}")
 
-    if regime_df is None:
-        logger.error(f"[{name} {ver}] 无市场状态数据")
-        return None
-
-    # 训练
-    results = walk_forward_train_by_regime(dataset, selected, regime_df,
-                                           train_years=train_years, val_years=1)
+    if strategy_cfg.get("type") == "rl":
+        # RL-Dynamic: PPO 学习因子权重
+        from rl_dynamic.trainer import walk_forward_train_rl_weights
+        rl_ts = strategy_cfg.get("rl_timesteps", 3000)
+        results = walk_forward_train_rl_weights(
+            ohlcv, factor_names, index_df, extra_data=extra_data,
+            train_years=train_years, val_years=1, total_timesteps=rl_ts)
+        if not results:
+            logger.error(f"[{name} {ver}] RL训练无结果")
+            return None
+    else:
+        if regime_df is None:
+            logger.error(f"[{name} {ver}] 无市场状态数据")
+            return None
+        results = walk_forward_train_by_regime(dataset, selected, regime_df,
+                                               train_years=train_years, val_years=1)
     if not results:
         logger.error(f"[{name} {ver}] 训练无结果")
         return None
 
+    # ── ML 分支（舞策略）──
     # 合并模型
     merged_ensembles, merged_factors = {}, []
     for r in results:
@@ -242,6 +252,30 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
         logger.error(f"[{name} {ver}] 无今日因子数据")
         return None
     today_factor["regime"] = today_regime
+
+    # ── RL-Dynamic: 直接 PPO 预测 ──
+    if strategy_cfg.get("type") == "rl":
+        wr = results[-1]
+        from rl_dynamic.predictor import RLDynamicPredictor
+        from rl_dynamic.state_builder import StateBuilder
+        builder = StateBuilder(n_factors=wr["n_factors"])
+        rl_pred = RLDynamicPredictor(wr["ppo_model"], wr["factor_names"], builder)
+        preds = rl_pred.predict(today_factor)
+        preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
+        if dry_run:
+            logger.info(f"[{name} {ver}] RL DRY RUN")
+            return {"preds": preds, "top_n": top_n, "regime": today_regime}
+        with engine.begin() as conn:
+            existing = conn.execute(text("SELECT COUNT(*) FROM paper_signals WHERE run_id=:rid AND signal_date=:sd"),
+                                    {"rid": run_id, "sd": pred_date.date()}).fetchone()[0]
+            if existing == 0:
+                for rank, (_, row) in enumerate(preds.head(top_n).iterrows()):
+                    conn.execute(text("""INSERT INTO paper_signals (run_id,signal_date,stock_code,predicted_score,rank)
+                        VALUES (:rid,:sd,:sc,:ps,:rk) ON CONFLICT DO NOTHING"""),
+                        {"rid": run_id, "sd": pred_date.date(), "sc": row["code"], "ps": float(row["score"]), "rk": rank+1})
+                logger.info(f"[{name} {ver}] RL信号: {min(top_n, len(preds))}只")
+        engine.dispose()
+        return {"preds": preds, "top_n": top_n, "regime": today_regime}
 
     # ── T+1 执行：只执行最近一个待执行日期，且受调仓频率控制 ──
     if not dry_run:
