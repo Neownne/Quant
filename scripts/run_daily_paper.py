@@ -312,6 +312,38 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
                        "ps": float(row["score"]), "rk": rank + 1})
             logger.info(f"[{name} {ver}] 信号: {min(top_n, len(preds))}只")
 
+    # 每日估值（无论是否调仓、无论信号是否已存在，都记录）
+    # 注意：用 trade_date（命令行参数）而非 pred_date（因子集最新日，会因标签前视而偏早）
+    if not dry_run:
+        try:
+            pnl_date = trade_date.strftime("%Y-%m-%d")
+            engine_pnl = get_engine()
+            with engine_pnl.begin() as conn_pnl:
+                cash_r = conn_pnl.execute(text("SELECT cash FROM paper_account WHERE id=:aid"), {"aid": account_id}).fetchone()
+                cash = float(cash_r[0]) if cash_r else TradingConfig.INITIAL_CASH
+                pos_val_f = conn_pnl.execute(text("""
+                    SELECT COALESCE(SUM(pp.quantity * COALESCE(sd.close, sp.close)), 0)
+                    FROM paper_positions pp
+                    LEFT JOIN stock_daily sd ON pp.stock_code=sd.code AND sd.trade_date=:d
+                    LEFT JOIN stock_daily sp ON pp.stock_code=sp.code AND sp.trade_date = (
+                        SELECT MAX(trade_date) FROM stock_daily WHERE code=pp.stock_code AND trade_date<:d2)
+                    WHERE pp.run_id=:rid AND pp.entry_date<=:d2 AND (pp.exit_date IS NULL OR pp.exit_date>:d2)
+                """), {"rid": run_id, "d": pnl_date, "d2": pnl_date}).fetchone()[0] or 0
+                total = cash + float(pos_val_f)
+                prev_total = conn_pnl.execute(text("SELECT total_value FROM paper_daily_pnl WHERE account_id=:aid ORDER BY trade_date DESC LIMIT 1"), {"aid": account_id}).fetchone()
+                prev_tv = float(prev_total[0]) if prev_total else TradingConfig.INITIAL_CASH
+                dr = (total - prev_tv) / prev_tv if prev_tv > 0 else 0
+                dd = (TradingConfig.INITIAL_CASH - total) / TradingConfig.INITIAL_CASH if total < TradingConfig.INITIAL_CASH else 0
+                conn_pnl.execute(text("""
+                    INSERT INTO paper_daily_pnl (account_id, trade_date, cash, position_value, total_value, daily_return, drawdown)
+                    VALUES (:aid, :d, :c, :pv, :tv, :dr, :dd)
+                    ON CONFLICT (account_id, trade_date) DO UPDATE SET cash=:c2, position_value=:pv2, total_value=:tv2, daily_return=:dr2, drawdown=:dd2
+                """), {"aid": account_id, "d": pnl_date, "c": cash, "pv": float(pos_val_f), "tv": total, "dr": dr, "dd": dd,
+                       "c2": cash, "pv2": float(pos_val_f), "tv2": total, "dr2": dr, "dd2": dd})
+            engine_pnl.dispose()
+        except Exception as e:
+            logger.warning(f"[{name} {ver}] 估值记录失败: {e}")
+
     engine.dispose()
     return {"preds": preds, "top_n": top_n, "regime": today_regime}
 
