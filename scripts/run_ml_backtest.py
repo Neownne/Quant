@@ -324,9 +324,11 @@ def main():
                 ), conn, params={"lim": args.universe_size})["code"].tolist()
         elif args.universe_size > 0:
             # 按成交额取前 N 只（覆盖沪深两市）
+            # 仅用首年成交额排序选宇宙，避免前视偏差
+            first_year_end = f"{int(args.start[:4])+1}{args.start[4:]}"
             codes = pd.read_sql(
                 f"SELECT code FROM stock_daily "
-                f"WHERE trade_date >= '{args.start}' AND trade_date <= '{args.end}' "
+                f"WHERE trade_date >= '{args.start}' AND trade_date <= '{first_year_end}' "
                 f"GROUP BY code ORDER BY SUM(amount) DESC LIMIT {args.universe_size}",
                 engine,
             )["code"].tolist()
@@ -1392,7 +1394,7 @@ def main():
     clean_vals = [v for v in n_vals if not np.isnan(v)]
     if len(clean_vals) >= 2:
         total_return = float(clean_vals[-1] / clean_vals[0] - 1)
-        n_days = max(len(clean_vals), 1)
+        n_days = max(total_trading_days, 1)  # 实际交易日数，非equity curve点数
         years = max(n_days / 252, 0.2)
         annual_return = float((1 + total_return) ** (1 / years) - 1)
     else:
@@ -1402,7 +1404,7 @@ def main():
         years = 0.2
 
     # Sharpe from daily returns
-    daily_ret_vals = [v for v in daily_returns.values() if v != 0.0]
+    daily_ret_vals = [v for v in daily_returns.values()]  # 包含所有交易日，不过滤零收益
     if daily_ret_vals and np.std(daily_ret_vals) > 0:
         computed_sharpe = float(np.mean(daily_ret_vals) / np.std(daily_ret_vals) * np.sqrt(252))
     else:
