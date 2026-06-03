@@ -94,3 +94,37 @@ class TestStateBuilder:
 
         builder = StateBuilder(n_factors=5)
         assert len(builder.feature_names) == builder.state_dim
+
+
+from rl_dynamic.factor_pool import FactorPool
+
+
+class TestFactorPool:
+    def test_pool_creation(self):
+        pool = FactorPool(["rsi_7", "vol_20", "mom_20", "turnover_5", "rev_5"])
+        assert pool.n_factors >= 3
+
+    def test_ic_tracking(self):
+        pool = FactorPool(["rsi_7", "vol_20"])
+        pool.ic_history["rsi_7"] = [0.03, 0.04, -0.01, 0.05, 0.02]
+        pool.ic_history["vol_20"] = [-0.01, -0.01, -0.02, -0.01, -0.01]
+        ic = pool.get_recent_ic(5)
+        assert abs(ic[0]) > abs(ic[1]), f"rsi_7 should have stronger IC than vol_20, got {ic}"
+
+    def test_select_top_by_ic(self):
+        pool = FactorPool(["rsi_7", "vol_20", "mom_20", "turnover_5", "rev_5"])
+        pool.ic_history["rsi_7"] = [0.03] * 20
+        pool.ic_history["vol_20"] = [0.01] * 20
+        pool.ic_history["mom_20"] = [0.05] * 20
+        pool.ic_history["turnover_5"] = [0.02] * 20
+        pool.ic_history["rev_5"] = [0.04] * 20
+        top = pool.select_top_by_ic(2)
+        assert len(top) == 2
+        assert top[0] == "mom_20"
+
+    def test_factor_names(self):
+        pool = FactorPool(["rsi_7", "vol_20", "mom_20"])
+        names = pool.get_factor_names()
+        assert "rsi_7" in names
+        assert "vol_20" in names
+        assert "mom_20" in names
