@@ -46,7 +46,7 @@ def walk_forward_split(
     train_years: int = 3,
     val_years: int = 1,
     date_col: str = "trade_date",
-    gap_days: int = 0,
+    gap_days: int = 5,
 ):
     """Walk-forward 滚动窗口迭代器。
 

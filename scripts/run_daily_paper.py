@@ -398,6 +398,12 @@ def main():
                 sync_index_daily(engine, start_date=sync_start)
             else:
                 logger.info(f"数据已最新 ({latest[0] if latest else '?'})")
+            # 确保 index_daily 不为空
+            latest_idx = c.execute(text("SELECT MAX(trade_date) FROM index_daily")).fetchone()
+            if not latest_idx or not latest_idx[0]:
+                from data.sync import sync_index_daily
+                logger.info("index_daily 为空，全量同步")
+                sync_index_daily(engine, start_date="20150101")
             engine.dispose()
         except Exception as e:
             logger.warning(f"同步跳过: {e}")
