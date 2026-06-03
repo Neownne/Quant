@@ -11,11 +11,18 @@ from rl_dynamic.factor_pool import FactorPool
 
 
 def _build_daily_data(dataset, builder, pool, ohlcv, index_df):
-    """构建 RL 环境需要的每日数据字典。"""
+    """构建 RL 环境需要的每日数据字典（预计算避免重复IO）。"""
     dates = sorted(dataset["trade_date"].unique())
-    pool.update_ic(dataset)
+    try:
+        valid = dataset.replace([np.inf, -np.inf], np.nan).dropna(subset=["ret_1d"])
+        if len(valid) > 100:
+            pool.update_ic(valid)
+    except Exception:
+        pass
     ic_map = pool.get_recent_ic(20)
     factor_cols = [c for c in pool.all_factors if c in dataset.columns]
+    if not factor_cols:
+        factor_cols = pool.all_factors[:10]
 
     daily_data = {}
     for d in dates:
@@ -41,7 +48,7 @@ def walk_forward_train_rl_weights(
 
     Returns: [{policy_net, factor_names, train_end, val_end}, ...]
     """
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = "cpu"  # PPO with MlpPolicy works best on CPU
     logger.info(f"RL权重训练设备: {device}")
 
     pool = FactorPool(factor_names)
@@ -50,9 +57,14 @@ def walk_forward_train_rl_weights(
     dataset = pool.compute_factors(ohlcv, extra_data)
     dataset["trade_date"] = pd.to_datetime(dataset["trade_date"])
 
-    daily_data = _build_daily_data(dataset, builder, pool, ohlcv, index_df)
-    if len(daily_data) < 200:
-        logger.error("训练数据不足")
+    try:
+        daily_data = _build_daily_data(dataset, builder, pool, ohlcv, index_df)
+    except Exception as e:
+        logger.error(f"构建每日数据失败: {e}")
+        import traceback; traceback.print_exc()
+        return []
+    if len(daily_data) < 50:
+        logger.error(f"训练数据不足: {len(daily_data)}天")
         return []
 
     df = pd.DataFrame({"trade_date": pd.to_datetime(list(daily_data.keys()))})
@@ -76,11 +88,29 @@ def walk_forward_train_rl_weights(
             logger.warning(f"PPO训练失败: {e}")
             continue
 
+        # 从 PPO 提取学到的策略 → FactorWeightNet
         net = FactorWeightNet(builder.state_dim, pool.n_factors)
+        try:
+            ppo_sd = model.policy.state_dict()
+            # 只复制 feature extractor 的共享层
+            own_sd = net.state_dict()
+            for key in own_sd:
+                # 尝试匹配 PPO 的 mlp_extractor 或 policy_net
+                for ppo_key in [
+                    f"mlp_extractor.policy_net.{key}",
+                    f"mlp_extractor.shared_net.{key}",
+                ]:
+                    if ppo_key in ppo_sd and own_sd[key].shape == ppo_sd[ppo_key].shape:
+                        own_sd[key] = ppo_sd[ppo_key]
+                        break
+            net.load_state_dict(own_sd, strict=False)
+        except Exception:
+            pass  # 回退到随机初始化
         net.to(device)
 
         results.append({
             "policy_net": net,
+            "ppo_model": model,  # 保留PPO模型备用
             "factor_names": pool.get_factor_names(),
             "state_dim": builder.state_dim,
             "train_end": train_df["trade_date"].max(),

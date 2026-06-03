@@ -47,8 +47,28 @@ def load_data(engine, start_date, end_date, universe_size=500):
     """, engine)
     index_df["trade_date"] = pd.to_datetime(index_df["trade_date"])
 
-    logger.info(f"数据: {len(ohlcv)}行, {ohlcv['code'].nunique()}只")
-    return ohlcv, index_df
+    # extra_data (估值+财务)
+    extra_data = {}
+    try:
+        extra_df = pd.read_sql(f"SELECT code, trade_date, market_cap, pb FROM stock_daily_extra WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'", engine)
+        if not extra_df.empty:
+            extra_df["log_mcap"] = np.log(extra_df["market_cap"].replace(0, np.nan))
+            extra_data["log_mcap"] = extra_df[["code", "trade_date", "log_mcap"]]
+            extra_data["pb"] = extra_df[["code", "trade_date", "pb"]]
+    except Exception: pass
+    try:
+        fin_cols = ["net_profit", "roe", "bps", "net_margin", "revenue", "eps",
+                     "cash_flow", "operating_cash_flow", "total_assets", "total_liability",
+                     "goodwill", "holder_equity", "adjusted_profit"]
+        fin_df = pd.read_sql(f"SELECT code, report_date, {','.join(fin_cols)} FROM stock_financial WHERE code IN ({code_list}) AND report_date >= '2018-01-01' ORDER BY code, report_date", engine)
+        if not fin_df.empty:
+            for col in fin_cols:
+                if col in fin_df.columns:
+                    extra_data[col] = fin_df[["code", "report_date", col]].copy()
+    except Exception: pass
+
+    logger.info(f"数据: {len(ohlcv)}行, {ohlcv['code'].nunique()}只, extra={len(extra_data)}项")
+    return ohlcv, index_df, extra_data
 
 
 def main():
@@ -62,13 +82,13 @@ def main():
     args = parser.parse_args()
 
     engine = get_engine()
-    ohlcv, index_df = load_data(engine, args.start, args.end, args.universe_size)
+    ohlcv, index_df, extra_data = load_data(engine, args.start, args.end, args.universe_size)
 
     # RL训练
     factor_names = list(ALL_FACTORS.keys())
     logger.info(f"RL训练: {len(factor_names)}因子, {args.timesteps}步/窗口")
     results = walk_forward_train_rl_weights(
-        ohlcv, factor_names, index_df,
+        ohlcv, factor_names, index_df, extra_data=extra_data,
         total_timesteps=args.timesteps)
 
     if not results:
