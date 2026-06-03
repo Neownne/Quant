@@ -253,7 +253,7 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
         return None
     today_factor["regime"] = today_regime
 
-    # ── RL-Dynamic: 直接 PPO 预测 ──
+    # ── RL-Dynamic: PPO 预测 + T+1 执行 ──
     if strategy_cfg.get("type") == "rl":
         wr = results[-1]
         from rl_dynamic.predictor import RLDynamicPredictor
@@ -262,10 +262,38 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
         rl_pred = RLDynamicPredictor(wr["ppo_model"], wr["factor_names"], builder)
         preds = rl_pred.predict(today_factor)
         preds = preds.sort_values("score", ascending=False).reset_index(drop=True)
+
         if dry_run:
             logger.info(f"[{name} {ver}] RL DRY RUN")
             return {"preds": preds, "top_n": top_n, "regime": today_regime}
+
+        # T+1 执行：处理待执行的 RL 信号
         with engine.begin() as conn:
+            today_str = pred_date.strftime("%Y-%m-%d")
+            pending_dates = conn.execute(text("""
+                SELECT DISTINCT ps.signal_date FROM paper_signals ps
+                WHERE ps.run_id=:rid AND ps.signal_date < :today
+                AND NOT EXISTS (SELECT 1 FROM paper_positions pp WHERE pp.run_id=ps.run_id AND pp.stock_code=ps.stock_code AND pp.entry_date > ps.signal_date)
+                ORDER BY ps.signal_date DESC LIMIT 1
+            """), {"rid": run_id, "today": today_str}).fetchall()
+            for p in pending_dates:
+                pdt = pd.Timestamp(p[0])
+                # 检查调仓频率
+                last_trade = conn.execute(text("SELECT MAX(entry_date) FROM paper_positions WHERE run_id=:rid"), {"rid": run_id}).fetchone()[0]
+                if last_trade:
+                    td_count = conn.execute(text("SELECT COUNT(*) FROM (SELECT DISTINCT trade_date FROM stock_daily WHERE trade_date > :lt AND trade_date <= :td) t"),
+                                            {"lt": str(last_trade), "td": today_str}).fetchone()[0]
+                else:
+                    td_count = 5
+                if td_count >= 5 and pd.Timestamp(pdt) in dataset["trade_date"].values:
+                    pdt_factor = dataset[dataset["trade_date"] == pd.Timestamp(pdt)].copy()
+                    if not pdt_factor.empty:
+                        eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=rl_pred,
+                                          top_n=top_n, rebalance_mode="ndrop")
+                        eng.run_daily(trade_date=pd.Timestamp(pdt), factor_df=pdt_factor,
+                                      ohlcv_data=ohlcv, index_ohlcv=index_df, regime=today_regime)
+
+            # 保存今日信号
             existing = conn.execute(text("SELECT COUNT(*) FROM paper_signals WHERE run_id=:rid AND signal_date=:sd"),
                                     {"rid": run_id, "sd": pred_date.date()}).fetchone()[0]
             if existing == 0:

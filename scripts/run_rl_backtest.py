@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""RL-Dynamic 策略回测：RL学习因子权重 + NDrop选股。
+"""RL-Dynamic 回测：PPO学习因子权重 + NDrop选股 + NAV仿真。
 
 用法:
-    python scripts/run_rl_backtest.py --start 20200101 --end 20260601 --timesteps 30000
+    python scripts/run_rl_backtest.py --start 20200101 --end 20260601 --timesteps 5000
 """
 import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,23 +12,23 @@ import pandas as pd
 from loguru import logger
 from sqlalchemy import text
 from data.db import get_engine
-from models.regime import detect_regime
 from factors import ALL_FACTORS
 from config.settings import TradingConfig
 from rl_dynamic.trainer import walk_forward_train_rl_weights
 from rl_dynamic.predictor import RLDynamicPredictor
 from rl_dynamic.state_builder import StateBuilder
-from portfolio.selector import select_topk_ndrop, filter_stocks
-from portfolio.risk import check_drawdown_limit
+from rl_dynamic.factor_pool import FactorPool
+from portfolio.selector import select_topk_ndrop
 
 
 def load_data(engine, start_date, end_date, universe_size=500):
-    """加载回测数据。"""
+    """加载 OHLCV + 指数 + extra_data。"""
+    # 只用首年成交额选宇宙（无前视偏差）
+    first_year = f"{int(start_date[:4])+1}{start_date[4:]}"
     codes = pd.read_sql(
-        f"SELECT d.code FROM stock_daily d "
-        f"JOIN stock_basic b ON d.code=b.code AND b.is_st=FALSE "
-        f"WHERE d.trade_date BETWEEN '{start_date}' AND '{end_date}' "
-        f"GROUP BY d.code ORDER BY SUM(d.amount) DESC LIMIT {universe_size}",
+        f"SELECT code FROM stock_daily "
+        f"WHERE trade_date >= '{start_date}' AND trade_date <= '{first_year}' "
+        f"GROUP BY code ORDER BY SUM(amount) DESC LIMIT {universe_size}",
         engine)["code"].tolist()
     code_list = ",".join([f"'{c}'" for c in codes])
 
@@ -47,128 +47,141 @@ def load_data(engine, start_date, end_date, universe_size=500):
     """, engine)
     index_df["trade_date"] = pd.to_datetime(index_df["trade_date"])
 
-    # extra_data (估值+财务)
-    extra_data = {}
+    # extra_data
+    extra = {}
     try:
-        extra_df = pd.read_sql(f"SELECT code, trade_date, market_cap, pb FROM stock_daily_extra WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'", engine)
-        if not extra_df.empty:
-            extra_df["log_mcap"] = np.log(extra_df["market_cap"].replace(0, np.nan))
-            extra_data["log_mcap"] = extra_df[["code", "trade_date", "log_mcap"]]
-            extra_data["pb"] = extra_df[["code", "trade_date", "pb"]]
+        edf = pd.read_sql(f"SELECT code,trade_date,market_cap,pb FROM stock_daily_extra "
+                          f"WHERE code IN ({code_list}) AND trade_date BETWEEN '{start_date}' AND '{end_date}'", engine)
+        if not edf.empty:
+            edf["log_mcap"] = np.log(edf["market_cap"].replace(0, np.nan))
+            extra["log_mcap"] = edf[["code", "trade_date", "log_mcap"]]
+            extra["pb"] = edf[["code", "trade_date", "pb"]]
     except Exception: pass
     try:
-        fin_cols = ["net_profit", "roe", "bps", "net_margin", "revenue", "eps",
-                     "cash_flow", "operating_cash_flow", "total_assets", "total_liability",
-                     "goodwill", "holder_equity", "adjusted_profit"]
-        fin_df = pd.read_sql(f"SELECT code, report_date, {','.join(fin_cols)} FROM stock_financial WHERE code IN ({code_list}) AND report_date >= '2018-01-01' ORDER BY code, report_date", engine)
-        if not fin_df.empty:
-            for col in fin_cols:
-                if col in fin_df.columns:
-                    extra_data[col] = fin_df[["code", "report_date", col]].copy()
+        fcols = ["net_profit","roe","bps","net_margin","revenue","eps","cash_flow",
+                 "operating_cash_flow","total_assets","total_liability","goodwill",
+                 "holder_equity","adjusted_profit"]
+        fdf = pd.read_sql(f"SELECT code,report_date,{','.join(fcols)} FROM stock_financial "
+                          f"WHERE code IN ({code_list}) AND report_date>='2018-01-01' ORDER BY code,report_date", engine)
+        if not fdf.empty:
+            for c in fcols:
+                if c in fdf.columns: extra[c] = fdf[["code","report_date",c]].copy()
     except Exception: pass
 
-    logger.info(f"数据: {len(ohlcv)}行, {ohlcv['code'].nunique()}只, extra={len(extra_data)}项")
-    return ohlcv, index_df, extra_data
+    logger.info(f"数据: {len(ohlcv)}行, {ohlcv['code'].nunique()}只")
+    return ohlcv, index_df, extra
 
 
 def main():
     parser = argparse.ArgumentParser(description="RL-Dynamic 回测")
     parser.add_argument("--start", default="20200101")
     parser.add_argument("--end", default="20260601")
-    parser.add_argument("--universe-size", type=int, default=500)
-    parser.add_argument("--timesteps", type=int, default=30000)
+    parser.add_argument("--universe-size", type=int, default=300)
+    parser.add_argument("--timesteps", type=int, default=3000)
     parser.add_argument("--top-n", type=int, default=15)
     parser.add_argument("--ndrop-n", type=int, default=2)
     args = parser.parse_args()
 
     engine = get_engine()
-    ohlcv, index_df, extra_data = load_data(engine, args.start, args.end, args.universe_size)
+    ohlcv, index_df, extra = load_data(engine, args.start, args.end, args.universe_size)
 
-    # RL训练
-    factor_names = list(ALL_FACTORS.keys())
-    logger.info(f"RL训练: {len(factor_names)}因子, {args.timesteps}步/窗口")
-    results = walk_forward_train_rl_weights(
-        ohlcv, factor_names, index_df, extra_data=extra_data,
-        total_timesteps=args.timesteps)
+    # ── 因子列表（不含基本面，避免太多 NaN）──
+    fn = [f for f in ALL_FACTORS.keys() if not f.startswith('fin_') and f in ALL_FACTORS]
+    logger.info(f"RL因子: {len(fn)}个")
 
-    if not results:
+    # ── Walk-Forward RL 训练 ──
+    train_results = walk_forward_train_rl_weights(
+        ohlcv, fn, index_df, extra_data=extra, total_timesteps=args.timesteps)
+    if not train_results:
         logger.error("RL训练无结果")
         return
+    logger.info(f"RL训练: {len(train_results)}窗口")
 
-    # 获取所有交易日
-    all_dates = sorted(ohlcv["trade_date"].unique())
+    # ── 构建因子数据集（用于仿真）──
+    pool = FactorPool(fn)
+    ds = pool.compute_factors(ohlcv, extra)
+    ds["trade_date"] = pd.to_datetime(ds["trade_date"])
+    factor_cols = [c for c in fn if c in ds.columns]
+    all_dates = sorted(ds["trade_date"].unique())
 
-    # 仿真
-    cash = TradingConfig.INITIAL_CASH
-    nav = [cash]
+    # 股价索引（ohlcv 中的 close）
+    close_map = ohlcv.pivot_table(index="trade_date", columns="code", values="close", aggfunc="last")
+
+    INIT = TradingConfig.INITIAL_CASH
+    COMM = TradingConfig.COMMISSION
+    SLIP = TradingConfig.SLIPPAGE
+    STAMP = TradingConfig.STAMP_DUTY
+
+    # ── 仿真（仅用最后一个窗口的模型，覆盖其验证期）──
+    nav = INIT
     positions = {}
-    day_counter = 0
+    nav_history = [nav]
+    daily_rets = []
 
-    for wi, wr in enumerate(results):
-        builder = StateBuilder(n_factors=len(wr["factor_names"]))
-        predictor = RLDynamicPredictor(
-            wr["policy_net"], wr["factor_names"], builder, device="cpu")
+    wr = train_results[-1]
+    builder = wr["builder"]
+    predictor = RLDynamicPredictor(wr["ppo_model"], wr["factor_names"], builder)
+    val_dates = [d for d in all_dates if wr["train_end"] < d <= wr["val_end"]]
 
-        # 该窗口的验证期日期
-        val_start = wr["train_end"]
-        val_end = wr["val_end"]
-        val_dates = [d for d in all_dates if val_start < d <= val_end]
+    for dt in val_dates:
+        day = ds[ds["trade_date"] == dt]
+        if len(day) < 10:
+            continue
 
-        for dt in val_dates:
-            day = ohlcv[ohlcv["trade_date"] == dt]
-            if len(day) < 10:
-                continue
+        state = builder.build(ohlcv, index_df, {}, dt)
+        day_factor = day[["code"] + factor_cols].fillna(0).replace([np.inf, -np.inf], 0)
+        preds = predictor.predict(day_factor, market_state=state)
+        scores = pd.Series(preds["score"].values, index=preds["code"].values).sort_values(ascending=False)
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, set(positions.keys()), K=args.top_n, N=args.ndrop_n)
 
-            # 构建市场状态
-            state = builder.build(ohlcv, index_df, {}, dt)
-
-            # 构建因子截面
-            factor_cols = [f for f in wr["factor_names"] if f in ALL_FACTORS]
-            # 简化: 直接用日线数据模拟因子值
-            day_scores = pd.DataFrame({"code": day["code"].unique()})
-            for f in factor_cols[:10]:  # 只用前10个 (简化)
-                day_scores[f] = np.random.randn(len(day_scores)) * 0.1
-            day_scores = day_scores.fillna(0)
-
-            preds = predictor.predict(day_scores, market_state=state)
-
-            # NDrop选股
-            scores_series = pd.Series(preds["score"].values, index=preds["code"].values).sort_values(ascending=False)
-            new_holdings, to_buy, to_sell = select_topk_ndrop(
-                scores_series, set(positions.keys()), K=args.top_n, N=args.ndrop_n)
-
-            # 更新持仓和净值
-            day_close = day.groupby("code")["close"].last()
-            day_ret = 0
+        day_ret = 0.0
+        cost = 0.0
+        if dt in close_map.index:
             for code in new_holdings:
-                if code in day_close.index:
-                    if code in positions:
-                        day_ret += (day_close[code] / positions[code] - 1)
-                    positions[code] = day_close[code]
+                if code in close_map.columns:
+                    p = close_map.loc[dt, code]
+                    if not np.isnan(p) and p > 0:
+                        if code in positions:
+                            day_ret += (p / positions[code] - 1)
+                        positions[code] = p
+                        cost += p * (COMM + SLIP)
 
-            day_ret = day_ret / max(len(new_holdings), 1)
-            cash *= (1 + day_ret - TradingConfig.COMMISSION * 2)  # 简化成本
-            nav.append(cash)
-            day_counter += 1
+        day_ret = day_ret / max(len(new_holdings), 1) if new_holdings else 0
+        cost += sum(close_map.loc[dt, c] * (STAMP + COMM + SLIP)
+                    for c in to_sell if dt in close_map.index and c in close_map.columns
+                    and not np.isnan(close_map.loc[dt, c]))
+        cost_ratio = cost / max(INIT, 1)
+        net_ret = day_ret - cost_ratio
 
-    # 输出结果
-    nav = np.array(nav)
+        nav *= (1 + net_ret)
+        nav_history.append(nav)
+        daily_rets.append(net_ret)
+
+    # ── 指标 ──
+    nav = np.array(nav_history)
+    td = len(nav) - 1
+    if td < 10:
+        print("数据不足，无法计算指标")
+        return
+
     total_ret = (nav[-1] / nav[0] - 1) * 100
-    trading_years = day_counter / 252
-    annual_ret = ((nav[-1] / nav[0]) ** (1 / max(trading_years, 0.01)) - 1) * 100
-    daily_rets = np.diff(nav) / nav[:-1]
-    sharpe = np.sqrt(252) * np.mean(daily_rets) / np.std(daily_rets) if np.std(daily_rets) > 0 else 0
-    peak = np.maximum.accumulate(nav)
-    max_dd = np.max((peak - nav) / peak) * 100
-    win_rate = np.mean(daily_rets > 0) * 100
+    years = max(td / 252, 0.2)
+    cagr = ((nav[-1] / nav[0]) ** (1 / years) - 1) * 100
+    dr = np.array(daily_rets)
+    sh = float(np.sqrt(252) * np.mean(dr) / np.std(dr)) if np.std(dr) > 0 else 0
+    pk = np.maximum.accumulate(nav)
+    mdd = float(np.max((pk - nav) / pk) * 100)
 
-    print(f"\n=== RL-Dynamic 回测结果 ===")
-    print(f"总收益: {total_ret:.1f}%")
-    print(f"年化收益: {annual_ret:.1f}%")
-    print(f"Sharpe: {sharpe:.2f}")
-    print(f"最大回撤: {max_dd:.1f}%")
-    print(f"日胜率: {win_rate:.1f}%")
-    print(f"交易日: {day_counter}")
+    print(f"\n{'='*50}")
+    print(f"RL-Dynamic 回测结果 (qfq前复权)")
+    print(f"{'='*50}")
+    print(f"总收益:    {total_ret:.1f}%")
+    print(f"年化收益:  {cagr:.1f}%")
+    print(f"Sharpe:    {sh:.2f}")
+    print(f"最大回撤:  {mdd:.1f}%")
+    print(f"交易天数:  {td}")
+    print(f"仿真区间:  {val_start.date()} ~ {val_end.date()}")
 
     engine.dispose()
 
