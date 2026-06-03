@@ -128,3 +128,39 @@ class TestFactorPool:
         assert "rsi_7" in names
         assert "vol_20" in names
         assert "mom_20" in names
+
+
+import torch
+from rl_dynamic.policy_net import FactorWeightNet
+
+
+class TestFactorWeightNet:
+    def test_output_shape(self):
+        net = FactorWeightNet(state_dim=50, n_factors=10)
+        x = torch.randn(4, 50)
+        out = net(x)
+        assert out.shape == (4, 10)
+
+    def test_weights_sum_to_one(self):
+        net = FactorWeightNet(state_dim=30, n_factors=8)
+        x = torch.randn(3, 30)
+        out = net(x)
+        for i in range(3):
+            assert abs(out[i].sum().item() - 1.0) < 0.001
+
+    def test_output_range(self):
+        net = FactorWeightNet(state_dim=20, n_factors=5)
+        x = torch.randn(10, 20)
+        out = net(x)
+        assert (out >= 0).all()
+        assert (out <= 1).all()
+
+    def test_gradient_flow(self):
+        net = FactorWeightNet(state_dim=10, n_factors=3)
+        net.train()
+        x = torch.randn(4, 10, requires_grad=True)
+        out = net(x)
+        loss = out.mean()
+        loss.backward()
+        for name, param in net.named_parameters():
+            assert param.grad is not None, f"{name} has no gradient"
