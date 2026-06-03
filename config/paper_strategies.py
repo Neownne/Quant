@@ -8,7 +8,7 @@ from config.settings import TradingConfig
 PAPER_STRATEGIES = [
     {
         "name": "舞",
-        "version": "v1.6",
+        "version": "v1.7",
         "account_id": 15,
         "run_id": 2,
         "universe_size": 500,
