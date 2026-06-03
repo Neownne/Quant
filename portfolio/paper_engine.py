@@ -217,8 +217,9 @@ class PaperEngine:
             for code, pos in positions.items()
         )
         total_value = cash + position_value
-        prev_peak = self.peak_value or total_value
-        daily_return = (total_value / max(prev_peak, 1) - 1) if prev_peak > 0 else 0
+        # 日收益 = 今日/昨日 - 1（从 paper_daily_pnl 取前一日总值）
+        prev_total = self._get_prev_total(trade_date)
+        daily_return = (total_value / prev_total - 1) if prev_total > 0 else 0
         drawdown = ((self.peak_value - total_value) / self.peak_value) if self.peak_value and self.peak_value > 0 else 0
         self.peak_value = max(self.peak_value or 0, total_value)
 
@@ -615,6 +616,19 @@ class PaperEngine:
             engine.dispose()
 
         return daily_signals
+
+    def _get_prev_total(self, trade_date) -> float:
+        """获取前一交易日的总资产。"""
+        from data.db import get_engine
+        engine = get_engine()
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text(
+                    "SELECT total_value FROM paper_daily_pnl WHERE account_id=:aid AND trade_date < :d ORDER BY trade_date DESC LIMIT 1"
+                ), {"aid": self.account_id, "d": trade_date.date() if hasattr(trade_date, 'date') else trade_date}).fetchone()
+                return float(row[0]) if row else TradingConfig.INITIAL_CASH
+        finally:
+            engine.dispose()
 
     def _record_daily_pnl(
         self, trade_date, cash: float, position_value: float,

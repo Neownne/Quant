@@ -1214,16 +1214,12 @@ def main():
             daily_costs.append(cost)
             turnover_rates.append(turnover_rate)
 
-            selected_next = next_data[next_data["code"].isin(top_codes)]
-
-            if selected_next.empty:
-                # 空仓状态：仍记录日期，NAV 不变（现金），但不计算收益
-                if not top_codes:
-                    all_dates.append(str(next_dt)[:10])
-                    all_navs.append(round(nav, 6))
+            # 持仓收益：用 dt 的 ret_1d（= close[next_dt]/close[dt]-1）
+            selected_dt = day_data[day_data["code"].isin(top_codes)]
+            if selected_dt.empty:
                 continue
 
-            daily_ret = float(selected_next["ret_1d"].mean())
+            daily_ret = float(selected_dt["ret_1d"].mean())
             # 按市场状态调整仓位比例（弱牛/熊市降低风险暴露）
             pos_ratio = reg_params.get("position_ratio", 1.0)
             daily_ret_net = daily_ret * pos_ratio - cost

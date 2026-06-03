@@ -1069,10 +1069,8 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     {chart_html}
     {pending_html}
     {sector_html}
-    <div class="card"><h3>已平仓交易 ({len(closed_pos)}笔)</h3>{pos_html.replace('<th>代码</th><th>入场日</th>', '<th>代码</th><th>入场日</th><th>出场日</th><th>出场价</th>')
-    if not closed_pos else pos_html}</div>
-    <div class="card"><h3>近期信号</h3>{sig_html}</div>
-    <div class="card"><h3>汇总</h3><p>总盈亏: <span class="{'up' if total_pnl > 0 else 'down'}">{total_pnl:+,.0f}</span></p><p>胜率: {wins}/{len(closed_pos)} ({wins/max(len(closed_pos),1)*100:.0f}%)</p></div>"""
+    <div class="card"><h3>已平仓交易 ({len(closed_pos)}笔)</h3>{pos_html if closed_pos else '<p>无平仓记录</p>'}</div>
+    <div class="card"><h3>近期信号</h3>{sig_html}</div>"""
     return HTMLResponse(html)
 
 

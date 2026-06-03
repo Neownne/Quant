@@ -333,7 +333,10 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
                 prev_total = conn_pnl.execute(text("SELECT total_value FROM paper_daily_pnl WHERE account_id=:aid ORDER BY trade_date DESC LIMIT 1"), {"aid": account_id}).fetchone()
                 prev_tv = float(prev_total[0]) if prev_total else TradingConfig.INITIAL_CASH
                 dr = (total - prev_tv) / prev_tv if prev_tv > 0 else 0
-                dd = (TradingConfig.INITIAL_CASH - total) / TradingConfig.INITIAL_CASH if total < TradingConfig.INITIAL_CASH else 0
+                # 回撤 = (历史峰值 - 当前) / 历史峰值
+                peak_val = conn_pnl.execute(text("SELECT COALESCE(MAX(total_value), :init) FROM paper_daily_pnl WHERE account_id=:aid"), {"aid": account_id, "init": TradingConfig.INITIAL_CASH}).fetchone()[0]
+                peak_val = max(float(peak_val), total)
+                dd = (peak_val - total) / peak_val if peak_val > 0 else 0
                 conn_pnl.execute(text("""
                     INSERT INTO paper_daily_pnl (account_id, trade_date, cash, position_value, total_value, daily_return, drawdown)
                     VALUES (:aid, :d, :c, :pv, :tv, :dr, :dd)
