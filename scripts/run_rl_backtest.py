@@ -115,7 +115,7 @@ def main():
 
     # ── 仿真（所有窗口串联，每个窗口用各自模型）──
     nav = INIT
-    positions = {}
+    holdings = set()  # 当前持仓代码
     nav_history = [nav]
     daily_rets = []
     all_val_dates = []
@@ -142,7 +142,8 @@ def main():
             preds = predictor.predict(day_factor, market_state=state)
             scores = pd.Series(preds["score"].values, index=preds["code"].values).sort_values(ascending=False)
             new_holdings, to_buy, to_sell = select_topk_ndrop(
-                scores, set(positions.keys()), K=args.top_n, N=args.ndrop_n)
+                scores, holdings, K=args.top_n, N=args.ndrop_n)
+            holdings = set(new_holdings)
 
             day_ret = 0.0; cost = 0.0
             if dt in close_map.index:
