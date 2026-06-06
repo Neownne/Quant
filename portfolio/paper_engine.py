@@ -57,6 +57,8 @@ class PaperEngine:
         signal_only: bool = False,
         index_crash_lookback: int | None = None,
         index_crash_threshold: float | None = None,
+        adaptive_ndrop: bool = False,
+        ndrop_score_spread_threshold: float = 0.15,
     ):
         self.account_id = account_id
         self.run_id = run_id
@@ -77,6 +79,9 @@ class PaperEngine:
         self.signal_only = signal_only
         self.index_crash_lookback = index_crash_lookback if index_crash_lookback is not None else TradingConfig.INDEX_CRASH_LOOKBACK
         self.index_crash_threshold = index_crash_threshold if index_crash_threshold is not None else TradingConfig.INDEX_CRASH_THRESHOLD
+        # NDrop v2: adaptive N
+        self.adaptive_ndrop = adaptive_ndrop
+        self.ndrop_score_spread_threshold = ndrop_score_spread_threshold
         self.peak_value: float | None = None
         # 交易成本
         self.commission = TradingConfig.COMMISSION
@@ -134,12 +139,27 @@ class PaperEngine:
         if candidates.empty:
             return self._skip_day(trade_date, cash, positions, day_ohlcv)
 
-        # 3. 预测 → 选股 → 分配
+        # 3. 计算持仓盈亏（供 NDrop 盈亏感知用）
+        pnl_map = {}
+        if positions:
+            price_today = dict(zip(day_ohlcv["code"], day_ohlcv["close"]))
+            for code, pos in positions.items():
+                entry = pos.get("cost_basis", 0)
+                cur = price_today.get(code, 0)
+                if entry > 0 and cur > 0:
+                    pnl_map[code] = (cur - entry) / entry
+
+        # 4. 预测 → 选股 → 分配
         current_holdings = set(positions.keys())
-        target, signal_scores = self._select_and_allocate(
-            factor_df, candidates, industry_map, cash, current_holdings)
+        target, signal_scores, to_buy_codes, to_sell_codes = self._select_and_allocate(
+            factor_df, candidates, industry_map, cash, current_holdings, pnl_map)
         if target.empty:
             return self._skip_day(trade_date, cash, positions, day_ohlcv)
+
+        # 无买卖时跳过订单生成（PnL 仍会记录）
+        target_codes = set(target["code"].unique()) if not target.empty else set()
+        no_trade = (not to_buy_codes and not to_sell_codes and
+                    target_codes == current_holdings)
 
         # 4. 获取今日价格（T+1执行用开盘价）
         today_prices = self._get_price_map(day_ohlcv, use_open=True)
@@ -180,18 +200,22 @@ class PaperEngine:
                         })
                         positions[code] = rp
 
-        # 8. 生成信号订单
-        buy_orders, sell_orders = self._generate_orders(
-            target, positions, today_prices, cash)
+        # 8. 生成信号订单 (尊重 NDrop 的 to_buy/to_sell)
+        if no_trade:
+            buy_orders, sell_orders = [], []
+        else:
+            buy_orders, sell_orders = self._generate_orders(
+                target, positions, today_prices, cash,
+                to_buy_codes=to_buy_codes, to_sell_codes=to_sell_codes)
 
         # 9. 扣除交易成本
         cost = self._calc_cost(buy_orders, sell_orders, risk_orders, today_prices)
         cash -= cost
 
-        # 10. 执行订单（写 DB）
+        # 10. 执行订单（写 DB）—— 无买卖时跳过
         all_orders = risk_orders + sell_orders + buy_orders
-        daily_signals = []  # for paper_signals
-        if not self.signal_only:
+        daily_signals = []
+        if not self.signal_only and not no_trade:
             daily_signals = self._execute_orders_v2(
                 buy_orders, sell_orders, risk_orders,
                 signal_scores, trade_date)
@@ -326,8 +350,9 @@ class PaperEngine:
         self, factor_df: pd.DataFrame, candidates: pd.DataFrame,
         industry_map: dict[str, str] | None, cash: float,
         current_holdings: set[str] | None = None,
+        pnl_map: dict[str, float] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, float]]:
-        """预测 → 选 top-N/NDrop → 等权 → 上限约束。返回 (target_df, {code: score})。"""
+        """预测 → 选 top-N/NDrop → 等权 → 上限约束。返回 (target_df, {code: score}, to_buy, to_sell)。"""
         valid_codes = set(candidates["code"].unique())
         factor_slice = factor_df[factor_df["code"].isin(valid_codes)]
 
@@ -335,25 +360,37 @@ class PaperEngine:
             scores = self.predictor.predict(factor_slice)
         except Exception as e:
             logger.warning(f"预测失败: {e}")
-            return pd.DataFrame(), {}
+            return pd.DataFrame(), {}, set(), set()
 
         score_map = dict(zip(scores["code"], scores["score"]))
+        to_buy, to_sell = set(), set()
+        valid_codes_here = set(candidates["code"].unique())  # 过滤后的候选池
 
         if self.rebalance_mode == "ndrop" and current_holdings is not None:
             score_series = pd.Series(score_map).sort_values(ascending=False)
             new_holdings, to_buy, to_sell = select_topk_ndrop(
                 score_series, current_holdings=current_holdings,
-                K=self.top_n, N=self.ndrop_n,
+                K=self.top_n, N=self.ndrop_n, pnl_map=pnl_map,
+                adaptive_n=self.adaptive_ndrop,
+                score_spread_threshold=self.ndrop_score_spread_threshold,
             )
-            codes = list(new_holdings)
+            # 只保留在过滤后候选池中的股票（排除停牌/涨跌停）
+            codes = [c for c in new_holdings if c in valid_codes_here]
+            # 被过滤掉的 from to_buy 也要从 to_sell 中移除（还没买就不卖了）
+            filtered_out = new_holdings - set(codes)
+            to_sell -= filtered_out
+            to_buy -= filtered_out
+            if filtered_out:
+                logger.info(f'NDrop: {len(filtered_out)}只被候选池过滤: {filtered_out}')
         else:
             selected = select_top_n(scores, n=self.top_n)
             if selected.empty:
-                return pd.DataFrame(), score_map
+                return pd.DataFrame(), score_map, to_buy, to_sell
             codes = selected["code"].tolist()
+            codes = [c for c in codes if c in valid_codes_here]
 
         if not codes:
-            return pd.DataFrame(), score_map
+            return pd.DataFrame(), score_map, to_buy, to_sell
 
         alloc = equal_weight(codes, cash)
         result = apply_position_limits(alloc, industry_map or {}, self.max_single, self.max_industry)
@@ -373,7 +410,7 @@ class PaperEngine:
                 result.at[i, "price"] = 0
 
         result = result[result["target_shares"] > 0]
-        return result, score_map
+        return result, score_map, to_buy, to_sell
 
     def _check_risk(
         self, positions: dict[str, dict], today_prices: dict[str, float],
@@ -428,8 +465,14 @@ class PaperEngine:
     def _generate_orders(
         self, target: pd.DataFrame, positions: dict[str, dict],
         today_prices: dict[str, float], cash: float,
+        to_buy_codes: set[str] | None = None,
+        to_sell_codes: set[str] | None = None,
     ) -> tuple[list[dict], list[dict]]:
-        """对比目标持仓和当前持仓，生成买卖单。"""
+        """对比目标持仓和当前持仓，生成买卖单。
+
+        当提供 to_buy_codes/to_sell_codes 时，只买卖这些指定的股票，
+        而不是按 target vs positions 的差集全量操作。
+        """
         buy_orders, sell_orders = [], []
         target_map = {}
         for _, row in target.iterrows():
@@ -439,7 +482,13 @@ class PaperEngine:
         current_codes = set(positions.keys())
         target_codes = set(target_map.keys())
 
-        for code in current_codes - target_codes:
+        # 确定要卖出的股票：优先用 to_sell_codes，否则用差集
+        if to_sell_codes is not None:
+            sell_codes = to_sell_codes & current_codes
+        else:
+            sell_codes = current_codes - target_codes
+
+        for code in sell_codes:
             p = today_prices.get(code, positions[code]["cost_basis"])
             sell_orders.append({
                 "code": code, "direction": "SELL",
@@ -448,11 +497,17 @@ class PaperEngine:
         # 计算可用现金（现有现金 + 待卖出回笼）
         sell_proceeds = sum(
             today_prices.get(code, positions[code]["cost_basis"]) * positions[code]["shares"]
-            for code in current_codes - target_codes
+            for code in sell_codes
         )
         available_cash = cash + sell_proceeds
 
-        for code in target_codes:
+        # 确定要处理的股票：to_buy 中的 + 已在持仓且在 target 中的（rebalance）
+        if to_buy_codes is not None:
+            process_codes = (to_buy_codes & target_codes) | (current_codes & target_codes - sell_codes)
+        else:
+            process_codes = target_codes
+
+        for code in process_codes:
             t_shares = target_map[code]["shares"]
             t_price = target_map[code]["price"]
             c_shares = positions[code]["shares"] if code in positions else 0
@@ -582,11 +637,16 @@ class PaperEngine:
                                      exit_date, exit_price, quantity, pnl, pnl_pct)
                                 VALUES (:rid, :sc, (SELECT entry_date FROM paper_positions WHERE id = :lid),
                                         :ep_in, :ed, :ep_out, :qty, :pnl, :pp)
+                                ON CONFLICT (run_id, stock_code, entry_date)
+                                DO UPDATE SET exit_date=:ed2, exit_price=:ep_out2,
+                                              quantity=:qty2, pnl=:pnl2, pnl_pct=:pp2
                             """), {
                                 "rid": self.run_id, "sc": o["code"],
                                 "lid": lot[0], "ep_in": float(lot[2]),
                                 "ed": dt, "ep_out": o["price"],
                                 "qty": close_qty, "pnl": pnl, "pp": pnl_pct,
+                                "ed2": dt, "ep_out2": o["price"],
+                                "qty2": close_qty, "pnl2": pnl, "pp2": pnl_pct,
                             })
                         remaining -= close_qty
 

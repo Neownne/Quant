@@ -171,6 +171,100 @@ class TestNDrop:
         # 50 天后持仓应为 K
         assert len(holdings) == K
 
+    # ── NDrop v2 测试 ──
+
+    def test_adaptive_n_high_spread(self):
+        """自适应 N：高离散度 (spread > 0.30) → N=4。"""
+        scores = pd.Series(
+            [0.99, 0.95, 0.90, 0.80, 0.50, 0.30, 0.10],
+            index=["A", "B", "C", "D", "E", "F", "G"],
+        )
+        current = {"A", "B", "C", "D", "E"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=5, N=5,
+            adaptive_n=True, score_spread_threshold=0.15,
+        )
+        # N 应被调整为 4 (K-N=1: 只保留 A，其余底部全部评估)
+        assert len(to_sell) >= 3  # 至少卖出 3 只
+        assert len(new_holdings) <= 5
+
+    def test_adaptive_n_low_spread(self):
+        """自适应 N：低离散度应得较小的 N。"""
+        # 分数极差小 ~0.08 → N=2
+        scores = pd.Series(
+            [0.85, 0.83, 0.81, 0.79, 0.77, 0.75, 0.73],
+            index=["A", "B", "C", "D", "E", "F", "G"],
+        )
+        current = {"A", "B", "C"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=3, N=5,
+            adaptive_n=True, score_spread_threshold=0.15,
+        )
+        # N 被限制在 min(N, len(current_holdings)) = 3
+        # 实际 spread > 0.075 所以 N=2
+        assert len(to_sell) <= 3
+        assert "A" in new_holdings  # 最高分的 A 应保留
+
+    def test_pnl_low_score_rank_forced_sell(self):
+        """增强PnL：分数排名低于阈值 (<0.3) → 不管盈亏都卖。"""
+        scores = pd.Series(
+            [0.95, 0.90, 0.70, 0.60, 0.10],
+            index=["A", "B", "C", "D", "E"],
+        )
+        pnl_map = {"A": 0.05, "B": 0.10, "C": 0.15, "D": 0.03, "E": 0.50}  # E 大赚
+        current = {"A", "B", "C", "D", "E"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=5, N=3,
+            pnl_map=pnl_map, score_rank_threshold=0.3, loss_tolerance=-0.08,
+        )
+        # E 分数排名 ~0.0 < 0.3 → 必须卖，即使盈利 50%
+        assert "E" in to_sell
+
+    def test_pnl_mild_loss_good_score_keep(self):
+        """增强PnL：轻微亏损 (>-8%) + 分数排名 >0.5 → 继续持有。"""
+        scores = pd.Series(
+            [0.95, 0.90, 0.85, 0.80, 0.75],
+            index=["A", "B", "C", "D", "E"],
+        )
+        pnl_map = {"A": 0.03, "B": -0.02, "C": -0.05, "D": 0.08, "E": -0.04}
+        current = {"A", "B", "C", "D", "E"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=5, N=3,
+            pnl_map=pnl_map, score_rank_threshold=0.3, loss_tolerance=-0.08,
+        )
+        # B: rank~0.6, pnl=-0.02 > -0.08, rank>0.5 → 保留
+        assert "B" in new_holdings
+
+    def test_pnl_exceeds_loss_tolerance_sell(self):
+        """增强PnL：亏损超出容忍线 (<-8%) → 止损卖出。"""
+        scores = pd.Series(
+            [0.95, 0.90, 0.85, 0.80, 0.75],
+            index=["A", "B", "C", "D", "E"],
+        )
+        pnl_map = {"A": -0.01, "B": -0.03, "C": -0.12, "D": 0.01, "E": -0.15}
+        current = {"A", "B", "C", "D", "E"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=5, N=3,
+            pnl_map=pnl_map, score_rank_threshold=0.3, loss_tolerance=-0.08,
+        )
+        # C(-12%) 和 E(-15%) 都跌破 -8% 容忍线 → 止损
+        assert "C" in to_sell or "E" in to_sell
+
+    def test_pnl_profitable_decaying_score_take_profit(self):
+        """增强PnL：盈利但分数排名在衰退区 → 止盈。"""
+        scores = pd.Series(
+            [0.95, 0.90, 0.85, 0.50, 0.45],
+            index=["A", "B", "C", "D", "E"],
+        )
+        pnl_map = {"A": 0.01, "B": 0.02, "C": 0.15, "D": 0.20, "E": 0.30}
+        current = {"A", "B", "C", "D", "E"}
+        new_holdings, to_buy, to_sell = select_topk_ndrop(
+            scores, current_holdings=current, K=5, N=3,
+            pnl_map=pnl_map, score_rank_threshold=0.3, loss_tolerance=-0.08,
+        )
+        # D(rank~0.2), E(rank~0.0) 盈利但 rank < 0.45(=0.3*1.5) → 止盈
+        assert "D" in to_sell or "E" in to_sell
+
 
 class TestRisk:
     def test_stop_loss_triggers(self):

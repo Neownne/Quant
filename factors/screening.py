@@ -10,7 +10,7 @@ def filter_factors_by_ic(
     factor_df: pd.DataFrame,
     factor_names: list[str],
     ret_col: str = "ret_1d",
-    ic_threshold: float = 0.02,
+    ic_threshold: float = 0.03,
     t_threshold: float = 2.0,
 ) -> list[str]:
     """IC 门禁：过滤预测力不足的因子。
@@ -73,7 +73,7 @@ def compute_factor_correlation(
 def select_orthogonal_factors(
     factor_df: pd.DataFrame,
     factor_names: list[str],
-    threshold: float = 0.7,
+    threshold: float = 0.5,
     ic_summary: pd.DataFrame | None = None,
 ) -> list[str]:
     """贪心筛选正交因子。

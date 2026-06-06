@@ -313,7 +313,7 @@ async def get_backtest_detail(backtest_id: int):
                 SELECT br.equity_curve_json, br.metrics_json, br.daily_returns_json,
                        br.quality, br.quality_flags, br.start_date, br.end_date,
                        sc.name AS strategy_name, sc.type AS strategy_type,
-                       sv.version
+                       sv.version, sv.algorithm_type
                 FROM backtest_results br
                 JOIN strategy_versions sv ON br.version_id = sv.id
                 JOIN strategy_configs sc ON sv.strategy_id = sc.id
@@ -333,7 +333,7 @@ async def get_backtest_detail(backtest_id: int):
     start_date = str(row[5] or "")
     end_date = str(row[6] or "")
     strategy_name = row[7] or "Unknown"
-    strategy_type = row[8] or ""
+    strategy_type = row[10] or row[8] or ""  # sv.algorithm_type优先, fallback sc.type
     version = row[9] or ""
 
     # Load benchmark data (上证指数 000001)
@@ -621,7 +621,7 @@ async def get_backtest_detail(backtest_id: int):
 
     # ── Position history section ──────────────────────────────────────
     pos_html = ""
-    if position_history and strategy_type == "ml":
+    if position_history and strategy_type in ("ml", "small_cap", "dual_switch"):
         # Build name lookup from stock_basic
         name_map = {}
         all_pos_codes = set()
@@ -636,7 +636,27 @@ async def get_backtest_detail(backtest_id: int):
             except Exception:
                 pass
 
-        pos_html = "<h4 style='margin:16px 0 8px;'>近期持仓明细 (最近20个调仓日)</h4>"
+        # 分配比例展示（双引擎策略）
+        alloc_html = ""
+        if strategy_type == "dual_switch":
+            modes = [p.get("mode","") for p in position_history[-20:]]
+            if modes:
+                sc_pcts = []
+                for m in modes:
+                    if "sc" in m:
+                        try: sc_pcts.append(int(m.replace("sc","").replace("%",""))/100)
+                        except: pass
+                avg_sc = sum(sc_pcts)/len(sc_pcts) if sc_pcts else 0.5
+                sc_w, lc_w = int(avg_sc*100), 100-int(avg_sc*100)
+                alloc_html = f"""<div style='margin:12px 0 8px;padding:10px 14px;background:#f8f9fa;border-radius:6px;border-left:3px solid #1976d2;'>
+                <div style='display:flex;justify-content:space-between;margin-bottom:6px;'>
+                <span style='font-weight:600;font-size:13px;'>📊 近期分配比例</span>
+                <span style='font-size:11px;color:#888;'>近20日平均</span></div>
+                <div style='display:flex;height:22px;border-radius:4px;overflow:hidden;font-size:11px;font-weight:600;line-height:22px;text-align:center;color:#fff;'>
+                <div style='width:{sc_w}%;background:linear-gradient(135deg,#ff6f00,#ff8f00);'>小票 {sc_w}%</div>
+                <div style='width:{lc_w}%;background:linear-gradient(135deg,#1565c0,#1976d2);'>大票 {lc_w}%</div></div></div>"""
+
+        pos_html = alloc_html + "<h4 style='margin:16px 0 8px;'>近期持仓明细 (最近20个调仓日)</h4>"
         recent = position_history[-20:]
         pos_html += """<table style="font-size:11px;width:100%;border-collapse:collapse;"><thead>
         <tr style="background:#f5f5f5;"><th style="padding:4px;text-align:left;">日期</th>
@@ -985,38 +1005,48 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     except Exception:
         pass
 
-    # 持仓板块分布（5板块：科创/主板大盘/主板小盘/红利）
+    # 持仓概念板块分布（基于 concept_stock 表）
     sector_html = ""
     try:
-        from config.sector_map import classify_stock
         from collections import Counter
         with engine.connect() as conn:
-            # 获取CSI300和红利股票列表
-            csi300 = set()
-            try:
-                csi_rows = conn.execute(text("SELECT con_code FROM index_constituent WHERE idx_code='000300'")).fetchall()
-                csi300 = {r[0] for r in csi_rows}
-            except Exception: pass
-            dividend = set()
-            try:
-                div_rows = conn.execute(text("SELECT DISTINCT code FROM stock_daily_extra WHERE trade_date=(SELECT MAX(trade_date) FROM stock_daily_extra) AND pb>0 AND pb<1.5")).fetchall()
-                dividend = {r[0] for r in div_rows}
-            except Exception: pass
-            # 持仓股票
-            pos_codes = conn.execute(text("SELECT stock_code, SUM(quantity) FROM paper_positions WHERE run_id=:rid AND exit_date IS NULL GROUP BY stock_code"), {"rid": run_id}).fetchall()
+            pos_codes = conn.execute(text(
+                "SELECT stock_code, SUM(quantity) FROM paper_positions WHERE run_id=:rid AND exit_date IS NULL GROUP BY stock_code"
+            ), {"rid": run_id}).fetchall()
         if pos_codes:
-            sector_qty = Counter()
-            for code, qty in pos_codes:
-                sec = classify_stock(code, csi300, dividend)
-                sector_qty[sec] += int(qty)
+            stock_codes = [r[0] for r in pos_codes]
+            qty_map = {r[0]: int(r[1]) for r in pos_codes}
+            # 查每只股票所属概念板块
+            with engine.connect() as conn:
+                code_str = ",".join([f"'{c}'" for c in stock_codes])
+                board_rows = conn.execute(text(
+                    f"SELECT cs.stock_code, cb.name FROM concept_stock cs "
+                    f"JOIN concept_board cb ON cs.board_code=cb.code "
+                    f"WHERE cs.stock_code IN ({code_str})"
+                )).fetchall()
+            # 按板块聚合持仓数
+            board_qty = Counter()
+            seen = set()
+            for stock_code, board_name in board_rows:
+                board_qty[board_name] += qty_map.get(stock_code, 0)
+                seen.add(stock_code)
+            # 未匹配的股票归入"其他"
+            for code, qty in qty_map.items():
+                if code not in seen:
+                    board_qty["其他"] += qty
             import json as _json
-            sec_data = [{"name": k, "value": v} for k, v in sector_qty.most_common()]
+            # 取 Top-10 板块，其余合并为"其他"
+            top = board_qty.most_common(10)
+            rest = sum(v for _, v in board_qty.most_common()[10:])
+            sec_data = [{"name": k, "value": v} for k, v in top]
+            if rest > 0:
+                sec_data.append({"name": "其他板块", "value": rest})
             sec_chart = _json.dumps({
                 "tooltip": {"trigger": "item", "formatter": "{b}: {c} 股 ({d}%)"},
                 "series": [{"type": "pie", "radius": ["30%", "70%"], "data": sec_data,
                             "label": {"fontSize": 10}, "emphasis": {"itemStyle": {"shadowBlur": 10}}}],
             })
-            sector_html = f'<div class="card"><h3>持仓板块分布</h3><div id="sector-chart-{run_id}" class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
+            sector_html = f'<div class="card"><h3>持仓概念板块</h3><div id="sector-chart-{run_id}" class="chart-container" data-chart=\'{sec_chart}\' style="width:100%;height:250px;"></div></div>'
     except Exception:
         pass
 

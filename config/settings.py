@@ -72,6 +72,12 @@ class TradingConfig:
     REBALANCE_FREQ = 5                 # 默认周度调仓（交易日）
     NDROP_N = 2                        # NDrop: 每次替换最差2只
 
+    # NDrop v2: 自适应 N + 增强盈亏感知
+    ADAPTIVE_NDROP = False             # 启用自适应 N（基于分数离散度动态调整）
+    NDROP_SCORE_SPREAD_THRESHOLD = 0.15  # 分数 90-10 分位差基准阈值
+    NDROP_SCORE_RANK_THRESHOLD = 0.3   # 分数排名百分位阈值（低于此强制卖出）
+    NDROP_LOSS_TOLERANCE = -0.08       # 亏损容忍线（跌破此止损）
+
 
 class AccountConfig:
     """模拟账户默认配置（兼容旧代码，引用 TradingConfig）"""

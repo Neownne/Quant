@@ -1,15 +1,27 @@
 # 项目规范
 
+## Claude Code 八荣八耻
+
+1. 以认真查询为荣，以猜测接口为耻。
+2. 以寻求确认为荣，以模糊执行为耻。
+3. 以人类确认为荣，以臆想业务为耻。
+4. 以复用现有为荣，以新造接口为耻。
+5. 以主动验证为荣，以跳过测试为耻。
+6. 以遵循规范为荣，以破坏架构为耻。
+7. 以诚实承认无知为荣，以假装理解为耻。
+8. 以谨慎重构为荣，以盲目修改为耻。
+
 ## 快速参考
 
 ```bash
 # 每日模拟盘
-python scripts/run_daily_paper.py                    # 数据同步 + 双策略执行
+python scripts/run_daily_paper.py                    # 数据同步 + v1.8 策略执行
 python scripts/run_daily_paper.py --no-sync           # 跳过同步
-python scripts/run_daily_paper.py --strategies v1.5   # 只跑 v1.5
+python scripts/run_daily_paper.py --strategies v1.5   # 只跑指定版本
 
 # 回测
-python scripts/run_ml_backtest.py --strategy 舞
+python scripts/run_ml_backtest.py --strategy 舞        # v1.8 (universe=1000)
+python scripts/run_ml_backtest.py --strategy 舞 --universe-size 500
 
 # Web
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
@@ -85,26 +97,20 @@ Day T+1:
 | paper_daily_pnl | 每日估值 | account_id, trade_date, total_value, daily_return |
 | paper_orders | 订单审计 | account_id, code, direction, price, volume |
 
-**v1.4**: account_id=15, run_id=2
-**v1.5**: account_id=17, run_id=4
+**v1.8**: account_id=15, run_id=2 (universe=1000)
+**v1.7**: account_id=15, run_id=1 (universe=500, 旧)
 **小市值**: account_id=16, run_id=3
 
 ## Web 模拟盘页面结构
 
 ```
 http://localhost:8899/paper
-┌──────────────┬──────────────┐
-│  舞 v1.4      │  舞 v1.5      │  ← /api/paper-run/{run_id}?account_id={aid}
-│  [汇总]       │  [汇总]       │
-│  [每日估值]    │  [每日估值]    │
-│  [持仓表]      │  [持仓表]      │
-│  [权益+基准]   │  [权益+基准]   │
-│  [每日盈亏]    │  [每日盈亏]    │
-│  [待执行信号]  │  [待执行信号]  │
-│  [行业饼图]    │  [行业饼图]    │
-├──────────────┴──────────────┤
-│  小市值 v1.0  account=16     │
-└─────────────────────────────┘
+┌──────────────────────────────┐
+│  舞 v1.8  (universe=1000)    │  ← /api/paper-run/{run_id}?account_id={aid}
+│  [汇总] [每日估值] [持仓表]    │
+│  [权益+基准] [每日盈亏]        │
+│  [待执行信号] [行业饼图]       │
+└──────────────────────────────┘
 ```
 
 ## 策略配置
@@ -113,38 +119,36 @@ http://localhost:8899/paper
 
 ```python
 PAPER_STRATEGIES = [
-    {"name": "舞", "version": "v1.4", "account_id": 15, "run_id": 2,
-     "factor_mode": "standard", ...},
-    {"name": "舞", "version": "v1.5", "account_id": 17, "run_id": 4,
-     "factor_mode": "full", ...},
+    {"name": "舞", "version": "v1.8", "account_id": 15, "run_id": 2,
+     "universe_size": 1000, "factor_mode": "all", ...},
 ]
 ```
 
-- `factor_mode: "standard"` → 47个技术因子 + 14个基本面
-- `factor_mode: "full"` → 全部因子（含日内分钟+市场宽度）
+- `factor_mode: "all"` → 全部因子（~83个，含日内+市场宽度）
+- `universe_size: 1000` → v1.8 优化（v1.7 为 500），跨周期验证 Sharpe +23%
 
-## v1.4 vs v1.5 差异
+## v1.7 vs v1.8 差异
 
-| | v1.4 | v1.5 |
+| | v1.7 | v1.8 |
 |------|------|------|
-| 因子集 | standard (~61个) | full (~85个) |
-| 日内因子 | 无 | close_auction_strength, pm_ret, intra_vol_skew 等 |
-| IC筛选后 | ~6-7个 | ~11个 |
-| 滑点 | 0.1% | 0.1% |
+| Universe | 500 | **1000** |
+| Sharpe (2015-2025) | 1.19 | **1.46** |
+| 最大回撤 | 17.4% | 24.7% |
+| 其他参数 | 相同 | 相同 |
 
 ## 验证检查清单
 
 每次修改后必须验证：
 
 - [ ] `python scripts/run_daily_paper.py --dry-run --no-sync` 不报错
-- [ ] Web 页面三区加载正常 (v1.4 / v1.5 / 小市值)
+- [ ] Web 页面 v1.8 区加载正常
 - [ ] 待执行信号(T+1)区域有数据
 - [ ] 持仓表显示 entry_price ≠ 当前价（有浮盈浮亏）
 - [ ] 权益曲线显示多天数据
 - [ ] 每日盈亏柱状图有红绿柱
 - [ ] 行业分布饼图有数据
 - [ ] 汇总区显示总资产/日收益/累计/回撤
-- [ ] v1.4 和 v1.5 持仓不完全相同
+- [ ] v1.8 持仓表有数据，entry_price ≠ 当前价
 - [ ] `python -m pytest tests/ -q --ignore=tests/test_overfit_check.py --ignore=tests/test_regime.py` 全绿
 
 ## 常见问题
@@ -163,6 +167,7 @@ PAPER_STRATEGIES = [
 
 | 参数 | 值 | 说明 |
 |---|---|---|
+| UNIVERSE_SIZE | 1000 | v1.8 优化 (v1.7=500)，跨周期 Sharpe +23% |
 | INITIAL_CASH | 1,000,000 | 100万本金 |
 | COMMISSION | 0.00009 | 万0.9 佣金（买卖双向） |
 | STAMP_DUTY | 0.0005 | 万5 印花税（卖出单向） |

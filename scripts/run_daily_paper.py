@@ -190,7 +190,7 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
     factor_cols = filter_factors_by_ic(dataset, factor_names)
     if len(factor_cols) < 3:
         factor_cols = factor_names[:min(12, len(factor_names))]
-    selected = select_orthogonal_factors(dataset, factor_cols, threshold=0.7)
+    selected = select_orthogonal_factors(dataset, factor_cols)
     logger.info(f"[{name} {ver}] 因子: {len(factor_names)}→IC{len(factor_cols)}→正交{len(selected)}")
 
     if strategy_cfg.get("type") == "rl":
@@ -341,7 +341,8 @@ def run_strategy(strategy_cfg: dict, ohlcv: pd.DataFrame, index_df: pd.DataFrame
                     logger.info(f"[{name} {ver}] 调仓({prev_date.date()}信号→{pred_date.date()}执行, "
                                 f"距上次{trading_days}日/频率{rebalance_freq}日)")
                     eng = PaperEngine(account_id=account_id, run_id=run_id, predictor=ensemble,
-                                      top_n=top_n, rebalance_mode="ndrop")
+                                      top_n=top_n, rebalance_mode="ndrop",
+                                      adaptive_ndrop=strategy.get("adaptive_ndrop", False))
                     result = eng.run_daily(trade_date=pred_date, factor_df=today_factor,
                                            ohlcv_data=ohlcv, index_ohlcv=index_df, regime=today_regime)
                     if result:

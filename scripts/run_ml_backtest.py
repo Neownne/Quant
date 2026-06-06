@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--model", default="xgboost", choices=["xgboost", "lightgbm"])
     parser.add_argument("--factors", default="all", help="'all', factor preset name, '+preset1+preset2', or comma-separated factor list")
     parser.add_argument("--factor-preset", default="", help="Shorthand for --factors: momentum, reversal, volatility, liquidity, fundamental, all")
-    parser.add_argument("--forward-days", type=int, default=5, help="Label horizon: 1=next day, 5=next week")
+    parser.add_argument("--forward-days", type=int, default=1, help="Label horizon: 1=next day, 5=next week")
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--val-years", type=int, default=1)
@@ -244,8 +244,15 @@ def main():
     parser.add_argument("--optuna", action="store_true", help="启用 Optuna 超参优化")
     parser.add_argument("--optuna-trials", type=int, default=30, help="Optuna 搜索轮数")
     parser.add_argument("--strategy", default="", help="策略名称，对应 strategy_configs.name，用于匹配 version_id")
+    parser.add_argument("--version-id", type=int, default=0, help="直接指定 version_id（覆盖 --strategy 的查找）")
     parser.add_argument("--dynamic", action="store_true", default=True, help="启用动态多因子闭环（归因→健康度→调参）")
     parser.add_argument("--no-dynamic", action="store_false", dest="dynamic", help="禁用动态多因子闭环")
+    parser.add_argument("--adaptive-ndrop", action="store_true", default=True, help="启用自适应 NDrop v2（分数离散度动态调整 N）")
+    parser.add_argument("--ndrop-spread-threshold", type=float, default=TradingConfig.NDROP_SCORE_SPREAD_THRESHOLD, help="自适应 N 的分数离散度基准阈值")
+    parser.add_argument("--ndrop-rank-threshold", type=float, default=TradingConfig.NDROP_SCORE_RANK_THRESHOLD, help="PnL 决策的分数排名百分位阈值")
+    parser.add_argument("--ndrop-loss-tolerance", type=float, default=TradingConfig.NDROP_LOSS_TOLERANCE, help="PnL 决策的亏损容忍线（负值）")
+    parser.add_argument("--no-pnl-ndrop", action="store_true", default=True, help="禁用 pnl_map（退化为纯分数 NDrop，回测默认推荐）")
+    parser.add_argument("--with-pnl-ndrop", action="store_false", dest="no_pnl_ndrop", help="启用 pnl_map 盈亏感知 NDrop")
     parser.add_argument("--rebalance-freq", type=int, default=1, help="调仓频率（交易日），默认1=日频")
     parser.add_argument("--universe-size", type=int, default=500, help="候选池上限，0=全市场非ST")
     parser.add_argument("--small-cap", action="store_true", help="小市值策略模式（按市值升序选股+行业分散+季节空仓）")
@@ -291,7 +298,17 @@ def main():
     # 查找策略版本ID 和 strategy_configs.id
     version_id = 0
     strategy_config_id = 0
-    if args.strategy:
+    if args.version_id:
+        version_id = args.version_id
+        # 反向查找 strategy_config_id
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT strategy_id FROM strategy_versions WHERE id = :vid"),
+                {"vid": version_id},
+            ).fetchone()
+            strategy_config_id = row[0] if row else 0
+        logger.info(f"直接指定 version_id={version_id}, config_id={strategy_config_id}")
+    elif args.strategy:
         with engine.connect() as conn:
             row = conn.execute(
                 text("""
@@ -660,7 +677,7 @@ def main():
 
     # 2. 正交筛选
     if not args.no_orthogonal:
-        factor_cols = select_orthogonal_factors(ic_dataset, factor_names, threshold=0.7)
+        factor_cols = select_orthogonal_factors(ic_dataset, factor_names)
     else:
         factor_cols = factor_names
 
@@ -861,6 +878,11 @@ def main():
     day_counter = 0
     current_holdings: list[str] = []
     cost_basis: dict[str, float] = {}  # code -> entry price
+    # ── NDrop v2 / 动态因子：滞后数据防未来函数 ──
+    prev_day_data: pd.DataFrame | None = None  # 上一调仓日数据，用于滞后 IC 计算
+    pending_ensemble = None  # 重训后暂存，下次调仓切换
+    pending_single_model = None
+    pending_factor_cols = None
     peak_price: dict[str, float] = {}  # code -> highest price since entry (trailing stop)
     position_entry_day: dict[str, int] = {}  # code -> entry day_counter
     stop_loss_events: list[dict] = []  # record stop-loss triggers
@@ -871,12 +893,19 @@ def main():
 
     # ── 价格查找表（止损计算用） ──
     price_lookup: dict[str, dict[str, float]] = {}  # {date_str: {code: close}}
+    open_lookup: dict[str, dict[str, float]] = {}   # {date_str: {code: open}}
     ohlcv_pivot = ohlcv.pivot_table(
         index="trade_date", columns="code", values="close", aggfunc="last"
     )
     for dt_idx in ohlcv_pivot.index:
         row = ohlcv_pivot.loc[dt_idx]
         price_lookup[str(dt_idx)[:10]] = {c: float(row[c]) for c in row.index if pd.notna(row[c])}
+    ohlcv_pivot_open = ohlcv.pivot_table(
+        index="trade_date", columns="code", values="open", aggfunc="last"
+    )
+    for dt_idx in ohlcv_pivot_open.index:
+        row = ohlcv_pivot_open.loc[dt_idx]
+        open_lookup[str(dt_idx)[:10]] = {c: float(row[c]) for c in row.index if pd.notna(row[c])}
 
     for window_idx, r in enumerate(results):
         ensemble = r.get("ensemble")
@@ -931,17 +960,35 @@ def main():
             reg_stop = reg_params["stop_loss_pct"]
             reg_rb = reg_params.get("rebalance_freq", args.rebalance_freq)
             is_rebalance = (day_counter % reg_rb == 0) or (not current_holdings and day_counter >= lockout_until)
+            to_buy: set[str] = set()
+            to_sell: set[str] = set()
 
             if is_rebalance:
-                # ── 逐因子 IC 计算（仅调仓日） ──
+                # ── 切换 pending 模型（上次重训的，本次调仓生效）──
+                if pending_ensemble is not None:
+                    ensemble = pending_ensemble
+                    single_model = pending_single_model
+                    factor_cols = pending_factor_cols
+                    pending_ensemble = None
+                    pending_single_model = None
+                    pending_factor_cols = None
+                    annotation_events.append({
+                        "date": str(dt)[:10],
+                        "type": "model_switch",
+                        "label": "模型切换(新增因子生效)",
+                        "detail": f"活跃因子: {len(factor_cols)}个",
+                    })
+
+                # ── 逐因子 IC 计算（仅调仓日）──
+                # 用上一调仓日的因子值 + 已兑现收益，避免未来函数
                 factor_ic_today: dict[str, float] = {}
-                if args.dynamic and not day_data.empty:
+                if args.dynamic and prev_day_data is not None and not prev_day_data.empty:
                     ret_col = "ret_1d"
-                    if ret_col in day_data.columns:
-                        ret_vals = day_data[ret_col]
+                    if ret_col in prev_day_data.columns:
+                        ret_vals = prev_day_data[ret_col]
                         for f in factor_cols:
-                            if f in day_data.columns:
-                                f_vals = day_data[f]
+                            if f in prev_day_data.columns:
+                                f_vals = prev_day_data[f]
                                 valid = f_vals.notna() & ret_vals.notna()
                                 if valid.sum() > 30:
                                     try:
@@ -978,10 +1025,10 @@ def main():
                 # ── 因子发现 + 重训触发（每 40 个调仓日扫描一次） ──
                 if args.dynamic and tracker is not None and tracker.rebalance_day_count > 0 and \
                    tracker.rebalance_day_count % 40 == 0 and retrain_count < 3:
-                    # 扫描已计算但未使用的因子
+                    # 用上一调仓日数据扫描，避免未来函数（ret_1d 已兑现）
                     discovered = _discover_factors(
-                        day_data, factor_cols, ic_threshold=0.02, max_add=5,
-                    )
+                        prev_day_data, factor_cols, ic_threshold=0.02, max_add=5,
+                    ) if prev_day_data is not None else []
                     if discovered:
                         print(f"  [发现] {str(dt)[:10]} 新有效因子({len(discovered)}): "
                               f"{discovered[:5]}{'...' if len(discovered) > 5 else ''}")
@@ -1003,19 +1050,20 @@ def main():
                             industry_neutralize=getattr(args, "industry_neutralize", False),
                         )
                         if retrain_result:
-                            ensemble = retrain_result.get("ensemble")
-                            single_model = retrain_result.get("model")
-                            factor_cols = retrain_result.get("factor_cols", new_factor_cols)
+                            # 延迟切换：新模型存到 pending，下次调仓日生效
+                            pending_ensemble = retrain_result.get("ensemble")
+                            pending_single_model = retrain_result.get("model")
+                            pending_factor_cols = retrain_result.get("factor_cols", new_factor_cols)
                             # 更新权重：新因子权重 1.0
                             for f in discovered:
                                 current_factor_weights[f] = 1.0
-                            print(f"  [重训] {str(dt)[:10]} 模型已更新, "
-                                  f"因子: {len(factor_cols)} → 活跃: {len(retrain_result.get('active_cols', factor_cols))}")
+                            print(f"  [重训] {str(dt)[:10]} 模型已训练, 下次调仓切换, "
+                                  f"因子: {len(pending_factor_cols)}")
                             annotation_events.append({
                                 "date": str(dt)[:10],
                                 "type": "model_retrain",
-                                "label": f"模型重训(新因子)",
-                                "detail": f"因子{len(factor_cols)}→{len(retrain_result.get('active_cols', factor_cols))}个, "
+                                "label": f"模型重训(新因子,下次切换)",
+                                "detail": f"因子{len(factor_cols)}→{len(pending_factor_cols)}个, "
                                           f"新增: {', '.join(discovered[:5])}",
                             })
                             retrain_count += 1
@@ -1121,18 +1169,33 @@ def main():
                 if preds.empty:
                     continue
 
-                # ── NDrop 选股 ──
+                # ── NDrop 选股 (v2: pnl_map + adaptive N) ──
                 reg_top_n = reg_params["top_n"]
                 scores_series = pd.Series(
                     preds["score"].values,
                     index=preds["code"].values,
                 ).sort_values(ascending=False)
 
+                # 构建 pnl_map（供 NDrop v2 盈亏感知决策用）
+                pnl_map_call: dict[str, float] = {}
+                if current_holdings and not args.no_pnl_ndrop:
+                    today_prices_for_pnl = price_lookup.get(dt_str, {})
+                    for code in current_holdings:
+                        entry = cost_basis.get(code, 0)
+                        cur = today_prices_for_pnl.get(code, 0)
+                        if entry > 0 and cur > 0:
+                            pnl_map_call[code] = (cur - entry) / entry
+
                 new_holdings_set, to_buy, to_sell = select_topk_ndrop(
                     scores_series,
                     current_holdings=set(current_holdings),
                     K=reg_top_n,
                     N=TradingConfig.NDROP_N,
+                    pnl_map=pnl_map_call if pnl_map_call else None,
+                    adaptive_n=args.adaptive_ndrop,
+                    score_spread_threshold=args.ndrop_spread_threshold,
+                    score_rank_threshold=args.ndrop_rank_threshold,
+                    loss_tolerance=args.ndrop_loss_tolerance,
                 )
 
                 # ── 小市值：行业分散（每行业最多1只） ──
@@ -1159,12 +1222,12 @@ def main():
                     to_buy = new_holdings_set - set(current_holdings)
                     to_sell = set(current_holdings) - new_holdings_set
 
-                # ── 更新成本基础（新买入的股票记录买入价+入场日） ──
-                today_prices = price_lookup.get(dt_str, {})
+                # ── 更新成本基础（T+1 开盘价买入，与 paper_engine 一致）──
+                next_open_map = open_lookup.get(str(next_dt)[:10], {})
                 for code in to_buy:
-                    if code in today_prices:
-                        cost_basis[code] = today_prices[code]
-                        peak_price[code] = today_prices[code]
+                    if code in next_open_map and next_open_map[code] > 0:
+                        cost_basis[code] = next_open_map[code]
+                        peak_price[code] = next_open_map[code]
                         position_entry_day[code] = day_counter
                 for code in to_sell:
                     cost_basis.pop(code, None)
@@ -1192,54 +1255,63 @@ def main():
                 top_scores = [0.0] * len(current_holdings) if current_holdings else []
 
             day_counter += 1
-            top_codes = current_holdings
+            top_codes = list(current_holdings)  # 独立拷贝，止损不影响日收益计算
 
             # ── 个股止损/止盈 ──
-            next_prices = price_lookup.get(str(next_dt)[:10], {})
+            next_open_map_sl = open_lookup.get(str(next_dt)[:10], {})
+            next_close_map_sl = price_lookup.get(str(next_dt)[:10], {})
             today_prices_sell = price_lookup.get(str(dt)[:10], {})
             stopped_out: list[str] = []
+            stopped_out_prices: dict[str, float] = {}  # 记录止损出场价
             take_profit_pct = args.take_profit
-            for code in top_codes[:]:
-                if code in cost_basis and code in next_prices and cost_basis[code] > 0:
-                    pnl_pct = (next_prices[code] - cost_basis[code]) / cost_basis[code]
-                    # 跌停检查：今日跌停则无法卖出，顺延到次日
+            for code in top_codes:
+                if code in cost_basis and cost_basis[code] > 0:
+                    # 用次日开盘价判断止损（更贴近实盘，无法在收盘精准出逃）
+                    open_next = next_open_map_sl.get(code, 0)
+                    close_next = next_close_map_sl.get(code, 0)
+                    if open_next <= 0:
+                        continue
+                    pnl_open = (open_next - cost_basis[code]) / cost_basis[code]
+                    # 跌停检查：次日开盘即跌停则无法卖出，顺延
                     limit_down = today_prices_sell.get(code, 0) * (0.80 if code.startswith('3') else 0.90) * 0.995
-                    if next_prices.get(code, 0) <= limit_down and next_prices.get(code, 0) > 0:
-                        continue  # 跌停封死，推迟到次日
-                    # 止损
-                    if pnl_pct <= -reg_stop:
+                    if open_next <= limit_down:
+                        continue  # 开盘跌停封死，推迟
+                    # 止损（以开盘价判断）
+                    if pnl_open <= -reg_stop:
                         stopped_out.append(code)
+                        stopped_out_prices[code] = open_next
                         stop_loss_events.append({
                             "date": str(next_dt)[:10], "code": code,
                             "entry_price": round(cost_basis[code], 3),
-                            "exit_price": round(next_prices[code], 3),
-                            "pnl_pct": round(pnl_pct, 4), "reason": "止损",
+                            "exit_price": round(open_next, 3),
+                            "pnl_pct": round(pnl_open, 4), "reason": "止损",
                         })
                         current_holdings.remove(code)
                         cost_basis.pop(code, None)
                         peak_price.pop(code, None)
                         position_entry_day.pop(code, None)
-                    # 止盈
-                    elif pnl_pct >= take_profit_pct:
-                        stopped_out.append(code)
-                        stop_loss_events.append({
-                            "date": str(next_dt)[:10], "code": code,
-                            "entry_price": round(cost_basis[code], 3),
-                            "exit_price": round(next_prices[code], 3),
-                            "pnl_pct": round(pnl_pct, 4), "reason": "止盈",
-                        })
-                        current_holdings.remove(code)
-                        cost_basis.pop(code, None)
-                        peak_price.pop(code, None)
-                        position_entry_day.pop(code, None)
+                    # 止盈（以收盘价判断，可以挂单等待成交）
+                    elif close_next > 0:
+                        pnl_close = (close_next - cost_basis[code]) / cost_basis[code]
+                        if pnl_close >= take_profit_pct:
+                            stopped_out.append(code)
+                            stopped_out_prices[code] = close_next
+                            stop_loss_events.append({
+                                "date": str(next_dt)[:10], "code": code,
+                                "entry_price": round(cost_basis[code], 3),
+                                "exit_price": round(close_next, 3),
+                                "pnl_pct": round(pnl_close, 4), "reason": "止盈",
+                            })
+                            current_holdings.remove(code)
+                            cost_basis.pop(code, None)
+                            peak_price.pop(code, None)
+                            position_entry_day.pop(code, None)
 
             daily_costs.append(cost)
             turnover_rates.append(turnover_rate)
 
-            # 持仓收益：用 dt 的 ret_1d（= close[next_dt]/close[dt]-1）
-            selected_dt = day_data[day_data["code"].isin(top_codes)]
-            if selected_dt.empty:
-                # 空仓也要记录 NAV（缓存现金）
+            # 持仓收益：新买入用 open→close，持仓用 close→close（与 paper_engine 对齐）
+            if not top_codes:
                 nav *= 1.0
                 peak_nav = max(peak_nav, nav)
                 all_dates.append(str(next_dt)[:10])
@@ -1247,7 +1319,23 @@ def main():
                 day_counter += 1
                 continue
 
-            daily_ret = float(selected_dt["ret_1d"].mean())
+            next_close_map = price_lookup.get(str(next_dt)[:10], {})
+            today_close_map = price_lookup.get(dt_str, {})
+            rets = []
+            for code in top_codes:
+                next_c = next_close_map.get(code, 0)
+                if code in to_buy:
+                    # 首日: T+1 开盘买入 → 收盘
+                    entry = cost_basis.get(code, 0)
+                    if entry > 0 and next_c > 0:
+                        rets.append(next_c / entry - 1)
+                else:
+                    # 持仓: 收盘 → 收盘
+                    prev_c = today_close_map.get(code, 0)
+                    if prev_c > 0 and next_c > 0:
+                        rets.append(next_c / prev_c - 1)
+            daily_ret = float(np.mean(rets)) if rets else 0.0
+
             # 按市场状态调整仓位比例（弱牛/熊市降低风险暴露）
             pos_ratio = reg_params.get("position_ratio", 1.0)
             daily_ret_net = daily_ret * pos_ratio - cost
@@ -1267,7 +1355,7 @@ def main():
 
             # 计算日度 Rank IC（仅在调仓日）
             if is_rebalance:
-                actual_ret_map = next_data.set_index("code")["ret_1d"].to_dict()
+                actual_ret_map = day_data.set_index("code")["ret_1d"].to_dict()
                 pred_scores_ic = []
                 actual_rets_ic = []
                 for _, row in preds.head(50).iterrows():
@@ -1276,7 +1364,7 @@ def main():
 
                 if tracker is not None:
                     tracker.record_day(
-                        date_str=str(next_dt)[:10],
+                        date_str=str(dt)[:10],
                         pred_scores=pred_scores_ic,
                         actual_rets=actual_rets_ic,
                         positions={"codes": top_codes, "scores": top_scores},
@@ -1284,6 +1372,10 @@ def main():
                         factor_weights=current_factor_weights if args.dynamic else None,
                         factor_ic=factor_ic_today if args.dynamic else None,
                     )
+
+                # 存储当日数据，供下次调仓计算滞后 IC（避免未来函数）
+                cols_to_store = [c for c in factor_cols if c in day_data.columns] + ["code", "ret_1d"]
+                prev_day_data = day_data[cols_to_store].copy()
 
             # ── 复合净值 ──
             nav *= (1 + daily_ret_net)
@@ -1540,6 +1632,7 @@ def main():
             "quality_pass_dates": len(quality_pass),
             "rebalance_freq": args.rebalance_freq,
             "ndrop_n": TradingConfig.NDROP_N,
+            "ndrop_adaptive": args.adaptive_ndrop,
             "top_n": TradingConfig.TOP_N,
         },
         equity_curve=equity_curve,

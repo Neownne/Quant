@@ -16,20 +16,19 @@ def detect_regime(
     date_col: str = "trade_date",
     price_col: str = "close",
     ma_period: int = 250,
-    strong_bull_threshold: float = 0.03,
-    fast_bear_threshold: float = -0.03,
+    strong_bull_threshold: float = 0.05,
+    fast_bear_threshold: float = -0.05,
 ) -> pd.DataFrame:
     """识别每日市场状态（5 分类）。
 
     规则:
-      strong_bull : close > MA250 且 20 日收益 > +3%  (强上涨趋势)
-      weak_bull   : close > MA250 且 0 < 20 日收益 ≤ +3%  (弱牛/横盘牛)
-      fast_bear   : close < MA250 且 20 日收益 < -3%  (暴跌/快熊)
-      slow_bear   : close < MA250 且 -3% ≤ 20 日收益 < 0  (阴跌/慢熊)
+      strong_bull : close > MA250 且 20 日收益 > +5%  (强上涨趋势)
+      weak_bull   : close > MA250 且 0 < 20 日收益 ≤ +5%  (弱牛/横盘牛)
+      fast_bear   : close < MA250 且 20 日收益 < -5%  (暴跌/快熊)
+      slow_bear   : close < MA250 且 -5% ≤ 20 日收益 < 0  (阴跌/慢熊)
       sideways    : 其余情况
 
-    阈值选择依据：上证指数 2015-2026 年 bull 状态 ret_20 中位数 2.9%，
-    bear 状态 ret_20 中位数 -3.4%。取 ±3% 作为分界线。
+    阈值 ±5%：过滤噪音波动，减少体制频繁切换造成的交易磨损。
 
     返回 DataFrame: [trade_date, regime]
     """
@@ -78,31 +77,31 @@ REGIME_GROUPS = {
 REGIME_PARAMS = {
     "strong_bull": {
         "top_n": 15,
-        "rebalance_freq": 1,
+        "rebalance_freq": 1,  # 强牛日频：趋势明确，高频捕捉机会
         "stop_loss_pct": 0.08,
         "position_ratio": 1.0,
     },
     "weak_bull": {
         "top_n": 10,
-        "rebalance_freq": 5,
+        "rebalance_freq": 3,  # 弱牛 3 日：有一定趋势但不稳定
         "stop_loss_pct": 0.07,
         "position_ratio": 1.0,
     },
     "fast_bear": {
         "top_n": 5,
-        "rebalance_freq": 5,
+        "rebalance_freq": 5,  # 急跌周频：减少交易，止损为主
         "stop_loss_pct": 0.04,
         "position_ratio": 0.3,
     },
     "slow_bear": {
         "top_n": 5,
-        "rebalance_freq": 5,
+        "rebalance_freq": 5,  # 阴跌周频：持有防守股，少动
         "stop_loss_pct": 0.04,
         "position_ratio": 0.4,
     },
     "sideways": {
         "top_n": 10,
-        "rebalance_freq": 5,
+        "rebalance_freq": 3,  # 震荡 3 日：适度捕捉短期反转
         "stop_loss_pct": 0.06,
         "position_ratio": 1.0,
     },

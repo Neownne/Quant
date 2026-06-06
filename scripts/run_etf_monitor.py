@@ -133,6 +133,19 @@ def main():
 
     logger.info(f"ETF 三因子分析: {target_date}")
 
+    # ── 自动同步 ETF 日线 ──
+    try:
+        latest_etf = pd.read_sql(text("SELECT MAX(trade_date) FROM etf_daily"), engine).iloc[0, 0]
+        if latest_etf is None or str(latest_etf) < target_date:
+            logger.info(f"ETF 日线过期 ({latest_etf}), 同步中...")
+            from data.sync import sync_etf_daily
+            sync_etf_daily(engine, start_date=str(latest_etf or '20240101'), workers=4)
+            logger.info("ETF 日线同步完成")
+        else:
+            logger.info(f"ETF 日线已最新 ({latest_etf})")
+    except Exception as e:
+        logger.warning(f"ETF 日线同步跳过: {e}")
+
     # 获取 K 线数据
     kline_map = {}
     for code in ETFS:
