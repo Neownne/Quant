@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-06-06 (v2.0 大小票平滑分配)  
+> 最后更新：2026-06-08 (v3.0 涨停策略优化)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)（私有仓库）
 
 ---
@@ -80,11 +80,13 @@
 - 涨停侧：5 条件规则筛选（市值 50-300 亿、MA5>MA10、近月涨停>1 次、无跌停），日频调仓
 - 小票侧：11 因子 ML 模型，周度调仓
 
-**涨停策略**（独立）：
-- 候选池：成交额 Top-1000，5 条件筛选（5 选 4 即通过）
+**涨停策略 E3**（优化版，当前主力）：
+- 候选池：成交额 Top-1000，5 条件全满足方可通过
 - 条件：市值 50-300 亿 / 股价 5-50 元 / MA5>MA10 / 近 20 日涨停>1 次 / 近 10 日无跌停
-- 按涨停次数降序取 Top-20，等权分配，日频调仓
+- 按涨停次数降序取 **Top-5**，等权分配，日频调仓
+- **8% 硬止损**：单只跌破成本 8% 无条件卖出
 - **市值条件是生死线**：不加则亏光（小微盘涨停多是出货陷阱）
+- Sharpe 3.75, 年化 205.8%, MaxDD -35.0%（2020-2026）
 
 **大小票平滑分配 v1.0**（被 v4.0 取代）：
 - CSI1000 偏离 MA60 程度 → 小票/大票比例平滑调整（10%~90%）
@@ -186,19 +188,20 @@ quant/
 排雷: ST/退市/商誉暴雷/庄股/次新
 ```
 
-### 涨停策略（独立规则筛选）
+### 涨停策略 E3（优化版）
 
 ```
 候选池: 成交额 Top-1000 (中盘偏大)
 ↓
-5条件筛选 (5选4即通过):
+5条件全满足:
   ① 市值 50-300亿 ─── 中盘股区间
   ② 股价 5-50元 ───── 过滤仙股/高价股
   ③ MA5 > MA10 ───── 短线多头
   ④ 近20日涨停 >1次 ─ 动量确认 (日收益≥10%)
   ⑤ 近10日无跌停 ──── 排雷
 ↓
-按涨停次数降序 → Top-20 等权 → 日频调仓
+按涨停次数降序 → Top-5 等权 → 日频调仓
+个股-8%硬止损(跌破成本立即卖出)
 ```
 
 ### 大小票 v4.0（涨停+ML 混合切换）
@@ -234,14 +237,22 @@ CSI1000 vs MA60 偏离度 → 动态权重分配:
 
 ---
 
-## 启动
+## 快速启动
 
 ```bash
-cd /Users/chenwan/Documents/quant
-source .venv/bin/activate
+cd /Users/chenwan/Documents/quant && source .venv/bin/activate
+
+# 数据库
+pg_ctl -D /opt/homebrew/var/postgresql@18 start
 
 # Web 界面
-uvicorn web.main:app --host 0.0.0.0 --port 8899
+python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
+# → http://localhost:8899/backtest  回测对比
+# → http://localhost:8899/paper     模拟盘
+
+# 涨停策略
+python scripts/scan_limit_up_strategy.py               # 每日筛选
+python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy --top-n 5 --min-conditions 5 --exit-stop 0.08  # E3优化版
 
 # 大票回测
 python scripts/run_ml_backtest.py --strategy 舞
@@ -249,13 +260,61 @@ python scripts/run_ml_backtest.py --strategy 舞
 # 小票回测
 python -m small_cap.backtest
 
+# 大小票切换
+python small_cap/switch_backtest_v2.py --quick
+
 # 每日模拟盘
-python scripts/run_daily_paper.py
+python scripts/run_daily_paper_lu.py                    # 涨停Top-5
+python scripts/run_daily_paper_switch.py                # 大小票v4.0
+
+# ETF 数据同步
+python -c "from data.db import get_engine; from data.sync import sync_etf_daily; sync_etf_daily(get_engine(), start_date='20050101', workers=8)"
 ```
 
 ---
 
+---
+
+## 涨停策略 E3 优化
+
+对涨停策略进行了 16 个方向的批量回测优化（2020-2026）：
+
+| 方向 | 年化 | Sharpe | MaxDD | vs Baseline |
+|------|:---:|:---:|:---:|:---:|
+| Baseline（Top-5, 5/5） | +196.7% | 3.65 | -33.0% | — |
+| **E3-8%硬止损** | **+205.8%** | **3.75** | **-35.0%** | **唯一胜出** |
+| S3-连板加分 | +188.6% | 3.47 | -31.1% | 回撤稍降 |
+| P4-候选<10空仓 | +157.4% | 2.96 | -29.3% | 回撤最低但收益受损 |
+| S1-时间衰减 | +133.2% | 2.40 | -46.9% | 反而更差 |
+| E1-跌破MA5 | +109.2% | 1.71 | -55.1% | 更差 |
+
+**关键发现**：8% 硬止损不仅没砍收益，反而因及时止损释放资金去追更强票，Sharpe 从 3.65 提升到 3.75。时间衰减是坏主意——老涨停信号是趋势确认，不能丢弃。所有组合拳叠加后反而互相打架。
+
+---
+
 ## 变更记录
+
+### v3.0 — 涨停策略全面优化 (2026-06-07 ~ 2026-06-08)
+
+**涨停策略**：
+- 独立回测 + 每日筛选脚本（5 条件规则，`scan_limit_up_strategy.py` / `backtest_limit_up_strategy.py`）
+- 修复隔夜缺口偏差：次日收益从 close→close 改为 open→close，消除 1.47% 虚假收益
+- 16 方向批量优化实验，E3（8%硬止损）胜出：Sharpe 3.75, 年化 205.8%
+- 涨停 Top-5 + 大小票 v4.0 模拟盘脚本就绪
+
+**Web 界面**：
+- 回测页重构：4 策略概览卡片 + 精简记录列表
+- 模拟盘页改为双策略并排（涨停 Top-5 + 大小票 v4.0）
+- 详情面板按策略类型自适应（ML/规则/切换）
+
+**数据**：
+- ETF 日线全量同步（1539 只，138 万行，最远到 2005 年）
+- 市值数据 API 可每日增量同步
+
+**大小票 v4.0**：
+- 大盘侧从 mom_20 反转变为涨停策略（`switch_backtest_v2.py`）
+- 动态分配逻辑修正：强势→涨停加码（上限 70%），弱势→小票防御
+- Sharpe 1.39（2020-2026）
 
 ### v2.0 — 小市值 alpha + 大小票平滑分配 (2026-06-04 ~ 2026-06-06)
 
