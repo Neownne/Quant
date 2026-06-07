@@ -15,13 +15,34 @@
 
 ```bash
 # 每日模拟盘
-python scripts/run_daily_paper.py                    # 数据同步 + v1.8 策略执行
-python scripts/run_daily_paper.py --no-sync           # 跳过同步
-python scripts/run_daily_paper.py --strategies v1.5   # 只跑指定版本
+python scripts/run_daily_paper_lu.py                  # 涨停Top-5 模拟盘
+python scripts/run_daily_paper_lu.py --no-sync         # 跳过同步
+python scripts/run_daily_paper_lu.py --dry-run          # 只看不执行
+python scripts/run_daily_paper_switch.py                # 大小票v4.0 模拟盘
 
 # 回测
 python scripts/run_ml_backtest.py --strategy 舞        # v1.8 (universe=1000)
 python scripts/run_ml_backtest.py --strategy 舞 --universe-size 500
+
+# 涨停策略
+python scripts/scan_limit_up_strategy.py               # 每日筛选（5条件规则）
+python scripts/backtest_limit_up_strategy.py            # 涨停策略独立回测
+python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy  # 长区间
+python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy --exit-stop 0.08  # E3优化版
+
+# 大小票切换
+python small_cap/switch_backtest.py                     # v1.0 原始（mom_20反转）
+python small_cap/switch_backtest_v2.py                  # v4.0 涨停替代大盘侧
+python small_cap/switch_backtest_v2.py --quick          # 快速测试（2023+）
+
+# 数据同步
+python -c "
+from data.db import get_engine
+from data.sync import sync_stock_daily, sync_daily_extra
+e = get_engine()
+sync_stock_daily(e, start_date='2026-06-04', workers=8)
+sync_daily_extra(e, start_date='2026-06-04', workers=8)
+"
 
 # Web
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
@@ -39,6 +60,7 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 ┌─ 数据层 ─────────────────────────────────────────────┐
 │  PostgreSQL (localhost:5432)                          │
 │  stock_daily (5524只, 2015~今)                        │
+│  stock_daily_extra (市值/PE/PB, API仅支持1年)          │
 │  stock_minute (1472只, 2024-03~今)                    │
 │  index_constituent (CSI300成分股)                      │
 │  paper_* (模拟盘: account/signals/positions/daily_pnl) │
@@ -61,12 +83,22 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 ┌─ 组合层 ─────────────────────────────────────────────┐
 │  select_topk_ndrop(K=15,N=2) → 等权分配                │
 │  风控: 个股-8% / 组合-20%减仓 / -25%清仓               │
+├──────────────────────────────────────────────────────┤
+│  规则筛选层（涨停策略）                                  │
+│  5条件筛选(5选4): 市值50-300亿/股价5-50元              │
+│  MA5>MA10/近月涨停>1次/近10日无跌停                     │
+│  日频调仓 | Top-20等权                                  │
 └──────────────────────────────────────────────────────┘
           │
           ▼
 ┌─ 模拟盘层 ──────────────────────────────────────────┐
 │  PaperEngine: 信号→T+1执行→DB写入                     │
 │  每日流程: 同步数据→训练→预测→执行信号→保存新信号     │
+├──────────────────────────────────────────────────────┤
+│  大小票平滑分配 (switch_backtest_v2.py)                │
+│  CSI1000 vs MA60 → 动态分配小票/涨停权重               │
+│  强势→涨停加码(上限70%) | 弱势→小票防御                │
+│  回撤>20%→涨停减半 | 小票周频+涨停日频                 │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -100,6 +132,49 @@ Day T+1:
 **v1.8**: account_id=15, run_id=2 (universe=1000)
 **v1.7**: account_id=15, run_id=1 (universe=500, 旧)
 **小市值**: account_id=16, run_id=3
+**涨停策略**: 独立脚本，未接入模拟盘
+
+## 策略全景
+
+| 策略 | 类型 | 候选池 | 选股方式 | 持仓 | 调频 | Sharpe(2020-26) |
+|------|------|--------|----------|------|------|:---:|
+| 舞 v1.85 | ML大票 | Top-1000 | 83因子ML | 5-15只 | 自适应 | 0.72 |
+| 小市值 alpha v2.0 | ML小票 | 1000-3000 | 11因子ML | 15只 | 周度 | 0.93 |
+| 涨停策略 Baseline | 规则中票 | Top-1000 | 5条件筛选 | 5只 | 日频 | 3.65 |
+| **涨停策略 E3** | **规则中票** | **Top-1000** | **5条件+8%止损** | **5只** | **日频** | **3.75** |
+| 大小票 v1.0 | 切换 | 双池 | mom_20反转+ML | 动态 | 周度 | 1.16 |
+| 大小票 v4.0 | 切换 | 双池 | 涨停+ML | 动态 | 混合 | 1.39 |
+
+## 涨停策略详解
+
+### 5条件筛选（5选4即可通过）
+
+| # | 条件 | 参数 | 说明 |
+|---|------|------|------|
+| 1 | 市值 | 50–300 亿 | 中盘股，避开微盘庄股和千亿大象 |
+| 2 | 股价 | 5–50 元 | 过滤仙股和高价股 |
+| 3 | 均线 | MA5 > MA10 | 短线多头排列 |
+| 4 | 涨停次数 | 近20日 >1 次 | 日收益 ≥10%，捕获动量 |
+| 5 | 跌停检查 | 近10日无跌停 | 排雷，日收益 ≤ -10% |
+
+### 关键发现
+
+- **市值条件是生死线**：不加市值过滤，2020-2024 亏 89.8%
+- **必须日频调仓**：3日频/周频都大幅跑输。动量窗口仅3-5个交易日
+- **5/5严格 >> 4/5宽松**：严格模式 Sharpe 2.03 vs 宽松 0.53
+- **市值数据仅 1 年**（stock_daily_extra 从 2025-05 起），长区间需用 `--mcap-proxy`（隐含股本=最新市值/当日股价）
+
+### 大小票 v4.0 分配逻辑
+
+```
+CSI1000 vs MA60 偏离度 → 动态权重：
+  强势（CSI1000 > MA60）→ 涨停权重 30%-70%（追动量）
+  弱势（CSI1000 < MA60）→ 小票权重 30%-90%（防御反转）
+  回撤 > 20%           → 涨停权重减半 + 总仓位 ≤70%
+
+小票侧：11因子ML | 周频 | 1000-3000名
+涨停侧：5条件规则 | 日频 | Top-1000
+```
 
 ## Web 模拟盘页面结构
 
@@ -160,6 +235,8 @@ PAPER_STRATEGIES = [
 | 纸面资产腰斩 | paper_daily_pnl 的日收益算错 | 用累计盈亏法重建 |
 | 数据同步太慢 | 全量 5524 只 | 8 并发，每天只差 1 天，2-3 分钟 |
 | 两个策略持仓一样 | 用了同一个模型 | 确保 factor_mode 不同 |
+| 市值数据不足1年 | AKShare Baidu API 限制 | 长区间回测用 `--mcap-proxy`（隐含股本估算） |
+| 涨停侧没信号 | 市场弱势涨停股少 | 放宽 `--min-conditions 3` 或等市场回暖 |
 
 ## 回测统一参数
 

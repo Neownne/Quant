@@ -1,32 +1,35 @@
 {% extends "base.html" %}
 {% block title %}回测对比 - Quant Monitor{% endblock %}
 {% block content %}
-<div class="card">
-    <h3>回测对比</h3>
-    <p style="color:#888;font-size:13px;margin-bottom:12px;">
-        所有策略按统一流程回测：因子计算 → IC筛选 → 正交筛选 → Walk-Forward训练 → 防过拟合检查 → 入库。
-        质量评级 <span class="badge badge-valid">valid</span> 表示通过所有检查。
-    </p>
-    <div style="display:flex; gap:12px; margin-bottom:16px;">
-        <input placeholder="策略名称筛选" name="strategy"
-               hx-get="/api/backtest-list" hx-trigger="keyup changed delay:500ms"
-               hx-target="#bt-table" hx-swap="innerHTML">
-        <select name="quality"
-                hx-get="/api/backtest-list" hx-trigger="change"
-                hx-target="#bt-table" hx-swap="innerHTML">
-            <option value="">全部质量</option>
-            <option value="valid">有效</option>
-            <option value="suspect">可疑</option>
-            <option value="invalid">无效</option>
-        </select>
-    </div>
 
-    <div id="bt-table" hx-get="/api/backtest-list" hx-trigger="load">
-        <p style="color:#999;">加载中...</p>
-    </div>
+<!-- 策略概览卡片 -->
+<div id="strategy-cards" hx-get="/api/strategy-summary" hx-trigger="load">
+    <p style="color:#999;">加载中...</p>
 </div>
 
+<!-- 回测详情面板 -->
 <div id="detail-panel" style="display:none;">
-    <!-- HTMX loads backtest detail here -->
+</div>
+
+<!-- 历史记录列表 -->
+<div class="card" style="margin-top:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0;">回测记录</h3>
+        <div style="display:flex;gap:8px;">
+            <select name="strategy"
+                    hx-get="/api/backtest-list" hx-trigger="change"
+                    hx-target="#bt-table" hx-swap="innerHTML">
+                <option value="">全部策略</option>
+                <option value="舞">舞 (ML大票)</option>
+                <option value="小市值alpha">小市值alpha (ML小票)</option>
+                <option value="涨停策略">涨停策略 (规则筛选)</option>
+                <option value="大小票平滑分配">大小票平滑分配</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="bt-table" hx-get="/api/backtest-list?quality=valid" hx-trigger="load">
+        <p style="color:#999;">加载中...</p>
+    </div>
 </div>
 {% endblock %}

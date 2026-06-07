@@ -33,6 +33,148 @@ async def ping():
     return {"status": "ok"}
 
 
+@router.get("/strategy-summary")
+async def get_strategy_summary():
+    """返回四种核心策略的最新回测概览卡片 HTML。"""
+    engine = get_engine()
+    # 四种策略卡片（涨停策略展示E3优化版）
+    targets = [
+        ("舞", "v1.85 (adaptive N)"),
+        ("小市值alpha", "v2.0"),
+        ("涨停策略", "v5of5_top5_stop8"),       # E3: +8%止损优化
+        ("大小票平滑分配", "v4.0"),
+    ]
+    cards = []
+    try:
+        with engine.connect() as conn:
+            for name, ver in targets:
+                if ver:
+                    row = conn.execute(text("""
+                        SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
+                               br.metrics_json, br.quality
+                        FROM backtest_results br
+                        JOIN strategy_versions sv ON br.version_id = sv.id
+                        JOIN strategy_configs sc ON sv.strategy_id = sc.id
+                        WHERE sc.name = :name AND sv.version = :ver
+                        ORDER BY
+                            CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
+                            br.start_date DESC,
+                            br.created_at DESC
+                        LIMIT 1
+                    """), {"name": name, "ver": ver}).fetchone()
+                else:
+                    row = conn.execute(text("""
+                        SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
+                               br.metrics_json, br.quality
+                        FROM backtest_results br
+                        JOIN strategy_versions sv ON br.version_id = sv.id
+                        JOIN strategy_configs sc ON sv.strategy_id = sc.id
+                        WHERE sc.name = :name
+                        ORDER BY
+                            CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
+                            br.start_date DESC,
+                            br.created_at DESC
+                        LIMIT 1
+                    """), {"name": name}).fetchone()
+
+                if not row:
+                    cards.append({
+                        "name": name, "version": ver or "—",
+                        "status": "no_data",
+                    })
+                    continue
+
+                bt_id, sname, sver, sstart, send, metrics_raw, quality = row
+                m = json.loads(str(metrics_raw)) if isinstance(metrics_raw, str) else (metrics_raw or {})
+
+                cards.append({
+                    "id": bt_id, "name": sname, "version": sver,
+                    "start": str(sstart or ""), "end": str(send or ""),
+                    "annual_return": m.get("annual_return", 0) or 0,
+                    "sharpe": m.get("sharpe", 0) or 0,
+                    "max_drawdown": m.get("max_drawdown", 0) or 0,
+                    "win_rate": m.get("win_rate", 0) or 0,
+                    "n_days": m.get("n_days", 0),
+                    "quality": quality or "valid",
+                    "status": "ok",
+                })
+    except Exception:
+        pass
+
+    # 构建卡片 HTML
+    card_html = ""
+    type_labels = {
+        "舞": "ML大票", "小市值alpha": "ML小票",
+        "涨停策略": "规则筛选", "大小票平滑分配": "大小切换",
+    }
+    colors = {
+        "舞": ("#1565c0", "#e3f2fd"),
+        "小市值alpha": ("#2e7d32", "#e8f5e9"),
+        "涨停策略": ("#e65100", "#fff3e0"),
+        "大小票平滑分配": ("#6a1b9a", "#f3e5f5"),
+    }
+
+    for c in cards:
+        name = c["name"]
+        accent, bg = colors.get(name, ("#666", "#f5f5f5"))
+        label = type_labels.get(name, "")
+
+        if c["status"] == "no_data":
+            card_html += f"""
+            <div style="flex:1;min-width:220px;padding:16px;border-radius:8px;
+                        background:{bg};border-left:4px solid {accent};">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <strong style="font-size:15px;">{name}</strong>
+                    <span style="font-size:11px;color:#999;">{label}</span>
+                </div>
+                <p style="color:#999;font-size:13px;margin:16px 0;">暂无回测数据</p>
+                <p style="font-size:11px;color:#aaa;">运行对应回测脚本生成</p>
+            </div>"""
+        else:
+            ar = c["annual_return"]
+            mdd = c["max_drawdown"]
+            sh = c["sharpe"]
+            ret_color = "#c62828" if ar > 0 else "#2e7d32"
+            card_html += f"""
+            <div style="flex:1;min-width:220px;padding:16px;border-radius:8px;
+                        background:{bg};border-left:4px solid {accent};
+                        cursor:pointer;transition:transform 0.15s;"
+                 onmouseover="this.style.transform='translateY(-2px)'"
+                 onmouseout="this.style.transform=''"
+                 hx-get="/api/backtest-detail/{c['id']}"
+                 hx-target="#detail-panel" hx-swap="innerHTML"
+                 onclick="document.getElementById('detail-panel').style.display='block';">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <strong style="font-size:15px;">{name}</strong>
+                    <span style="font-size:11px;color:#999;">{label} · {c['version']}</span>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;">
+                    <div>
+                        <div style="font-size:10px;color:#999;">年化收益</div>
+                        <div style="font-size:20px;font-weight:700;color:{ret_color};">{ar*100:+.1f}%</div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px;color:#999;">Sharpe</div>
+                        <div style="font-size:20px;font-weight:700;color:#333;">{sh:.2f}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px;color:#999;">最大回撤</div>
+                        <div style="font-size:14px;font-weight:600;color:#c62828;">{mdd*100:.1f}%</div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px;color:#999;">区间</div>
+                        <div style="font-size:12px;color:#666;">{c['start'][:7]}~{c['end'][:7]}</div>
+                    </div>
+                </div>
+            </div>"""
+
+    return HTMLResponse(f"""
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
+        {card_html}
+    </div>
+    """)
+
+
 @router.get("/quotes/{group}")
 async def get_quotes(group: str = "default"):
     watchlist = _load_watchlist()
@@ -159,8 +301,9 @@ async def get_kline(code: str):
 
 
 @router.get("/backtest-list")
-async def list_backtests(strategy: str = "", quality: str = ""):
-    """Return HTML table of backtest results with key metrics."""
+async def list_backtests(strategy: str = "", quality: str = "valid"):
+    """Return HTML table of backtest results with key metrics.
+    默认只显示 quality=valid 的记录，可通过 quality=all 显示全部。"""
     engine = get_engine()
     try:
         with engine.connect() as conn:
@@ -169,7 +312,7 @@ async def list_backtests(strategy: str = "", quality: str = ""):
             if strategy:
                 where.append("sc.name = :strategy")
                 params["strategy"] = strategy
-            if quality:
+            if quality and quality != "all":
                 where.append("br.quality = :quality")
                 params["quality"] = quality
             rows = conn.execute(text(f"""
@@ -179,20 +322,19 @@ async def list_backtests(strategy: str = "", quality: str = ""):
                 JOIN strategy_versions sv ON br.version_id = sv.id
                 JOIN strategy_configs sc ON sv.strategy_id = sc.id
                 WHERE {' AND '.join(where)}
-                ORDER BY br.created_at DESC LIMIT 50
+                ORDER BY br.created_at DESC LIMIT 30
             """), params).fetchall()
     except Exception:
         rows = []
 
     if not rows:
         return HTMLResponse("""<div style="padding:40px;text-align:center;color:#999;">
-            <p>暂无回测数据</p><p style="font-size:12px;">运行 scripts/run_ml_backtest.py 生成回测结果</p>
+            <p>暂无回测数据</p><p style="font-size:12px;">运行对应回测脚本生成结果</p>
         </div>""")
 
     rows_html = ""
     for r in rows:
         name, version, start, end, quality, flags, bt_id, metrics_raw = r
-        # Parse metrics for key display values
         metrics = {}
         if metrics_raw:
             try:
@@ -202,19 +344,22 @@ async def list_backtests(strategy: str = "", quality: str = ""):
         ann_ret = metrics.get("annual_return", 0) or 0
         mdd = metrics.get("max_drawdown", 0) or 0
         sharpe = metrics.get("sharpe", 0) or 0
-        badge_class = f"badge-{quality}"
         ret_color = "#c62828" if ann_ret > 0 else "#2e7d32"
         rows_html += f"""<tr>
-            <td>{name}</td><td>{version}</td><td>{start} ~ {end}</td>
+            <td><strong>{name}</strong></td><td>{version}</td>
+            <td style="font-size:12px;">{str(start)[:7]}~{str(end)[:7]}</td>
             <td style="color:{ret_color};font-weight:600;">{ann_ret*100:+.1f}%</td>
             <td style="color:#c62828;">{mdd*100:.1f}%</td>
             <td>{sharpe:.2f}</td>
-            <td><span class="badge {badge_class}">{quality}</span></td>
-            <td><button class="mock-button" hx-get="/api/backtest-detail/{bt_id}" hx-target="#detail-panel" hx-swap="innerHTML" onclick="document.getElementById('detail-panel').style.display='block';">查看详情</button></td>
+            <td><button class="mock-button"
+                  hx-get="/api/backtest-detail/{bt_id}"
+                  hx-target="#detail-panel" hx-swap="innerHTML"
+                  onclick="document.getElementById('detail-panel').style.display='block';">
+                  查看</button></td>
         </tr>"""
 
     html = f"""<table>
-    <thead><tr><th>策略</th><th>版本</th><th>区间</th><th>年化收益</th><th>最大回撤</th><th>Sharpe</th><th>质量</th><th>操作</th></tr></thead>
+    <thead><tr><th>策略</th><th>版本</th><th>区间</th><th>年化</th><th>回撤</th><th>Sharpe</th><th>操作</th></tr></thead>
     <tbody>{rows_html}</tbody></table>"""
     return HTMLResponse(html)
 
@@ -266,6 +411,20 @@ async def get_equity_curve(backtest_id: int):
             f"<span style='display:inline-block;background:#fff3e0;color:#e65100;padding:2px 8px;border-radius:4px;font-size:11px;margin:2px 4px;'>{f}</span>"
             for f in flags) + "</div>"
 
+    # Strategy-specific params
+    extra_metrics = []
+    if strategy_type in ("rule_filter", "static"):
+        for k, label in [("min_conditions", "最少条件数"), ("top_n", "持仓数"),
+                          ("rebalance", "调仓频率"), ("mcap_proxy", "市值代理")]:
+            v = metrics.get(k, "-")
+            if isinstance(v, bool): v = "是" if v else "否"
+            extra_metrics.append((label, v))
+    elif strategy_type in ("dual_switch", "dual_switch_lu"):
+        for k, label in [("lu_weight_cap", "涨停权重上限"), ("dd_control", "回撤控制阈值")]:
+            v = metrics.get(k, "-")
+            if isinstance(v, float): v = f"{v*100:.0f}%"
+            extra_metrics.append((label, v))
+
     # Format key metrics
     metrics_rows = []
     key_metrics = [
@@ -285,6 +444,10 @@ async def get_equity_curve(backtest_id: int):
                 v = f"{v:.4f}"
             elif fmt == "d":
                 v = int(v)
+        metrics_rows.append(f"<tr><td style='color:#888;'>{label}</td><td>{v}</td></tr>")
+
+    # Strategy-specific extra metrics
+    for label, v in extra_metrics:
         metrics_rows.append(f"<tr><td style='color:#888;'>{label}</td><td>{v}</td></tr>")
 
     return HTMLResponse(f"""
@@ -551,7 +714,7 @@ async def get_backtest_detail(backtest_id: int):
     initial_factors = metrics.get("initial_factors", [])
     strategy_params = metrics.get("strategy_params", {})
 
-    if strategy_type == "ml" and factor_cols:
+    if strategy_type in ("ml", "small_cap") and factor_cols:
         factor_html = "<h4 style='margin:16px 0 8px;'>因子构成</h4>"
         if initial_factors:
             factor_html += f"<p style='font-size:12px;color:#999;margin-bottom:4px;'>初始因子池: {len(initial_factors)} 个 → IC筛选+正交后: {len(factor_cols)} 个</p>"
@@ -561,7 +724,7 @@ async def get_backtest_detail(backtest_id: int):
         factor_html += "</div>"
         if active_cols and len(active_cols) != len(factor_cols):
             factor_html += "<p style='font-size:12px;color:#999;margin-top:4px;'>最终活跃因子: " + ", ".join(active_cols) + "</p>"
-    elif strategy_type == "static" and strategy_params:
+    elif strategy_type in ("static", "rule_filter") and strategy_params:
         factor_html = "<h4 style='margin:16px 0 8px;'>策略参数</h4>"
         factor_html += "<div style='display:flex;flex-wrap:wrap;gap:4px;'>"
         for k, v in strategy_params.items():
@@ -578,7 +741,7 @@ async def get_backtest_detail(backtest_id: int):
 
     # ── Signal quality section (ML strategies only) ──────────────────
     signal_html = ""
-    if signal_tracker and strategy_type == "ml":
+    if signal_tracker and strategy_type in ("ml", "small_cap"):
         signal_html = "<h4 style='margin:16px 0 8px;'>信号质量追踪</h4>"
         signal_html += "<p style='font-size:12px;color:#999;margin-bottom:4px;'>"
         signal_html += f"IC均值: {signal_tracker.get('rolling_ic_20d', 0):.4f} | "
@@ -621,7 +784,7 @@ async def get_backtest_detail(backtest_id: int):
 
     # ── Position history section ──────────────────────────────────────
     pos_html = ""
-    if position_history and strategy_type in ("ml", "small_cap", "dual_switch"):
+    if position_history and strategy_type in ("ml", "small_cap", "dual_switch", "dual_switch_lu"):
         # Build name lookup from stock_basic
         name_map = {}
         all_pos_codes = set()
@@ -638,23 +801,37 @@ async def get_backtest_detail(backtest_id: int):
 
         # 分配比例展示（双引擎策略）
         alloc_html = ""
-        if strategy_type == "dual_switch":
+        if strategy_type in ("dual_switch", "dual_switch_lu"):
             modes = [p.get("mode","") for p in position_history[-20:]]
             if modes:
+                # v4.0 uses "lu70% sc30%" format, v1.0 uses "sc70% lc30%"
                 sc_pcts = []
                 for m in modes:
-                    if "sc" in m:
-                        try: sc_pcts.append(int(m.replace("sc","").replace("%",""))/100)
-                        except: pass
-                avg_sc = sum(sc_pcts)/len(sc_pcts) if sc_pcts else 0.5
-                sc_w, lc_w = int(avg_sc*100), 100-int(avg_sc*100)
+                    try:
+                        if "sc" in m:
+                            # extract sc percentage
+                            parts = m.split()
+                            for p_part in parts:
+                                if p_part.startswith("sc"):
+                                    sc_pcts.append(int(p_part.replace("sc","").replace("%",""))/100)
+                    except Exception:
+                        pass
+                if not sc_pcts:
+                    # fallback: estimate from lu_n/sc_n in position data
+                    sc_ns = [p.get("sc_n", 0) for p in position_history[-20:]]
+                    lu_ns = [p.get("lu_n", 0) for p in position_history[-20:]]
+                    totals = [max(s + l, 1) for s, l in zip(sc_ns, lu_ns)]
+                    sc_pcts = [s / t for s, t in zip(sc_ns, totals)] if totals else [0.5]
+
+                avg_sc = sum(sc_pcts) / len(sc_pcts) if sc_pcts else 0.5
+                sc_w, lu_w = int(avg_sc*100), 100 - int(avg_sc*100)
                 alloc_html = f"""<div style='margin:12px 0 8px;padding:10px 14px;background:#f8f9fa;border-radius:6px;border-left:3px solid #1976d2;'>
                 <div style='display:flex;justify-content:space-between;margin-bottom:6px;'>
                 <span style='font-weight:600;font-size:13px;'>📊 近期分配比例</span>
                 <span style='font-size:11px;color:#888;'>近20日平均</span></div>
                 <div style='display:flex;height:22px;border-radius:4px;overflow:hidden;font-size:11px;font-weight:600;line-height:22px;text-align:center;color:#fff;'>
                 <div style='width:{sc_w}%;background:linear-gradient(135deg,#ff6f00,#ff8f00);'>小票 {sc_w}%</div>
-                <div style='width:{lc_w}%;background:linear-gradient(135deg,#1565c0,#1976d2);'>大票 {lc_w}%</div></div></div>"""
+                <div style='width:{lu_w}%;background:linear-gradient(135deg,#e65100,#ff9800);'>涨停 {lu_w}%</div></div></div>"""
 
         pos_html = alloc_html + "<h4 style='margin:16px 0 8px;'>近期持仓明细 (最近20个调仓日)</h4>"
         recent = position_history[-20:]
@@ -926,11 +1103,6 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 FROM paper_signals ps
                 LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
                 WHERE ps.run_id = :rid
-                AND NOT EXISTS (
-                    SELECT 1 FROM paper_positions pp
-                    WHERE pp.run_id = ps.run_id AND pp.stock_code = ps.stock_code
-                    AND pp.entry_date > ps.signal_date
-                )
                 ORDER BY ps.signal_date DESC, ps.rank
                 LIMIT 15
             """), {"rid": run_id}).fetchall()
