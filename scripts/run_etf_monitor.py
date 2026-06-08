@@ -17,7 +17,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from data.db import get_engine
-from etf_monitor.config import ETFS, SIGNAL_HIGH, SIGNAL_MID
+from etf_monitor.config import load_etfs, SIGNAL_HIGH, SIGNAL_MID
 from etf_monitor.engine import analyze_all
 from notify import send_report
 
@@ -148,7 +148,9 @@ def main():
 
     # 获取 K 线数据
     kline_map = {}
-    for code in ETFS:
+    etfs = load_etfs(engine)
+    logger.info(f"监控 {len(etfs)} 只 ETF")
+    for code in etfs:
         kl = fetch_kline(engine, code, 60)
         if not kl.empty:
             kline_map[code] = kl
@@ -158,7 +160,7 @@ def main():
     shares_map = {}
     try:
         import akshare as ak
-        for code, info in ETFS.items():
+        for code, info in etfs.items():
             d = float(info.get("shares_yi", 0))
             # 份额数据：缓存昨日值计算日变化率
             cache_file = f"output/etf_shares_{code}.txt"
@@ -178,7 +180,7 @@ def main():
     except Exception as e:
         logger.warning(f"份额数据获取失败: {e}")
 
-    results = analyze_all(kline_map, idx_kl, shares_map)
+    results = analyze_all(kline_map, idx_kl, shares_map, etfs)
 
     # 打印结果
     for r in results:

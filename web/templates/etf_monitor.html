@@ -2,8 +2,8 @@
 {% block title %}ETF监测{% endblock %}
 {% block content %}
 
-<h2>ETF 三因子监测 — 国家队资金信号</h2>
-<p style="color:#999;margin-bottom:8px;">信号日期: <strong>{{ rows[0].date if rows else '—' }}</strong> | 7只宽基ETF × 量能/方向/份额三维监测 | 点击代码查看K线</p>
+<h2>ETF 三因子监测</h2>
+<p style="color:#999;margin-bottom:8px;">信号日期: <strong>{{ rows[0].date if rows else '—' }}</strong> | {{ rows|length }}只ETF × 量能/方向/份额三维监测 | 点击代码查看K线</p>
 
 {% if rows %}
 <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">

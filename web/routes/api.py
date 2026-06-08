@@ -1235,7 +1235,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             tv = float(latest[1]); dr_val = float(latest[2] or 0)
             first_tv = float(daily_rows[0][1])
             total_ret = (tv - first_tv) / first_tv if first_tv > 0 else 0
-            max_dd = max((float(r[3] or 0) for r in daily_rows), default=0)
+            max_dd = min((float(r[3] or 0) for r in daily_rows), default=0)
 
             # 现金和持仓市值
             try:

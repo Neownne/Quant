@@ -150,11 +150,14 @@ def analyze_single(code: str, name: str, kline: pd.DataFrame,
 
 
 def analyze_all(kline_map: dict[str, pd.DataFrame], idx_kline: pd.DataFrame,
-                shares_map: dict[str, float]) -> list[dict]:
+                shares_map: dict[str, float], etfs: dict = None) -> list[dict]:
     """批量分析全部 ETF。"""
-    from etf_monitor.config import ETFS
+    if etfs is None:
+        from etf_monitor.config import load_etfs
+        from data.db import get_engine
+        etfs = load_etfs(get_engine())
     results = []
-    for code, info in ETFS.items():
+    for code, info in etfs.items():
         kl = kline_map.get(code)
         if kl is None or kl.empty:
             results.append({"code": code, "name": info["name"], "error": "无K线数据"})
