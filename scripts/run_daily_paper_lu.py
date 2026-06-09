@@ -368,55 +368,6 @@ def main():
     trade_date = pd.Timestamp(trade_date)
     logger.info(f"交易日: {trade_date.date()}")
 
-    # ── 2.5 市场趋势过滤：CSI1000 < MA60 → 清仓观望 ──
-    csi1k_row = pd.read_sql("""
-        SELECT close, AVG(close) OVER (ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW) as ma60
-        FROM index_daily WHERE code='000852' AND trade_date <= %s
-        ORDER BY trade_date DESC LIMIT 1
-    """, engine, params=(trade_date,))
-    if not csi1k_row.empty:
-        csi1k_price = float(csi1k_row.iloc[0]["close"])
-        csi1k_ma60 = float(csi1k_row.iloc[0]["ma60"])
-        trend_up = csi1k_price > csi1k_ma60
-        ma_dev = (csi1k_price / csi1k_ma60 - 1) * 100
-        logger.info(f"CSI1000={csi1k_price:.0f} MA60={csi1k_ma60:.0f} 偏离{ma_dev:+.1f}% {'↑强势' if trend_up else '↓弱势'}")
-    else:
-        trend_up = True  # 无数据时默认允许交易
-
-    if not trend_up and not args.dry_run:
-        # 弱势市场：清仓
-        positions = get_current_positions(engine)
-        cash, _ = get_account(engine)
-        if positions:
-            logger.warning(f"市场弱势，清仓 {len(positions)} 只持仓")
-            # 找最近交易日（跳过周末/假日）
-            next_row = pd.read_sql(
-                "SELECT MIN(trade_date) FROM stock_daily WHERE trade_date > %s",
-                engine, params=(trade_date,),
-            )
-            if next_row.empty or next_row.iloc[0, 0] is None or pd.isna(next_row.iloc[0, 0]):
-                logger.warning("无后续交易日，跳过清仓")
-                update_daily_pnl(engine, trade_date)
-                engine.dispose()
-                return
-            next_date = pd.Timestamp(next_row.iloc[0, 0])
-            with engine.begin() as conn:
-                for code, pos in positions.items():
-                    op = pd.read_sql("SELECT open FROM stock_daily WHERE code=%s AND trade_date=%s",
-                                     engine, params=(code, next_date))
-                    exit_px = float(op.iloc[0]["open"]) if not op.empty else pos["entry_price"]
-                    conn.execute(text("""
-                        UPDATE paper_positions SET exit_date=:ed, exit_price=:ep
-                        WHERE run_id=:rid AND stock_code=:code AND exit_date IS NULL
-                    """), {"ed": next_date, "ep": exit_px, "rid": RUN_ID, "code": code})
-                cash_after = cash + sum(exit_px * pos["quantity"] for code, pos in positions.items())
-                conn.execute(text("UPDATE paper_account SET cash=:c WHERE id=:aid"),
-                             {"c": cash_after, "aid": ACCOUNT_ID})
-            logger.info(f"已清仓，现金: {cash_after:,.0f}")
-        update_daily_pnl(engine, trade_date)
-        engine.dispose()
-        return
-
     # ── 3. 候选池 ──
     code_set = set(pd.read_sql(
         f"SELECT code FROM stock_basic WHERE is_st = FALSE AND list_date <= %s",
