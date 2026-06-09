@@ -14,43 +14,45 @@
 ## 快速参考
 
 ```bash
-# 每日模拟盘
-python scripts/run_daily_paper_lu.py                  # 涨停Top-5 模拟盘
-python scripts/run_daily_paper_lu.py --no-sync         # 跳过同步
-python scripts/run_daily_paper_lu.py --dry-run          # 只看不执行
-python scripts/run_daily_paper_switch.py                # 大小票v4.0 模拟盘
-
-# 回测
-python scripts/run_ml_backtest.py --strategy 舞        # v1.8 (universe=1000)
-python scripts/run_ml_backtest.py --strategy 舞 --universe-size 500
+# 每日模拟盘（自动化）
+python scripts/run_daily_paper_auto.py                  # 自动同步+跑涨停+大小票
+python scripts/run_daily_paper_auto.py --dry-run         # 试运行
+python scripts/run_daily_paper_auto.py --strategy lu     # 只跑涨停
+python scripts/run_daily_paper_auto.py --daemon          # 守护模式(每天20:00)
+python scripts/run_daily_paper_lu.py --no-sync           # 手动跑涨停
 
 # 涨停策略
-python scripts/scan_limit_up_strategy.py               # 每日筛选（5条件规则）
-python scripts/backtest_limit_up_strategy.py            # 涨停策略独立回测
-python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy  # 长区间
-python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy --exit-stop 0.08  # E3优化版
+python scripts/scan_limit_up_strategy.py               # 每日筛选
+python scripts/backtest_limit_up_strategy.py --start 2020-01-01 --mcap-proxy --top-n 5 --min-conditions 5 --exit-stop 0.08  # E3回测
 
 # 大小票切换
-python small_cap/switch_backtest.py                     # v1.0 原始（mom_20反转）
-python small_cap/switch_backtest_v2.py                  # v4.0 涨停替代大盘侧
-python small_cap/switch_backtest_v2.py --quick          # 快速测试（2023+）
+python small_cap/switch_backtest.py                     # v1.0 原始
+python small_cap/switch_backtest_v2.py                  # v4.0 涨停替代
+
+# 小票/大票ML回测
+python scripts/run_small_cap_backtest.py                 # 小市值alpha
+python scripts/run_ml_backtest.py --strategy 舞          # 舞 v1.85
+
+# ETF监控
+python scripts/run_etf_monitor.py                        # 三因子信号扫描
 
 # 数据同步
 python -c "
 from data.db import get_engine
 from data.sync import sync_stock_daily, sync_daily_extra
 e = get_engine()
-sync_stock_daily(e, start_date='2026-06-04', workers=8)
-sync_daily_extra(e, start_date='2026-06-04', workers=8)
+sync_stock_daily(e, start_date='2026-06-09', workers=8)
+sync_daily_extra(e, start_date='2026-06-09', workers=8)
 "
 
 # Web
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
-# → http://localhost:8899/paper   模拟盘
-# → http://localhost:8899/backtest 回测
+# → http://localhost:8899/paper     模拟盘
+# → http://localhost:8899/backtest   回测
+# → http://localhost:8899/etf        ETF监控
 
 # 数据库
-pg_ctl -D /opt/homebrew/var/postgresql@18 -l /opt/homebrew/var/log/postgresql.log start
+pg_ctl -D /opt/homebrew/var/postgresql@18 start
 pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 ```
 

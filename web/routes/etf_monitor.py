@@ -33,6 +33,16 @@ async def etf_monitor_page(request: Request):
         pass
     engine.dispose()
 
+    # 排序：宽基ETF置顶 → 信号由强到弱 → 综合概率降序
+    BROAD_BASE = ["沪深300", "上证50", "中证500", "中证1000", "创业板", "科创50", "上证指数", "深证"]
+    def sort_key(r):
+        name = r.get("name", "")
+        is_broad = any(kw in name for kw in BROAD_BASE)
+        sig_order = {"high": 0, "mid": 1, "normal": 2}.get(r.get("signal_level", ""), 3)
+        prob = -(r.get("composite_prob") or 0)
+        return (not is_broad, sig_order, prob)
+    results.sort(key=sort_key)
+
     high_count = sum(1 for r in results if r.get("signal_level") == "high")
     mid_count = sum(1 for r in results if r.get("signal_level") == "mid")
     normal_count = sum(1 for r in results if r.get("signal_level") == "normal")

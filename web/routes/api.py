@@ -41,7 +41,7 @@ async def get_strategy_summary():
     targets = [
         ("舞", "v1.85 (adaptive N)"),
         ("小市值alpha", "v2.0"),
-        ("涨停策略", "v5of5_top5_stop8"),       # E3: +8%止损优化
+        ("涨停策略", "lu5s"),                    # E3: +8%止损优化
         ("大小票平滑分配", "v4.0"),
     ]
     cards = []

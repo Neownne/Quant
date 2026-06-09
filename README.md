@@ -157,11 +157,14 @@ quant/
 │   └── templates/
 │
 ├── scripts/                  # 工具脚本
-│   ├── run_ml_backtest.py    # 大票 ML 回测
-│   ├── run_daily_paper.py    # 每日模拟盘
-│   ├── scan_limit_up_strategy.py      # 涨停策略每日筛选
-│   ├── backtest_limit_up_strategy.py  # 涨停策略独立回测
-│   └── ...
+│   ├── run_ml_backtest.py            # 舞 ML 回测
+│   ├── run_small_cap_backtest.py     # 小市值 alpha 回测
+│   ├── run_etf_monitor.py            # ETF 三因子监控
+│   ├── run_daily_paper_auto.py       # 自动模拟盘(多源+定时)
+│   ├── run_daily_paper_lu.py         # 涨停Top-5 模拟盘
+│   ├── run_daily_paper_switch.py     # 大小票v4.0 模拟盘
+│   ├── scan_limit_up_strategy.py     # 涨停策略每日筛选
+│   └── backtest_limit_up_strategy.py # 涨停策略独立回测
 │
 └── docs/                     # 文档 & 研究
 ```
@@ -293,6 +296,14 @@ python -c "from data.db import get_engine; from data.sync import sync_etf_daily;
 ---
 
 ## 变更记录
+
+### v3.1 — 模拟盘自动化 + 系统清理 (2026-06-09)
+
+- 自动模拟盘脚本（多源切换+定时+重试）
+- 模拟盘 5 个 bug 修复（现金负数/重复覆盖/首日估值/清仓假日/双策略）
+- 清理 8 个不再使用的回测脚本
+- ETF 监控扩展至 1445 只（按成交额排序发现）
+- 回测自动避开末位不完整数据
 
 ### v3.0 — 涨停策略全面优化 (2026-06-07 ~ 2026-06-08)
 

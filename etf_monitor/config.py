@@ -6,8 +6,10 @@ ETFS 从数据库动态加载（至少 60 天数据的 ETF），
 # 设为 None 则自动发现；设为 dict 则手动指定
 ETFS_OVERRIDE: dict | None = None
 
-# 最低数据天数（少于此值的 ETF 不监控）
+# 最低数据天数（总历史少于 60 天的不监控）
 MIN_DAYS = 60
+# 最大监控数量（按近20日均成交额降序取前N只）
+MAX_ETFS = 50
 # 最大监控数量（按数据天数降序取前N只，None=全部）
 MAX_ETFS = 50
 
@@ -29,13 +31,16 @@ def load_etfs(engine) -> dict[str, dict]:
     import pandas as pd
     limit_clause = f"LIMIT {MAX_ETFS}" if MAX_ETFS else ""
     df = pd.read_sql(f"""
-        SELECT d.code, b.name, b.market,
-               COUNT(*) as days, MAX(d.trade_date) as latest
-        FROM etf_daily d
-        JOIN etf_basic b ON d.code = b.code
-        GROUP BY d.code, b.name, b.market
-        HAVING COUNT(*) >= {MIN_DAYS}
-        ORDER BY days DESC
+        SELECT code, name, market FROM (
+            SELECT d.code, b.name, b.market,
+                   AVG(d.amount) FILTER (WHERE d.trade_date >= (SELECT MAX(trade_date) FROM etf_daily) - 20) as avg_amount
+            FROM etf_daily d
+            JOIN etf_basic b ON d.code = b.code
+            GROUP BY d.code, b.name, b.market
+            HAVING COUNT(*) >= {MIN_DAYS}
+        ) t
+        WHERE avg_amount > 0
+        ORDER BY avg_amount DESC
         {limit_clause}
     """, engine)
 
