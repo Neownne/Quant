@@ -1009,11 +1009,13 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
     for p in positions:
         code, ed, ep, xd, xp, qty, pnl, pct = p
         pnl_class = "up" if (pnl or 0) > 0 else "down"
+        pnl_str = f"{pnl:,.0f}" if pnl is not None else "—"
+        pct_str = f"{pct:+.2f}%" if pct is not None else "—"
         pos_html += f"""<tr>
             <td>{code}</td><td>{name_map.get(code, '?')}</td><td>{ed}</td><td>{ep:.2f}</td><td>{xd or '-'}</td><td>{xp or '-'}</td>
             <td>{qty}</td>
-            <td class="{pnl_class}">{pnl:,.0f}</td>
-            <td class="{pnl_class}">{pct:+.2f}%</td>
+            <td class="{pnl_class}">{pnl_str}</td>
+            <td class="{pnl_class}">{pct_str}</td>
         </tr>"""
     pos_html += "</tbody></table>"
 

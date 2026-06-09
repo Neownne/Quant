@@ -12,7 +12,7 @@
     python scripts/run_daily_paper_lu.py --date 2026-06-05  # 指定日期
     python scripts/run_daily_paper_lu.py --dry-run       # 试运行
 """
-import sys, os, argparse, json
+import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
@@ -191,12 +191,12 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
 
     # ── 买入 ──
     n_buy = len(to_buy)
+    per_stock_cash = 0
+    sig_map = {s[0]: s[2] for s in signals}  # code→close
     if n_buy > 0:
-        # 用当日收盘价（更接近T+1开盘）估算卖出释放的现金
         sell_est = 0
         for c in to_sell:
             pos = positions[c]
-            # 用筛选时的收盘价估算，比 entry_price 更接近实际
             cp_row = pd.read_sql("SELECT close FROM stock_daily WHERE code=%s AND trade_date=%s",
                                  engine, params=(c, trade_date))
             est_price = float(cp_row.iloc[0]["close"]) if not cp_row.empty else pos["entry_price"]
@@ -206,7 +206,7 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
 
     for code in to_buy:
         open_price = _get_next_open(engine, code, next_date)
-        buy_price = open_price if open_price else signals[[s[0] for s in signals].index(code)][2]
+        buy_price = open_price if open_price else sig_map.get(code, 0)
         # 按手取整（100股）
         qty = int(per_stock_cash / buy_price / 100) * 100 if n_buy > 0 else 0
         if qty <= 0:
@@ -267,15 +267,6 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
             """), {
                 "aid": ACCOUNT_ID, "code": o["code"], "dir": o["direction"],
                 "price": o["price"], "qty": o["quantity"],
-            })
-
-        # 写信号
-        for s in signals:
-            conn.execute(text("""
-                INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
-                VALUES (1, :sd, :code, :score, :rank)
-            """), {
-                "sd": trade_date, "code": s[0], "score": s[1], "rank": signals.index(s) + 1,
             })
 
     logger.info(f"  执行完成: 买{len(to_buy)}只 卖{len(to_sell)}只 持{len(to_hold)}只")
@@ -385,6 +376,11 @@ def main():
     signals = run_screening(trade_date, daily, extra, code_set)
     if not signals:
         logger.warning("无股票通过筛选，检查市场状态。")
+        # 仍记录当日估值
+        positions = get_current_positions(engine)
+        if not args.dry_run and positions:
+            update_daily_pnl(engine, trade_date)
+        engine.dispose()
         return
 
     logger.info(f"筛选结果: {len(signals)} 只")
@@ -396,13 +392,18 @@ def main():
     if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
-    # ── 7. 执行（T+1生效）──
+    # ── 7. 先写信号（无论能否执行）──
+    if not args.dry_run:
+        with engine.begin() as conn:
+            for s in signals:
+                conn.execute(text("""
+                    INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
+                    VALUES (:rid, :sd, :code, :score, :rank)
+                """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
+                       "score": s[1], "rank": signals.index(s) + 1})
+
+    # ── 8. 执行（T+1生效）──
     execute(engine, trade_date, signals, positions, dry_run=args.dry_run)
-    # 首日建仓后也记录：执行完立即用今日收盘价估值新持仓
-    if not args.dry_run and not positions:
-        new_positions = get_current_positions(engine)
-        if new_positions:
-            update_daily_pnl(engine, trade_date)
 
     engine.dispose()
 
