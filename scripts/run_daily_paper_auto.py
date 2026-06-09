@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 """自动化每日模拟盘 —— 多数据源 + 自动切换 + 重试 + 调仓。
 
+纯 cron 方案，无需守护进程。cron 到点触发，脚本内置重试逻辑。
+
 用法:
     python scripts/run_daily_paper_auto.py              # 立即执行一次
-    python scripts/run_daily_paper_auto.py --daemon     # 守护模式(每天20:00)
     python scripts/run_daily_paper_auto.py --dry-run    # 试运行
+    python scripts/run_daily_paper_auto.py --strategy lu  # 只跑涨停
 
-crontab 设置（每天 20:00）:
-    0 20 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py
+crontab 设置:
+    0 20 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py >> logs/paper.log 2>&1
 """
 import sys, os, time, argparse, traceback
 from datetime import datetime, date, timedelta
@@ -275,52 +277,22 @@ def show_status(engine):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--daemon", action="store_true", help="守护模式(每30分钟检查一次)")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--once", action="store_true", help="只跑一次")
     parser.add_argument("--strategy", type=str, default="all",
                         choices=["lu", "switch", "all"], help="策略选择")
     args = parser.parse_args()
 
     engine = get_engine()
 
-    if args.daemon:
-        logger.info("守护模式启动，每天 20:00 自动执行...")
-        while True:
-            now = datetime.now()
-            # 每天 20:00 触发，或此前数据不全时每 30 分钟重试
-            if now.hour == 20 and now.minute < 5:
-                success = sync_and_trade(engine, strategy=args.strategy, dry_run=False)
-                if success:
-                    logger.info("今日任务完成，等待明天...")
-                    time.sleep(3600)  # 成功后等1小时再检查
-                else:
-                    time.sleep(RETRY_INTERVAL)
-            elif now.hour >= 20:
-                # 20:00 后还没成功，每30分钟重试
-                success = sync_and_trade(engine, strategy=args.strategy, dry_run=False)
-                if success:
-                    time.sleep(3600)
-                else:
-                    time.sleep(RETRY_INTERVAL)
-            else:
-                # 还没到20:00，等
-                wait_sec = (20 - now.hour) * 3600 - now.minute * 60
-                if wait_sec > 0:
-                    logger.info(f"等待 {wait_sec//60} 分钟后首次执行 (20:00)...")
-                    time.sleep(min(wait_sec, 1800))  # 最多等30分钟
-    else:
-        # 单次执行
-        success = sync_and_trade(engine, strategy=args.strategy, dry_run=args.dry_run)
-        if not success and not args.dry_run:
-            logger.info(f"将安排重试，间隔 {RETRY_INTERVAL//60} 分钟")
-            # 单次模式也重试
-            for attempt in range(1, MAX_RETRIES + 1):
-                logger.info(f"重试 {attempt}/{MAX_RETRIES}，等待 {RETRY_INTERVAL//60} 分钟...")
-                time.sleep(RETRY_INTERVAL)
-                success = sync_and_trade(engine, strategy=args.strategy, dry_run=False)
-                if success:
-                    break
+    # 单次执行 + 内置重试
+    success = sync_and_trade(engine, strategy=args.strategy, dry_run=args.dry_run)
+    if not success and not args.dry_run:
+        for attempt in range(1, MAX_RETRIES + 1):
+            logger.info(f"重试 {attempt}/{MAX_RETRIES}，等待 {RETRY_INTERVAL//60} 分钟...")
+            time.sleep(RETRY_INTERVAL)
+            success = sync_and_trade(engine, strategy=args.strategy, dry_run=False)
+            if success:
+                break
 
     engine.dispose()
 

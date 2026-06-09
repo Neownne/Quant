@@ -18,8 +18,9 @@
 python scripts/run_daily_paper_auto.py                  # 自动同步+跑涨停+大小票
 python scripts/run_daily_paper_auto.py --dry-run         # 试运行
 python scripts/run_daily_paper_auto.py --strategy lu     # 只跑涨停
-python scripts/run_daily_paper_auto.py --daemon          # 守护模式(每天20:00)
-python scripts/run_daily_paper_lu.py --no-sync           # 手动跑涨停
+
+# cron 自动运行（每天 20:00）
+# 0 20 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py >> logs/paper.log 2>&1
 
 # 涨停策略
 python scripts/scan_limit_up_strategy.py               # 每日筛选
