@@ -72,6 +72,13 @@ def parse_args():
                    help="Top-1涨停次数少于此值→不交易")
     p.add_argument("--trend-filter", action="store_true",
                    help="CSI1000<MA60时清仓")
+    p.add_argument("--entry-close", action="store_true",
+                   help="T+1收盘买入(非开盘), 延迟1天入场")
+    p.add_argument("--rank-mode", type=str, default="top",
+                   choices=["top", "bottom", "median"],
+                   help="排名方式: top=涨停多优先, bottom=涨停少优先, median=接近中位数")
+    p.add_argument("--skip-top", type=int, default=0,
+                   help="跳过前N名, 如1=买2-6名")
     # S组-评分优化
     p.add_argument("--lu-decay", action="store_true", help="涨停次数时间衰减加权")
     p.add_argument("--lu-quality", action="store_true", help="涨停质量加权(收盘/最高价)")
@@ -109,9 +116,18 @@ def run_backtest(args):
     tc = TradingConfig()
 
     # ── 1. 确定回测区间 ──
-    end_date_str = args.end or pd.read_sql(
-        "SELECT MAX(trade_date) FROM stock_daily", engine
-    ).iloc[0, 0].strftime("%Y-%m-%d")
+    if args.end:
+        end_date_str = args.end
+    else:
+        last_two = pd.read_sql(
+            "SELECT trade_date, COUNT(*) as n FROM stock_daily "
+            "GROUP BY trade_date ORDER BY trade_date DESC LIMIT 2", engine)
+        if len(last_two) >= 2 and last_two.iloc[1]["n"] > last_two.iloc[0]["n"] * 0.8:
+            end_date_str = str(last_two.iloc[1]["trade_date"])[:10]
+            logger.info(f"最新日({str(last_two.iloc[0]['trade_date'])[:10]})数据可能不完整"
+                       f"({last_two.iloc[0]['n']}只 vs {last_two.iloc[1]['n']}只), 回退到 {end_date_str}")
+        else:
+            end_date_str = str(last_two.iloc[0]["trade_date"])[:10]
 
     # 往前多取一段以保证均线/涨跌停可算
     pre_start = pd.Timestamp(args.start) - timedelta(days=max(args.limit_up_lookback, args.limit_down_lookback) + 30)
@@ -360,7 +376,16 @@ def run_backtest(args):
 
         # ── 选股 ──
         if is_rebalance and not pause_active and not trend_skip:
-            passed.sort(key=lambda x: x[1], reverse=True)
+            if args.rank_mode == "top":
+                passed.sort(key=lambda x: x[1], reverse=True)
+            elif args.rank_mode == "bottom":
+                passed.sort(key=lambda x: x[1])  # 涨停少的排前面
+            elif args.rank_mode == "median":
+                lu_values = [x[1] for x in passed]
+                median_lu = np.median(lu_values)
+                passed.sort(key=lambda x: abs(x[1] - median_lu))
+            if args.skip_top > 0 and len(passed) > args.skip_top:
+                passed = passed[args.skip_top:]  # 跳过前N名
             n_select = min(reduce_n, args.top_n) if dd_reduce_active else args.top_n
             selected = passed[:n_select]
             selected_set = set(s[0] for s in selected)
@@ -424,7 +449,8 @@ def run_backtest(args):
                 selected_set = set()
 
         # ── 次日收益 ──
-        next_date_idx = all_dates.index(today) + 1
+        entry_delay = 2 if args.entry_close else 1
+        next_date_idx = all_dates.index(today) + entry_delay
         if next_date_idx >= len(all_dates):
             break
 
@@ -599,15 +625,14 @@ if __name__ == "__main__":
                     "市值50-300亿/股价5-50元/MA5>MA10/近月涨停>1次/近10日无跌停') RETURNING id"
                 )).fetchone()[0]
 
-                version_str = f"v{args.min_conditions}of5_top{args.top_n}"
-                if args.exit_stop > 0:
-                    version_str += "_stop8"
-                elif args.exit_trailing > 0:
-                    version_str += "_trail"
-                elif args.exit_ma5:
-                    version_str += "_ma5"
-                elif args.lu_decay:
-                    version_str += "_decay"
+                version_str = f"lu5"  # 涨停Top-5
+                if args.exit_stop > 0: version_str += "s"    # stop
+                if args.exit_trailing > 0: version_str += "t"
+                if args.exit_ma5: version_str += "m"
+                if args.lu_decay: version_str += "d"
+                if args.rank_mode != "top": version_str += args.rank_mode[0]  # b/m
+                if args.entry_close: version_str += "c"     # close-buy
+                if version_str == "lu5": version_str = "lu5"  # baseline
                 sv = conn.execute(text(
                     "SELECT id FROM strategy_versions WHERE strategy_id=:s AND version=:v"
                 ), {"s": sid, "v": version_str}).fetchone()

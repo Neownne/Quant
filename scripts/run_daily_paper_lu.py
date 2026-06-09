@@ -192,11 +192,16 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
     # ── 买入 ──
     n_buy = len(to_buy)
     if n_buy > 0:
-        # 等权分配：可用现金 / n_buy（含卖出释放的现金）
-        total_cash = cash + sum(
-            (positions[c]["entry_price"] if c in to_sell else 0) * positions[c]["quantity"]
-            for c in to_sell
-        )
+        # 用当日收盘价（更接近T+1开盘）估算卖出释放的现金
+        sell_est = 0
+        for c in to_sell:
+            pos = positions[c]
+            # 用筛选时的收盘价估算，比 entry_price 更接近实际
+            cp_row = pd.read_sql("SELECT close FROM stock_daily WHERE code=%s AND trade_date=%s",
+                                 engine, params=(c, trade_date))
+            est_price = float(cp_row.iloc[0]["close"]) if not cp_row.empty else pos["entry_price"]
+            sell_est += est_price * pos["quantity"]
+        total_cash = cash + sell_est
         per_stock_cash = total_cash / n_buy
 
     for code in to_buy:
@@ -322,8 +327,7 @@ def update_daily_pnl(engine, trade_date):
             INSERT INTO paper_daily_pnl (account_id, trade_date, cash, position_value,
                 total_value, daily_return, drawdown)
             VALUES (:aid, :td, :cash, :pv, :tv, :dr, :dd)
-            ON CONFLICT (account_id, trade_date) DO UPDATE SET
-                total_value = :tv, daily_return = :dr, drawdown = :dd
+            ON CONFLICT (account_id, trade_date) DO NOTHING
         """), {
             "aid": ACCOUNT_ID, "td": trade_date,
             "cash": cash, "pv": position_value,
@@ -382,9 +386,20 @@ def main():
     if not trend_up and not args.dry_run:
         # 弱势市场：清仓
         positions = get_current_positions(engine)
+        cash, _ = get_account(engine)
         if positions:
             logger.warning(f"市场弱势，清仓 {len(positions)} 只持仓")
-            next_date = trade_date + timedelta(days=1)
+            # 找最近交易日（跳过周末/假日）
+            next_row = pd.read_sql(
+                "SELECT MIN(trade_date) FROM stock_daily WHERE trade_date > %s",
+                engine, params=(trade_date,),
+            )
+            if next_row.empty or next_row.iloc[0, 0] is None or pd.isna(next_row.iloc[0, 0]):
+                logger.warning("无后续交易日，跳过清仓")
+                update_daily_pnl(engine, trade_date)
+                engine.dispose()
+                return
+            next_date = pd.Timestamp(next_row.iloc[0, 0])
             with engine.begin() as conn:
                 for code, pos in positions.items():
                     op = pd.read_sql("SELECT open FROM stock_daily WHERE code=%s AND trade_date=%s",
@@ -394,9 +409,10 @@ def main():
                         UPDATE paper_positions SET exit_date=:ed, exit_price=:ep
                         WHERE run_id=:rid AND stock_code=:code AND exit_date IS NULL
                     """), {"ed": next_date, "ep": exit_px, "rid": RUN_ID, "code": code})
-                conn.execute(text("UPDATE paper_account SET cash=initial_capital WHERE id=:aid"),
-                             {"aid": ACCOUNT_ID})
-            logger.info("已清仓，资金回归现金")
+                cash_after = cash + sum(exit_px * pos["quantity"] for code, pos in positions.items())
+                conn.execute(text("UPDATE paper_account SET cash=:c WHERE id=:aid"),
+                             {"c": cash_after, "aid": ACCOUNT_ID})
+            logger.info(f"已清仓，现金: {cash_after:,.0f}")
         update_daily_pnl(engine, trade_date)
         engine.dispose()
         return
@@ -424,16 +440,18 @@ def main():
     for s in signals:
         logger.info(f"  {s[0]} 涨停{s[1]}次 收盘{s[2]:.2f}")
 
-    # ── 6. 估值（有持仓时才记录，首日跳过）──
+    # ── 6. 估值（先记今日净值，再执行明日交易）──
     positions = get_current_positions(engine)
-    has_history = len(pd.read_sql(
-        "SELECT 1 FROM paper_daily_pnl WHERE account_id=%s LIMIT 1",
-        engine, params=(ACCOUNT_ID,))) > 0
-    if not args.dry_run and (positions or has_history):
+    if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
     # ── 7. 执行（T+1生效）──
     execute(engine, trade_date, signals, positions, dry_run=args.dry_run)
+    # 首日建仓后也记录：执行完立即用今日收盘价估值新持仓
+    if not args.dry_run and not positions:
+        new_positions = get_current_positions(engine)
+        if new_positions:
+            update_daily_pnl(engine, trade_date)
 
     engine.dispose()
 
