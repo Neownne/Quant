@@ -41,7 +41,7 @@ async def get_strategy_summary():
     targets = [
         ("舞", "v1.85 (adaptive N)"),
         ("小市值alpha", "v2.0"),
-        ("涨停策略", "lu5s"),                    # E3: +8%止损优化
+        ("涨停策略", "lu5sE4"),                    # E3: +8%止损优化
         ("大小票平滑分配", "v4.0"),
     ]
     cards = []
@@ -1105,8 +1105,9 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 FROM paper_signals ps
                 LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
                 WHERE ps.run_id = :rid
-                ORDER BY ps.signal_date DESC, ps.rank
-                LIMIT 15
+                  AND ps.signal_date = (SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid)
+                ORDER BY ps.rank
+                LIMIT 20
             """), {"rid": run_id}).fetchall()
         if pending:
             pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
@@ -1190,31 +1191,40 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         if pos_codes:
             stock_codes = [r[0] for r in pos_codes]
             qty_map = {r[0]: int(r[1]) for r in pos_codes}
-            # 查每只股票所属概念板块
-            with engine.connect() as conn:
-                code_str = ",".join([f"'{c}'" for c in stock_codes])
-                board_rows = conn.execute(text(
-                    f"SELECT cs.stock_code, cb.name FROM concept_stock cs "
-                    f"JOIN concept_board cb ON cs.board_code=cb.code "
-                    f"WHERE cs.stock_code IN ({code_str})"
-                )).fetchall()
+            code_str = ",".join([f"'{c}'" for c in stock_codes])
+            with engine.connect() as conn2:
+                board_rows = conn2.execute(text(
+                f"SELECT cs.stock_code, cb.name FROM concept_stock cs "
+                f"JOIN concept_board cb ON cs.board_code=cb.code "
+                f"WHERE cs.stock_code IN ({code_str})"
+            )).fetchall()
+            # 过滤噪声概念
+            NOISE_WORDS = ["沪股通","深股通","融资融券","机构重仓","标准普尔","富时罗素",
+                          "MSCI","证金","汇金","社保","QFII","破发","破增发","举牌",
+                          "预增","预减","预亏","解禁","转融通",
+                          "央国企","国资云","国企改革","沪企","自贸","特区",
+                          "振兴","经济带","大湾区","城市群","新区",
+                          "最近多板","百日新高","历史新高","近期新高"]
+            clean_rows = [(c, b) for c, b in board_rows
+                          if not any(w in b for w in NOISE_WORDS)]
+
             # 按板块聚合持仓数
             board_qty = Counter()
             seen = set()
-            for stock_code, board_name in board_rows:
+            for stock_code, board_name in clean_rows:
                 board_qty[board_name] += qty_map.get(stock_code, 0)
                 seen.add(stock_code)
-            # 未匹配的股票归入"其他"
+            # 未匹配的股票用stock_basic.industry兜底
             for code, qty in qty_map.items():
                 if code not in seen:
-                    board_qty["其他"] += qty
+                    ind = None
+                    with engine.connect() as c2:
+                        ind = c2.execute(text("SELECT industry FROM stock_basic WHERE code=:c"), {"c": code}).fetchone()
+                    fallback = ind[0] if ind and ind[0] else "其他"
+                    board_qty[fallback] += qty
             import json as _json
-            # 取 Top-10 板块，其余合并为"其他"
-            top = board_qty.most_common(10)
-            rest = sum(v for _, v in board_qty.most_common()[10:])
-            sec_data = [{"name": k, "value": v} for k, v in top]
-            if rest > 0:
-                sec_data.append({"name": "其他板块", "value": rest})
+            # 全部板块直接展示
+            sec_data = [{"name": k, "value": v} for k, v in board_qty.most_common(30)]
             sec_chart = _json.dumps({
                 "tooltip": {"trigger": "item", "formatter": "{b}: {c} 股 ({d}%)"},
                 "series": [{"type": "pie", "radius": ["30%", "70%"], "data": sec_data,

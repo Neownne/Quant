@@ -29,11 +29,10 @@ from config.settings import TradingConfig
 ACCOUNT_ID = 1
 RUN_ID = 1
 TOP_N = 5
-MCAP_MIN, MCAP_MAX = 50.0, 300.0
+MCAP_MIN, MCAP_MAX = 30.0, 500.0
 PRICE_MIN, PRICE_MAX = 5.0, 63.0
 LU_PCT, LU_LOOKBACK, LU_COUNT = 0.099, 20, 1
-LD_PCT, LD_LOOKBACK = -0.099, 10
-MIN_CONDITIONS = 5
+MIN_CONDITIONS = 4  # 4条件: 市值+股价+均线+涨停(去跌停)
 MIN_LISTED_DAYS = 120
 COMMISSION = TradingConfig.COMMISSION
 STAMP_DUTY = TradingConfig.STAMP_DUTY
@@ -89,11 +88,10 @@ def run_screening(today, daily, extra_df, code_set):
         return []
 
     td = daily_by_date[today]
-    lookback_start = today - timedelta(days=max(LU_LOOKBACK, LD_LOOKBACK) + 5)
+    lookback_start = today - timedelta(days=LU_LOOKBACK + 5)
     lb = daily[(daily["trade_date"] >= lookback_start) & (daily["trade_date"] <= today)]
 
     lu_counts = lb[lb["ret"] >= LU_PCT].groupby("code").size()
-    ld_codes = set(lb[lb["ret"] <= LD_PCT]["code"].unique())
 
     # 市值
     extra_by_date = {pd.Timestamp(d): g.set_index("code")
@@ -116,13 +114,12 @@ def run_screening(today, daily, extra_df, code_set):
         c2 = PRICE_MIN <= close_p <= PRICE_MAX
         c3 = (not pd.isna(ma5)) and (not pd.isna(ma10)) and (ma5 > ma10)
         c4 = int(lu_counts.get(code, 0)) > LU_COUNT
-        c5 = code not in ld_codes
 
-        if sum([c1, c2, c3, c4, c5]) >= MIN_CONDITIONS:
+        if sum([c1, c2, c3, c4]) >= 4:
             passed.append((code, int(lu_counts.get(code, 0)), float(close_p)))
 
     passed.sort(key=lambda x: x[1], reverse=True)
-    return passed[:TOP_N]
+    return passed  # 返回全部通过筛选的票（调仓只取TOP_N）
 
 
 def get_current_positions(engine):
@@ -379,7 +376,7 @@ def main():
     logger.info(f"候选池: {len(code_set)} 只")
 
     # ── 4. 加载数据 ──
-    pre_start = trade_date - timedelta(days=max(LU_LOOKBACK, LD_LOOKBACK) + 30)
+    pre_start = trade_date - timedelta(days=LU_LOOKBACK + 30)
     daily = load_daily_data(engine, code_set, pre_start, trade_date)
     extra = load_mcap_data(engine, code_set, pre_start, trade_date)
     logger.info(f"日线: {len(daily)} 行 | 市值: {len(extra)} 行")
@@ -404,19 +401,19 @@ def main():
     if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
-    # ── 7. 先写信号（幂等，不重复）──
+    # ── 7. 写信号（全部通过票，最多15条）──
     if not args.dry_run:
         with engine.begin() as conn:
-            for s in signals:
+            for i, s in enumerate(signals[:15]):
                 conn.execute(text("""
                     INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                     VALUES (:rid, :sd, :code, :score, :rank)
                     ON CONFLICT (run_id, signal_date, stock_code) DO NOTHING
                 """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
-                       "score": s[1], "rank": signals.index(s) + 1})
+                       "score": s[1], "rank": i + 1})
 
-    # ── 8. 执行（T+1生效）──
-    execute(engine, trade_date, signals, positions, dry_run=args.dry_run)
+    # ── 8. 执行（只交易Top-5）──
+    execute(engine, trade_date, signals[:TOP_N], positions, dry_run=args.dry_run)
 
     engine.dispose()
 

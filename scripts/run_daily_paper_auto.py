@@ -1,15 +1,19 @@
 #!/usr/bin/env python
-"""自动化每日模拟盘 —— 多数据源 + 自动切换 + 重试 + 调仓。
+"""每日自动化任务 —— 数据同步 + 双模拟盘 + ETF监控。
 
-纯 cron 方案，无需守护进程。cron 到点触发，脚本内置重试逻辑。
+纯 cron 方案，一行命令搞定所有：
+  ① 增量同步 stock_daily + index_daily
+  ② 涨停 Top-5 模拟盘调仓
+  ③ 大小票 v4.0 模拟盘调仓
+  ④ ETF 三因子信号更新
 
 用法:
-    python scripts/run_daily_paper_auto.py              # 立即执行一次
+    python scripts/run_daily_paper_auto.py              # 立即执行
     python scripts/run_daily_paper_auto.py --dry-run    # 试运行
     python scripts/run_daily_paper_auto.py --strategy lu  # 只跑涨停
 
-crontab 设置:
-    0 20 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py >> logs/paper.log 2>&1
+crontab (每30分钟, 17:00~次日8:30):
+    0,30 17-23,0-8 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py >> logs/cron.log 2>&1
 """
 import sys, os, time, argparse, traceback
 from datetime import datetime, date, timedelta
@@ -243,12 +247,16 @@ def sync_and_trade(engine, strategy='all', dry_run=False):
         return False
 
     # 3. 跑模拟盘
-    logger.info(f"[3/3] 运行模拟盘 (日期: {today_str})...")
+    logger.info(f"[3/3] 模拟盘 (日期: {today_str})...")
     run_paper_trading(today_str, strategy=strategy, dry_run=dry_run)
 
-    # 显示统计
-    show_status(engine)
+    # 4. ETF监控
+    logger.info("[4/4] ETF监控...")
+    import subprocess
+    subprocess.run([sys.executable, 'scripts/run_etf_monitor.py'],
+                   capture_output=True, text=True, timeout=300)
 
+    show_status(engine)
     return True
 
 

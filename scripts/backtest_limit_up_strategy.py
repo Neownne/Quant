@@ -80,6 +80,8 @@ def parse_args():
     p.add_argument("--skip-top", type=int, default=0,
                    help="跳过前N名, 如1=买2-6名")
     # S组-评分优化
+    p.add_argument("--lu-score", action="store_true",
+                   help="涨停最优区间评分(2-6次加分,7+次惩罚)")
     p.add_argument("--lu-decay", action="store_true", help="涨停次数时间衰减加权")
     p.add_argument("--lu-quality", action="store_true", help="涨停质量加权(收盘/最高价)")
     p.add_argument("--lu-streak", action="store_true", help="连板加分")
@@ -300,6 +302,12 @@ def run_backtest(args):
             n_pass = sum([c1, c2, c3, c4, c5])
             if n_pass >= args.min_conditions:
                 score = float(lu_n)  # 基础分=涨停次数
+                # Lu-score: 最优区间加权
+                if args.lu_score:
+                    if lu_n <= 3: score = lu_n + 1.0       # 2-3次: +1分(早期动量)
+                    elif lu_n <= 5: score = lu_n + 2.0     # 4-5次: +2分(强动量)
+                    elif lu_n == 6: score = lu_n + 1.0     # 6次: +1分(高动量风险上升)
+                    else: score = lu_n - 2.0               # 7+次: -2分(过度追高)
                 # S1: 时间衰减
                 if args.lu_decay:
                     code_lu_dates = lb_data[(lb_data["code"]==code) & (lb_data["ret"]>=0.099)]["trade_date"]
@@ -627,12 +635,14 @@ if __name__ == "__main__":
 
                 version_str = f"lu5"  # 涨停Top-5
                 if args.exit_stop > 0: version_str += "s"    # stop
+                # E4标识: 去跌停+宽市值
+                if args.limit_down_pct < -0.5 and args.mcap_min <= 30 and args.mcap_max >= 500:
+                    version_str += "E4"
                 if args.exit_trailing > 0: version_str += "t"
                 if args.exit_ma5: version_str += "m"
                 if args.lu_decay: version_str += "d"
-                if args.rank_mode != "top": version_str += args.rank_mode[0]  # b/m
-                if args.entry_close: version_str += "c"     # close-buy
-                if version_str == "lu5": version_str = "lu5"  # baseline
+                if args.rank_mode != "top": version_str += args.rank_mode[0]
+                if args.entry_close: version_str += "c"
                 sv = conn.execute(text(
                     "SELECT id FROM strategy_versions WHERE strategy_id=:s AND version=:v"
                 ), {"s": sid, "v": version_str}).fetchone()
