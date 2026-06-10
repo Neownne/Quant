@@ -30,7 +30,7 @@ ACCOUNT_ID = 1
 RUN_ID = 1
 TOP_N = 5
 MCAP_MIN, MCAP_MAX = 50.0, 300.0
-PRICE_MIN, PRICE_MAX = 5.0, 50.0
+PRICE_MIN, PRICE_MAX = 5.0, 63.0
 LU_PCT, LU_LOOKBACK, LU_COUNT = 0.099, 20, 1
 LD_PCT, LD_LOOKBACK = -0.099, 10
 MIN_CONDITIONS = 5
@@ -156,9 +156,21 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
     target_set = set(s[0] for s in signals)
     current_set = set(positions.keys())
 
+    # E3止损: 持仓跌破成本8%→强制卖出（即使仍在Top5）
+    stop_loss = set()
+    for code in current_set:
+        pos = positions[code]
+        cp_row = pd.read_sql("SELECT close FROM stock_daily WHERE code=%s AND trade_date=%s",
+                             engine, params=(code, trade_date))
+        if not cp_row.empty:
+            current_px = float(cp_row.iloc[0]["close"])
+            if current_px < pos["entry_price"] * 0.92:
+                stop_loss.add(code)
+                logger.info(f"  止损 {code}: 入场{pos['entry_price']:.2f}→现价{current_px:.2f} ({(current_px/pos['entry_price']-1)*100:.1f}%)")
+
     to_buy = target_set - current_set
-    to_sell = current_set - target_set
-    to_hold = target_set & current_set
+    to_sell = (current_set - target_set) | stop_loss
+    to_hold = (target_set & current_set) - stop_loss
 
     orders = []
     # 找最近交易日 → T+1执行（跳过周末/假日）
@@ -392,13 +404,14 @@ def main():
     if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
-    # ── 7. 先写信号（无论能否执行）──
+    # ── 7. 先写信号（幂等，不重复）──
     if not args.dry_run:
         with engine.begin() as conn:
             for s in signals:
                 conn.execute(text("""
                     INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                     VALUES (:rid, :sd, :code, :score, :rank)
+                    ON CONFLICT (run_id, signal_date, stock_code) DO NOTHING
                 """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
                        "score": s[1], "rank": signals.index(s) + 1})
 
