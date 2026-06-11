@@ -12,7 +12,7 @@
     python scripts/run_daily_paper_lu.py --date 2026-06-05  # 指定日期
     python scripts/run_daily_paper_lu.py --dry-run       # 试运行
 """
-import sys, os, argparse
+import sys, os, argparse, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
@@ -165,9 +165,26 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
                 stop_loss.add(code)
                 logger.info(f"  止损 {code}: 入场{pos['entry_price']:.2f}→现价{current_px:.2f} ({(current_px/pos['entry_price']-1)*100:.1f}%)")
 
-    to_buy = target_set - current_set
-    to_sell = (current_set - target_set) | stop_loss
-    to_hold = (target_set & current_set) - stop_loss
+    # 黑名单强制卖出（含过期检查）
+    blacklist = set()
+    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'blacklist.json')
+    if os.path.exists(bl_file):
+        with open(bl_file) as f:
+            bl = json.load(f)
+        expiry = bl.get('expiry', '')
+        if expiry and str(date.today()) > expiry:
+            logger.info(f"黑名单已过期({expiry}), 清空")
+            with open(bl_file, 'w') as f:
+                json.dump({"description": "已过期", "codes": [], "expiry": expiry, "last_updated": str(date.today())}, f)
+        else:
+            blacklist = set(bl.get('codes', []))
+    bl_held = current_set & blacklist
+    if bl_held:
+        logger.info(f"  黑名单清仓: {', '.join(bl_held)}")
+
+    to_buy = (target_set - current_set) - blacklist  # 不买黑名单
+    to_sell = (current_set - target_set) | stop_loss | bl_held
+    to_hold = (target_set & current_set) - stop_loss - bl_held
 
     orders = []
     # 找最近交易日 → T+1执行（跳过周末/假日）
@@ -198,20 +215,19 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
             "pnl": pnl_net,
         })
 
-    # ── 买入 ──
+    # ── 买入（先卖后买，用实际卖出金额）──
+    actual_sell_proceeds = 0
+    for code in to_sell:
+        pos = positions[code]
+        open_price = _get_next_open(engine, code, next_date)
+        sell_price = open_price if open_price else pos["entry_price"]
+        actual_sell_proceeds += sell_price * pos["quantity"]
+
     n_buy = len(to_buy)
     per_stock_cash = 0
-    sig_map = {s[0]: s[2] for s in signals}  # code→close
-    if n_buy > 0:
-        sell_est = 0
-        for c in to_sell:
-            pos = positions[c]
-            cp_row = pd.read_sql("SELECT close FROM stock_daily WHERE code=%s AND trade_date=%s",
-                                 engine, params=(c, trade_date))
-            est_price = float(cp_row.iloc[0]["close"]) if not cp_row.empty else pos["entry_price"]
-            sell_est += est_price * pos["quantity"]
-        total_cash = cash + sell_est
-        per_stock_cash = total_cash / n_buy
+    sig_map = {s[0]: s[2] for s in signals}
+    if n_buy > 0 and (cash + actual_sell_proceeds) > 0:
+        per_stock_cash = (cash + actual_sell_proceeds) / n_buy * 0.98  # 留2%缓冲
 
     for code in to_buy:
         open_price = _get_next_open(engine, code, next_date)
@@ -393,8 +409,24 @@ def main():
         return
 
     logger.info(f"筛选结果: {len(signals)} 只")
-    for s in signals:
-        logger.info(f"  {s[0]} 涨停{s[1]}次 收盘{s[2]:.2f}")
+
+    # 加载黑名单
+    blacklist = set()
+    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'blacklist.json')
+    if os.path.exists(bl_file):
+        with open(bl_file) as f:
+            bl = json.load(f)
+        expiry = bl.get('expiry', '')
+        if expiry and str(date.today()) > expiry:
+            logger.info(f"黑名单已过期({expiry})")
+        else:
+            blacklist = set(bl.get('codes', []))
+            if blacklist:
+                logger.info(f"黑名单: {len(blacklist)}只, 到期: {expiry}, 原因: {bl.get('reason','')}")
+
+    for s in signals[:15]:
+        bl_tag = " [BL]" if s[0] in blacklist else ""
+        logger.info(f"  {s[0]} 涨停{s[1]}次 收盘{s[2]:.2f}{bl_tag}")
 
     # ── 6. 估值（先记今日净值，再执行明日交易）──
     positions = get_current_positions(engine)

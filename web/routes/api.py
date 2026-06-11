@@ -1096,28 +1096,94 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         open_html += "</tbody></table>"
         open_html += f"<p style='margin-top:8px;color:#888;'>总市值: {total_mv:,.0f} | 等权分配，每只约 {100/max(len(open_pos),1):.0f}% 仓位</p>"
 
-    # ── 待执行信号（T+1：已生成但未入场） ──
+    # ── 待执行信号（T+1：已生成但未入场）──
     pending_html = ""
     try:
         with engine.connect() as conn:
-            pending = conn.execute(text("""
-                SELECT ps.signal_date, ps.stock_code, ps.predicted_score, ps.rank, sb.name
-                FROM paper_signals ps
-                LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
-                WHERE ps.run_id = :rid
-                  AND ps.signal_date = (SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid)
-                ORDER BY ps.rank
-                LIMIT 20
-            """), {"rid": run_id}).fetchall()
-        if pending:
-            pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
-            pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th></tr></thead><tbody>"
-            for p in pending:
-                sd, sc, score, rank, nm = p
-                pending_html += f"<tr><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td></tr>"
-            pending_html += "</tbody></table></div>"
+            # 检查最新交易日数据完整度
+            latest_date = conn.execute(text(
+                "SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid"
+            ), {"rid": run_id}).fetchone()[0]
+            if latest_date:
+                data_cnt = conn.execute(text(
+                    "SELECT COUNT(*) FROM stock_daily WHERE trade_date = :d"
+                ), {"d": latest_date}).fetchone()[0]
+                prev_cnt = conn.execute(text(
+                    "SELECT COUNT(*) FROM stock_daily WHERE trade_date = (SELECT MAX(trade_date) FROM stock_daily WHERE trade_date < :d)"
+                ), {"d": latest_date}).fetchone()[0]
+                completeness = data_cnt / max(prev_cnt, 1)
+            else:
+                completeness = 1.0
+
+            if completeness < 0.8:
+                pending_html = f"""<div class='card'><h3>待执行信号 (T+1)</h3>
+                <p style='color:#e65100;'>⚠ 数据同步未完成 ({data_cnt}/{prev_cnt}只, {completeness*100:.0f}%)</p>
+                <p style='color:#999;font-size:12px;'>信号可能不完整，等待数据同步后再刷新</p></div>"""
+            else:
+                pending = conn.execute(text("""
+                    SELECT ps.signal_date, ps.stock_code, ps.predicted_score, ps.rank, sb.name
+                    FROM paper_signals ps
+                    LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
+                    WHERE ps.run_id = :rid
+                      AND ps.signal_date = (SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid)
+                    ORDER BY ps.rank
+                    LIMIT 20
+                """), {"rid": run_id}).fetchall()
+                if pending:
+                    # 加载黑名单标注
+                    bl_set = set()
+                    bl_expiry = ''
+                    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config', 'blacklist.json')
+                    if os.path.exists(bl_file):
+                        try:
+                            with open(bl_file) as f:
+                                bl_data = json.load(f)
+                            bl_set = set(bl_data.get('codes', []))
+                            bl_expiry = bl_data.get('expiry', '')
+                        except: pass
+
+                    pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
+                    pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th><th>黑名单</th></tr></thead><tbody>"
+                    for p in pending:
+                        sd, sc, score, rank, nm = p
+                        if sc in bl_set:
+                            bl_badge = f'<span style=\"background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;\" title=\"到期:{bl_expiry}\">BL</span>'
+                        else:
+                            bl_badge = ''
+                        pending_html += f"<tr><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td><td>{bl_badge}</td></tr>"
+                    pending_html += "</tbody></table></div>"
     except Exception:
         pass
+
+    # 黑名单提示
+    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config', 'blacklist.json')
+    if os.path.exists(bl_file):
+        try:
+            with open(bl_file) as f:
+                bl = json.load(f)
+            bl_codes = set(bl.get('codes', []))
+            if bl_codes:
+                # 查有多少黑名单股票出现在最新信号中
+                with engine.connect() as conn:
+                    latest_sig_date = conn.execute(text("SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid"), {"rid": run_id}).fetchone()[0]
+                    if latest_sig_date:
+                        all_sigs = conn.execute(text("SELECT stock_code FROM paper_signals WHERE run_id = :rid AND signal_date = :d"),
+                                                {"rid": run_id, "d": latest_sig_date}).fetchall()
+                        all_set = set(r[0] for r in all_sigs)
+                        bl_in_signal = bl_codes & all_set
+                        if bl_in_signal:
+                            pending_html += f"""<div style='margin-top:8px;padding:8px 12px;background:#fff3e0;border-radius:4px;'>
+                            <strong style='color:#e65100;'>⚠ 黑名单排除 ({len(bl_in_signal)}只)</strong>
+                            <span style='font-size:11px;color:#999;'> | {bl.get('reason','')} | {bl.get('last_updated','')}</span>
+                            <div style='display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;'>"""
+                            for c in sorted(bl_in_signal):
+                                pending_html += f"<span style='background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;'>{c}</span>"
+                            pending_html += "</div></div>"
+                        else:
+                            pending_html += f"""<div style='font-size:10px;color:#999;margin-top:2px;'>
+                            📋 黑名单 {len(bl_codes)}只 | {bl.get('reason','')} | {bl.get('last_updated','')}</div>"""
+        except Exception:
+            pass
 
     # 权益曲线 + 基准叠加 + 每日盈亏
     chart_html = ""
@@ -1258,6 +1324,14 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 cash_val = 0
             pos_mv = sum(p[5] * price_map.get(p[0], (p[2], 0))[0] for p in open_pos) if open_pos else 0
 
+            # 浮动盈亏
+            float_pnl = 0
+            for p in open_pos:
+                if p[0] in price_map:
+                    float_pnl += (price_map[p[0]][0] - p[2]) * p[5]
+            ret_color = "#c62828" if total_ret > 0 else "#2e7d32"
+            float_color = "#c62828" if float_pnl > 0 else "#2e7d32"
+
             summary_card = f"""<div class="card"><h3>汇总</h3>
             <table style="width:100%"><tr>
                 <td>总资产: <strong>{tv:,.0f}</strong></td>
@@ -1266,8 +1340,11 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                 <td>日收益: <span class="{'up' if dr_val>0 else 'down'}">{dr_val:+.2%}</span></td>
                 <td>最大回撤: <span class="down">{max_dd:.2%}</span></td>
             </tr></table>"""
+            summary_card += f"""<table style="width:100%;margin-top:8px;"><tr>
+                <td>总收益率: <strong style="color:{ret_color};">{total_ret:+.2%}</strong></td>
+                <td>浮动盈亏: <strong style="color:{float_color};">{float_pnl:+,.0f}</strong></td>"""
             win_rate = f"{wins/max(len(closed_pos),1)*100:.0f}%" if closed_pos else "N/A"
-            summary_card += f"<p style='margin-top:8px;'>已平仓盈亏: <span class=\"{'up' if total_pnl > 0 else 'down'}\">{total_pnl:+,.0f}</span> | 胜率: {wins}/{len(closed_pos)} ({win_rate})</p>"
+            summary_card += f"<td>已平仓盈亏: <span class=\"{'up' if total_pnl > 0 else 'down'}\">{total_pnl:+,.0f}</span> | 胜率: {wins}/{len(closed_pos)} ({win_rate})</td></tr></table>"
             summary_card += "</div>"
 
             # 历史日收益表
