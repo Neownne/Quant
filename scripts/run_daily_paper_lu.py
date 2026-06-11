@@ -433,10 +433,10 @@ def main():
     if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
-    # ── 7. 写信号（全部通过票，最多15条）──
+    # ── 7. 写信号（全部通过票，最多20条）──
     if not args.dry_run:
         with engine.begin() as conn:
-            for i, s in enumerate(signals[:15]):
+            for i, s in enumerate(signals[:20]):
                 conn.execute(text("""
                     INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                     VALUES (:rid, :sd, :code, :score, :rank)

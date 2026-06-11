@@ -1127,7 +1127,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                     WHERE ps.run_id = :rid
                       AND ps.signal_date = (SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid)
                     ORDER BY ps.rank
-                    LIMIT 20
+                    LIMIT 25
                 """), {"rid": run_id}).fetchall()
                 if pending:
                     # 加载黑名单标注
