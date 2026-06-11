@@ -37,11 +37,12 @@ async def ping():
 async def get_strategy_summary():
     """返回四种核心策略的最新回测概览卡片 HTML。"""
     engine = get_engine()
-    # 四种策略卡片（涨停策略展示E3优化版）
+    # 五种策略卡片
     targets = [
         ("舞", "v1.85 (adaptive N)"),
         ("小市值alpha", "v2.0"),
-        ("涨停策略", "lu5sE4"),                    # E3: +8%止损优化
+        ("涨停策略", "lu5sE4"),                    # E4: 排名选股
+        ("涨停策略ML", "v1.0"),                    # ML: GBRT选股
         ("大小票平滑分配", "v4.0"),
     ]
     cards = []
@@ -105,12 +106,14 @@ async def get_strategy_summary():
     card_html = ""
     type_labels = {
         "舞": "ML大票", "小市值alpha": "ML小票",
-        "涨停策略": "规则筛选", "大小票平滑分配": "大小切换",
+        "涨停策略": "规则筛选", "涨停策略ML": "ML选股",
+        "大小票平滑分配": "大小切换",
     }
     colors = {
         "舞": ("#1565c0", "#e3f2fd"),
         "小市值alpha": ("#2e7d32", "#e8f5e9"),
         "涨停策略": ("#e65100", "#fff3e0"),
+        "涨停策略ML": ("#00838f", "#e0f7fa"),
         "大小票平滑分配": ("#6a1b9a", "#f3e5f5"),
     }
 

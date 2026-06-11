@@ -408,25 +408,39 @@ def main():
 
     logger.info(f"筛选结果: {len(signals)} 只")
 
-    # ── ML启发式重排(基于特征重要性: ret_5d*0.35 + hl_ratio*-0.3 + turnover*0.15 + lu_n*0.1) ──
+    # ── ML重排: 加载GBRT模型预测 ──
     if len(signals) >= 5:
         try:
-            daily['ret_5d'] = daily.groupby('code')['close'].transform(lambda x: x.pct_change(5))
-            daily['hl_ratio'] = (daily['high'] - daily['low']) / daily['close']
-            tdi = daily.set_index(['code','trade_date'])
-            scores = []
-            for s in signals:
-                code = s[0]
-                if (code, trade_date) in tdi.index:
-                    r = tdi.loc[(code, trade_date)]
-                    sc = s[1]*0.1 + (r.get('ret_5d',0) or 0)*0.35 + (r.get('hl_ratio',0) or 0)*-0.3 + (r.get('turnover',0) or 0)*0.15
-                    scores.append((s, sc))
-            if scores:
-                ranked = sorted(scores, key=lambda x: x[1], reverse=True)
-                signals = [s for s,_ in ranked]
-                logger.info(f"ML重排: Top3={[(s[0],f'{sc:.3f}') for s,sc in ranked[:3]]}")
+            import pickle
+            model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'gbrt_model.pkl')
+            if os.path.exists(model_path):
+                with open(model_path, 'rb') as f:
+                    gbr = pickle.load(f)
+                daily['ret_5d'] = daily.groupby('code')['close'].transform(lambda x: x.pct_change(5)).fillna(0)
+                daily['ma20'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(20).mean())
+                daily['hl_ratio'] = ((daily['high']-daily['low'])/daily['close']).fillna(0)
+                tdi = daily.set_index(['code','trade_date'])
+                X_pred = []
+                for s in signals:
+                    code = s[0]
+                    if (code, trade_date) in tdi.index:
+                        r = tdi.loc[(code, trade_date)]
+                        mc = r.get('market_cap', 0) if 'market_cap' in r.index else 0
+                        feat = [s[1], s[2],
+                                (s[2]/r['ma20']-1) if pd.notna(r.get('ma20')) and r['ma20']>0 else 0,
+                                r['ret_5d'], r['ret_5d'], r['ret_5d'],
+                                r.get('turnover',0) or 0, 0, 1,
+                                r['hl_ratio'], 0, mc if not pd.isna(mc) else 0]
+                        X_pred.append([0 if pd.isna(v) else v for v in feat])
+                if X_pred:
+                    preds = gbr.predict(np.array(X_pred))
+                    ranked = sorted(zip(signals, preds), key=lambda x: x[1], reverse=True)
+                    signals = [s for s,_ in ranked]
+                    logger.info(f"ML(GBRT)重排 Top3: {[(s[0],f'{sc:.3f}') for s,sc in ranked[:3]]}")
+            else:
+                logger.warning(f"模型文件不存在: {model_path}")
         except Exception as e:
-            logger.warning(f"ML重排失败: {e}")
+            logger.warning(f"ML重排失败, 使用原排名: {e}")
 
     # 加载黑名单
     blacklist = set()
