@@ -1129,7 +1129,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                     LEFT JOIN stock_basic sb ON ps.stock_code = sb.code
                     WHERE ps.run_id = :rid
                       AND ps.signal_date = (SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid)
-                    ORDER BY ps.rank
+                    ORDER BY ps.rank, ps.predicted_score DESC
                     LIMIT 25
                 """), {"rid": run_id}).fetchall()
                 if pending:
@@ -1145,15 +1145,21 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                             bl_expiry = bl_data.get('expiry', '')
                         except: pass
 
-                    pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
-                    pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th><th>黑名单</th></tr></thead><tbody>"
+                    pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span>"
+                    bl_count = sum(1 for p in pending if p[1] in bl_set)
+                    if bl_count > 0:
+                        pending_html += f" <span style='font-size:11px;color:#999;'>(含{bl_count}只黑名单已排除)</span>"
+                    pending_html += "</h3>"
+                    pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th><th>状态</th></tr></thead><tbody>"
                     for p in pending:
                         sd, sc, score, rank, nm = p
                         if sc in bl_set:
-                            bl_badge = f'<span style=\"background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;\" title=\"到期:{bl_expiry}\">BL</span>'
+                            row_style = 'style=\"opacity:0.4;text-decoration:line-through;\"'
+                            bl_badge = f'<span style=\"background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;\" title=\"黑名单到期:{bl_expiry}\">🚫 已排除</span>'
                         else:
-                            bl_badge = ''
-                        pending_html += f"<tr><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td><td>{bl_badge}</td></tr>"
+                            row_style = ''
+                            bl_badge = '<span style=\"color:#4caf50;font-size:11px;\">✓</span>'
+                        pending_html += f"<tr {row_style}><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td><td>{bl_badge}</td></tr>"
                     pending_html += "</tbody></table></div>"
     except Exception:
         pass
@@ -1314,8 +1320,14 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         if daily_rows:
             latest = daily_rows[-1]
             tv = float(latest[1]); dr_val = float(latest[2] or 0)
-            first_tv = float(daily_rows[0][1])
-            total_ret = (tv - first_tv) / first_tv if first_tv > 0 else 0
+            # 用初始本金算总收益率，而非第一条 PnL 净值（第一天可能已亏损）
+            try:
+                with engine.connect() as conn2:
+                    ic = conn2.execute(text('SELECT initial_capital FROM paper_account WHERE id=:aid'), {'aid': account_id}).fetchone()
+                    initial_cap = float(ic[0]) if ic else 1_000_000
+            except Exception:
+                initial_cap = 1_000_000
+            total_ret = (tv - initial_cap) / initial_cap if initial_cap > 0 else 0
             max_dd = min((float(r[3] or 0) for r in daily_rows), default=0)
 
             # 现金和持仓市值

@@ -26,8 +26,8 @@ from data.sync import sync_stock_daily, sync_daily_extra
 from config.settings import TradingConfig
 
 # ── 策略参数 ──
-ACCOUNT_ID = 2
-RUN_ID = 2
+ACCOUNT_ID = 3
+RUN_ID = 3
 TOP_N = 5
 MCAP_MIN, MCAP_MAX = 30.0, 500.0
 PRICE_MIN, PRICE_MAX = 5.0, 63.0
@@ -185,22 +185,39 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
     to_hold = (target_set & current_set) - stop_loss - bl_held
 
     orders = []
-    # 找最近交易日 → T+1执行（跳过周末/假日）
+    # 找最近交易日 → T+1执行（跳过周末/假日）；若无则用当日收盘价 T+0
     next_row = pd.read_sql(
         "SELECT MIN(trade_date) FROM stock_daily WHERE trade_date > %s",
         engine, params=(trade_date,),
     )
     if next_row.empty or next_row.iloc[0, 0] is None or pd.isna(next_row.iloc[0, 0]):
-        logger.warning("无后续交易日，跳过执行")
-        return
+        logger.warning("无后续交易日，使用当日收盘价执行（T+0）")
+        next_date = trade_date
+    else:
+        next_date = pd.Timestamp(next_row.iloc[0, 0])
     next_date = pd.Timestamp(next_row.iloc[0, 0])
 
     # ── 卖出 ──
+    # 获取今日收盘价（当T+1开盘价不可用时作为更准确的fallback）
+    today_close = {}
+    for code in to_sell:
+        cp_row = pd.read_sql("SELECT close FROM stock_daily WHERE code=%s AND trade_date=%s",
+                             engine, params=(code, trade_date))
+        if not cp_row.empty:
+            today_close[code] = float(cp_row.iloc[0]["close"])
+
     for code in to_sell:
         pos = positions[code]
-        # 取T+1开盘价（如果还没到就用收盘价）
+        # 取T+1开盘价（如果还没到就用今日收盘价，最后fallback到入场价）
         open_price = _get_next_open(engine, code, next_date)
-        sell_price = open_price if open_price else pos["entry_price"]
+        if open_price:
+            sell_price = open_price
+        elif code in today_close:
+            sell_price = today_close[code]
+            logger.info(f"  {code} T+1无数据，用今日收盘价 {sell_price:.2f}")
+        else:
+            sell_price = pos["entry_price"]
+            logger.warning(f"  {code} 无价格数据，用入场价 {sell_price:.2f}")
         qty = pos["quantity"]
         pnl = (sell_price - pos["entry_price"]) * qty
         cost = sell_price * qty * (COMMISSION + STAMP_DUTY + SLIPPAGE)
@@ -218,7 +235,7 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
     for code in to_sell:
         pos = positions[code]
         open_price = _get_next_open(engine, code, next_date)
-        sell_price = open_price if open_price else pos["entry_price"]
+        sell_price = open_price if open_price else today_close.get(code, pos["entry_price"])
         actual_sell_proceeds += sell_price * pos["quantity"]
 
     n_buy = len(to_buy)
@@ -227,12 +244,17 @@ def execute(engine, trade_date, signals, positions, dry_run=False):
     if n_buy > 0 and (cash + actual_sell_proceeds) > 0:
         per_stock_cash = (cash + actual_sell_proceeds) / n_buy * 0.98  # 留2%缓冲
 
+    no_open_warned = set()
     for code in to_buy:
         open_price = _get_next_open(engine, code, next_date)
         buy_price = open_price if open_price else sig_map.get(code, 0)
+        if not open_price and code not in no_open_warned:
+            logger.info(f"  {code} T+1开盘价不可用，用收盘价 {buy_price:.2f}")
+            no_open_warned.add(code)
         # 按手取整（100股）
         qty = int(per_stock_cash / buy_price / 100) * 100 if n_buy > 0 else 0
         if qty <= 0:
+            logger.warning(f"  {code} qty=0 (price={buy_price:.2f} per_stock={per_stock_cash:.0f})，跳过买入")
             continue
         cost = buy_price * qty * (COMMISSION + SLIPPAGE)
         orders.append({
@@ -435,7 +457,8 @@ def main():
                 if X_pred:
                     preds = gbr.predict(np.array(X_pred))
                     ranked = sorted(zip(signals, preds), key=lambda x: x[1], reverse=True)
-                    signals = [s for s,_ in ranked]
+                    # 用 GBRT 预测分替换涨停次数作为 predicted_score，保留收盘价
+                    signals = [(s[0], float(sc), s[2]) for s, sc in ranked]
                     logger.info(f"ML(GBRT)重排 Top3: {[(s[0],f'{sc:.3f}') for s,sc in ranked[:3]]}")
             else:
                 logger.warning(f"模型文件不存在: {model_path}")
@@ -465,19 +488,26 @@ def main():
     if not args.dry_run and positions:
         update_daily_pnl(engine, trade_date)
 
-    # ── 7. 写信号（全部通过票，最多20条）──
+    # ── 7. 写信号（全部通过票含黑名单，最多20条；web展示用）──
     if not args.dry_run:
         with engine.begin() as conn:
             for i, s in enumerate(signals[:20]):
                 conn.execute(text("""
                     INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                     VALUES (:rid, :sd, :code, :score, :rank)
-                    ON CONFLICT (run_id, signal_date, stock_code) DO NOTHING
+                    ON CONFLICT (run_id, signal_date, stock_code) DO UPDATE SET
+                        predicted_score = :score2, rank = :rank2
                 """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
-                       "score": s[1], "rank": i + 1})
+                       "score": s[1], "rank": i + 1,
+                       "score2": s[1], "rank2": i + 1})
 
-    # ── 8. 执行（只交易Top-5）──
-    execute(engine, trade_date, signals[:TOP_N], positions, dry_run=args.dry_run)
+    # ── 8. 执行（Top-N，排除黑名单，后续排名自动补位）──
+    clean_signals = [s for s in signals if s[0] not in blacklist]
+    if blacklist:
+        bl_filtered = len(signals) - len(clean_signals)
+        if bl_filtered > 0:
+            logger.info(f"  黑名单过滤: {bl_filtered}只, 可用: {len(clean_signals)}只")
+    execute(engine, trade_date, clean_signals[:TOP_N], positions, dry_run=args.dry_run)
 
     engine.dispose()
 

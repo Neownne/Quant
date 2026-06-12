@@ -284,19 +284,25 @@ def execute(engine, trade_date, lu_picks, sc_picks, lu_weight, dry_run=False):
         conn.execute(text("UPDATE paper_account SET cash=:c WHERE id=:aid"),
                      {"c": max(0, new_cash), "aid": ACCOUNT_ID})
 
-        # 写信号
+        # 写信号 (ON CONFLICT UPDATE 避免重复跑导致 rank 冲突)
         for i, s in enumerate(lu_picks[:LU_TOP_N]):
             conn.execute(text("""
                 INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                 VALUES (:rid, :sd, :code, :score, :rank)
+                ON CONFLICT (run_id, signal_date, stock_code) DO UPDATE SET
+                    predicted_score = :score2, rank = :rank2
             """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
-                   "score": float(s[1]), "rank": i+1})
+                   "score": float(s[1]), "rank": i+1,
+                   "score2": float(s[1]), "rank2": i+1})
         for i, s in enumerate(sc_picks[:SC_TOP_N]):
             conn.execute(text("""
                 INSERT INTO paper_signals (run_id, signal_date, stock_code, predicted_score, rank)
                 VALUES (:rid, :sd, :code, :score, :rank)
+                ON CONFLICT (run_id, signal_date, stock_code) DO UPDATE SET
+                    predicted_score = :score2, rank = :rank2
             """), {"rid": RUN_ID, "sd": trade_date, "code": s[0],
-                   "score": float(round(s[1], 4)), "rank": LU_TOP_N + i + 1})
+                   "score": float(round(s[1], 4)), "rank": LU_TOP_N + i + 1,
+                   "score2": float(round(s[1], 4)), "rank2": LU_TOP_N + i + 1})
 
     logger.info(f"  执行: 买{len(to_buy)}卖{len(to_sell)} lu_w={lu_weight:.0%}")
 

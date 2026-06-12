@@ -45,6 +45,12 @@ def parse_args():
     p.add_argument("--limit-down-pct", type=float, default=-0.099)
     p.add_argument("--limit-down-lookback", type=int, default=10)
     p.add_argument("--min-conditions", type=int, default=4)
+    p.add_argument("--adaptive-ld", action="store_true",
+                   help="自适应跌停: 高波动时含跌停(排雷)，低波动时去跌停(追动量)")
+    p.add_argument("--ld-vol-lookback", type=int, default=20,
+                   help="自适应跌停的波动率计算窗口(交易日)")
+    p.add_argument("--ld-vol-threshold", type=float, default=0.18,
+                   help="自适应跌停的波动率阈值(高于此值启用跌停过滤)")
     p.add_argument("--rebalance", type=str, default="daily",
                    choices=["daily", "3day", "weekly"],
                    help="调仓频率（daily=每日, 3day=每3交易日, weekly=每周）")
@@ -88,6 +94,8 @@ def parse_args():
     p.add_argument("--lu-turnover", action="store_true", help="换手率因子加权")
     p.add_argument("--lu-volume", action="store_true", help="放量涨停加权")
     # E组-出场信号
+    p.add_argument("--skip-open-gap", type=float, default=0,
+                   help="T+1开盘相对昨日收盘跌幅超此阈值则跳过买入(如0.03=3%%)")
     p.add_argument("--exit-ma5", action="store_true", help="跌破MA5出场")
     p.add_argument("--exit-trailing", type=float, default=0, help="高点回落X%%止盈")
     p.add_argument("--exit-stop", type=float, default=0, help="个股跌超X%%硬止损")
@@ -202,6 +210,21 @@ def run_backtest(args):
     benchmark_ret = benchmark.pct_change().dropna()
     logger.info(f"基准 {args.benchmark}: {len(benchmark)} 天")
 
+    # ── 5.4 自适应跌停: 预计算上证指数滚动波动率 ──
+    adaptive_ld_vol = {}
+    if args.adaptive_ld:
+        idx_vol_data = pd.read_sql(
+            f"SELECT trade_date, close FROM index_daily "
+            f"WHERE code='000001' AND trade_date BETWEEN %s AND %s "
+            f"ORDER BY trade_date",
+            engine, params=(pre_start_str, end_date_str),
+        )
+        idx_vol_data["trade_date"] = pd.to_datetime(idx_vol_data["trade_date"])
+        idx_vol_data["ret"] = idx_vol_data["close"].pct_change()
+        idx_vol_data["vol"] = idx_vol_data["ret"].rolling(args.ld_vol_lookback).std() * np.sqrt(252)
+        adaptive_ld_vol = dict(zip(idx_vol_data["trade_date"], idx_vol_data["vol"]))
+        logger.info(f"自适应跌停: lookback={args.ld_vol_lookback}d threshold={args.ld_vol_threshold:.0%}")
+
     # ── 5.5 CSI1000 趋势（D1风控用）──
     csi1k_data = {}
     if args.trend_filter:
@@ -299,8 +322,22 @@ def run_backtest(args):
             c4 = lu_n > args.limit_up_count
             c5 = code not in ld_codes
 
-            n_pass = sum([c1, c2, c3, c4, c5])
-            if n_pass >= args.min_conditions:
+            # ── 自适应跌停: 高波动含跌停(排雷)，低波动去跌停(追动量) ──
+            if args.adaptive_ld:
+                vol_now = adaptive_ld_vol.get(today, np.nan)
+                if not pd.isna(vol_now) and vol_now > args.ld_vol_threshold:
+                    # 高波动 → 5条件严格模式 (含跌停排雷)
+                    n_pass = sum([c1, c2, c3, c4, c5])
+                    effective_min = 5
+                else:
+                    # 低波动 → 4条件宽松模式 (去跌停追动量)
+                    n_pass = sum([c1, c2, c3, c4])
+                    effective_min = 4
+            else:
+                n_pass = sum([c1, c2, c3, c4, c5])
+                effective_min = args.min_conditions
+
+            if n_pass >= effective_min:
                 score = float(lu_n)  # 基础分=涨停次数
                 # Lu-score: 最优区间加权
                 if args.lu_score:
@@ -471,9 +508,20 @@ def run_backtest(args):
 
         next_data = daily_by_date[next_date].set_index("code")
         stock_rets = []
+        gap_skipped = 0
         for code in selected_set:
             if code in next_data.index:
                 r = next_data.loc[code].get("ret_oc")  # 用盘中收益(open→close)，消除隔夜偏差
+                # ── 开盘跌幅过滤: 新买入的票如果T+1开盘暴跌则跳过 ──
+                if args.skip_open_gap > 0 and code not in prev_holdings:
+                    today_close = today_data.loc[code, "close"] if code in today_data.index else None
+                    next_open = next_data.loc[code].get("open") if "open" in next_data.columns else None
+                    if today_close and next_open and not pd.isna(today_close) and not pd.isna(next_open) and today_close > 0:
+                        gap = (next_open - today_close) / today_close
+                        if gap < -args.skip_open_gap:
+                            stock_rets.append(0.0)  # 不买入，现金收益
+                            gap_skipped += 1
+                            continue
                 stock_rets.append(r if not pd.isna(r) else 0.0)
             else:
                 stock_rets.append(0.0)

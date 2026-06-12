@@ -236,21 +236,26 @@ def sync_and_trade(engine, strategy='all', dry_run=False):
     n_stocks = sync_with_fallback(engine, today_str)
 
     if n_stocks < TARGET_COUNT:
-        # 数据不全，尝试拉最近可用的
+        # 数据不全，尝试补拉最近可用的
         logger.warning(f"今天数据不足({n_stocks}/{TARGET_COUNT})，尝试补拉 {trade_date}")
         n2 = sync_with_fallback(engine, trade_date)
         if n2 >= TARGET_COUNT:
             n_stocks = n2
-            today_str = trade_date
 
     if n_stocks < TARGET_COUNT:
         logger.error(f"数据同步未达标 ({n_stocks}/{TARGET_COUNT})，跳过模拟盘")
         logger.info(f"将在 {RETRY_INTERVAL//60} 分钟后重试...")
         return False
 
+    # 同步完成后，重新获取最新的交易日期（确保用最新数据跑模拟盘）
+    effective_date = get_latest_trade_date(engine)
+    if not effective_date:
+        logger.error("同步后无法确定最新交易日")
+        return False
+
     # 3. 跑模拟盘
-    logger.info(f"[3/3] 模拟盘 (日期: {today_str})...")
-    run_paper_trading(today_str, strategy=strategy, dry_run=dry_run)
+    logger.info(f"[3/3] 模拟盘 (日期: {effective_date})...")
+    run_paper_trading(effective_date, strategy=strategy, dry_run=dry_run)
 
     # 4. ETF监控
     logger.info("[4/4] ETF监控...")

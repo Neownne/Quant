@@ -2,21 +2,21 @@
 {% block title %}模拟盘 - Quant Monitor{% endblock %}
 {% block content %}
 
-<!-- 涨停 Top-5 -->
-<div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+<!-- 涨停 Top-5 + ML智能选股 -->
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;">
     <div>
-        <h2 style="color:#e65100;margin-bottom:4px;">涨停 Top-5</h2>
+        <h2 style="color:#e65100;margin-bottom:4px;">🔥 涨停 Top-5</h2>
         <p style="color:#888;font-size:11px;margin:0 0 10px 0;">
-            5条件规则筛选 · 日频调仓 · account=1 · run=1
+            4条件规则筛选 · 日频调仓 · account=1 · run=1
         </p>
         <div hx-get="/api/paper-run/1?account_id=1" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
     <div>
-        <h2 style="color:#6a1b9a;margin-bottom:4px;">ML智能选股</h2>
+        <h2 style="color:#00838f;margin-bottom:4px;">🤖 ML智能选股</h2>
         <p style="color:#888;font-size:11px;margin:0 0 10px 0;">
-            GBRT预测 · E4候选池+ML排名 · account=2 · run=2 · ML
+            GBRT预测 · E4候选池+ML重排 · account=3 · run=3
         </p>
-        <div hx-get="/api/paper-run/2?account_id=2" hx-trigger="load" hx-swap="innerHTML"></div>
+        <div hx-get="/api/paper-run/3?account_id=3" hx-trigger="load" hx-swap="innerHTML"></div>
     </div>
 </div>
 
