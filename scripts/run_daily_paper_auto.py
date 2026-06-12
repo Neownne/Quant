@@ -193,6 +193,8 @@ def run_paper_trading(trade_date, strategy='all', dry_run=False):
         scripts.append(('涨停Top-5', 'scripts/run_daily_paper_lu.py'))
     if strategy in ('switch', 'all'):
         scripts.append(('大小票v4.0', 'scripts/run_daily_paper_switch.py'))
+    if strategy in ('ml', 'all'):
+        scripts.append(('涨停ML-GBRT', 'scripts/run_daily_paper_ml.py'))
 
     for name, script in scripts:
         cmd = [sys.executable, script, '--date', trade_date, '--no-sync']
@@ -287,7 +289,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--strategy", type=str, default="all",
-                        choices=["lu", "switch", "all"], help="策略选择")
+                        choices=["lu", "switch", "ml", "all"], help="策略选择")
     args = parser.parse_args()
 
     engine = get_engine()
