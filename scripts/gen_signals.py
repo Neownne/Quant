@@ -85,23 +85,24 @@ def _load_csi1k_trend(engine, start, end):
 
 
 def compute_streak_map(daily, lu_pct):
-    """预计算连板数 {(code, date): max_consecutive_lu}"""
+    """预计算连板数 {(code, date): max_consecutive_lu}，O(n) 实现。"""
     smap = {}
     for code, grp in daily.groupby("code"):
-        grp = grp.sort_values("trade_date")
+        grp = grp.sort_values("trade_date").reset_index(drop=True)
         dates = grp["trade_date"].tolist()
-        is_lu = (grp["ret"] >= lu_pct).tolist()
-        for i in range(len(dates)):
+        is_lu = [(r >= lu_pct) for r in grp["ret"]]
+        n = len(dates)
+        for i in range(n):
+            start_i = max(0, i - 19)
             streak = 0
-            mx = 0
-            start_i = max(0, i - 20)
+            max_streak = 0
             for j in range(start_i, i + 1):
                 if is_lu[j]:
                     streak += 1
-                    mx = max(mx, streak)
+                    max_streak = max(max_streak, streak)
                 else:
                     streak = 0
-            smap[(code, dates[i])] = mx
+            smap[(code, dates[i])] = max_streak
     return smap
 
 
@@ -202,7 +203,7 @@ def screen_day(today, daily, extra_df, implied_shares, code_set, csi1k_up,
 
     # 按评分降序；同分按最近涨停距今升序
     lu_dates_map = {}
-    for code, _, _ in passed:
+    for code, _, _, _, _ in passed:
         code_lu = lb[(lb['code'] == code) & (lb['ret'] >= TradingConfig.LIMIT_UP_PCT)]
         lu_dates_map[code] = (today - code_lu['trade_date'].max()).days if not code_lu.empty else 99
     passed.sort(key=lambda x: (x[1], -lu_dates_map.get(x[0], 99)), reverse=True)

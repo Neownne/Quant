@@ -190,10 +190,8 @@ def run_bt(args):
             print(f"    {y}: {r:+.1%}")
     tr = strat.analyzers.trades.get_analysis()
     n_tr = 0
-    for data_key, trade_list in tr.items():
-        if not isinstance(trade_list, list):
-            continue
-        n_tr += len(trade_list)
+    if tr and hasattr(tr, "total") and hasattr(tr.total, "total"):
+        n_tr = int(tr.total.total)
     print(f"  交易 {n_tr}笔")
     print(f"{'='*60}\n")
 
@@ -216,9 +214,8 @@ def run_bt(args):
     with open(trades_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["入场日期", "出场日期", "股票代码", "入场价", "出场价", "盈亏%", "盈亏额", "出场原因"])
-        for data_key, trade_list in tr.items():
-            if not isinstance(trade_list, list):
-                continue
+        # strat._trades: {data_name: [Trade, ...]}
+        for data_key, trade_list in getattr(strat, "_trades", {}).items():
             for tk in trade_list:
                 if not hasattr(tk, "history") or len(tk.history) < 2:
                     continue
