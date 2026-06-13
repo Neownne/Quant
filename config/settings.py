@@ -68,6 +68,10 @@ class TradingConfig:
     INDEX_CRASH_LOOKBACK = 15          # 指数大跌检测窗口（天）
     INDEX_CRASH_THRESHOLD = -0.12      # 指数15日跌超12%空仓
 
+    # 涨跌停阈值（A股普通股票）
+    LIMIT_UP_PCT = 0.09                # 涨停阈值 9%
+    LIMIT_DOWN_PCT = -0.09             # 跌停阈值 -9%
+
     # 调仓
     REBALANCE_FREQ = 5                 # 默认周度调仓（交易日）
     NDROP_N = 2                        # NDrop: 每次替换最差2只

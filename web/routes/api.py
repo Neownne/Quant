@@ -35,48 +35,28 @@ async def ping():
 
 @router.get("/strategy-summary")
 async def get_strategy_summary():
-    """返回四种核心策略的最新回测概览卡片 HTML。"""
+    """返回涨停策略最新回测概览卡片 HTML。"""
     engine = get_engine()
-    # 五种策略卡片
     targets = [
-        ("舞", "v1.85 (adaptive N)"),
-        ("小市值alpha", "v2.0"),
-        ("涨停策略", "lu5sE4"),                    # E4: 排名选股
-        ("涨停策略ML", "v1.0"),                    # ML: GBRT选股
-        ("大小票平滑分配", "v4.0"),
+        ("涨停策略", "lu5sE4"),  # E4: 4条件去跌停
     ]
     cards = []
     try:
         with engine.connect() as conn:
             for name, ver in targets:
-                if ver:
-                    row = conn.execute(text("""
-                        SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
-                               br.metrics_json, br.quality
-                        FROM backtest_results br
-                        JOIN strategy_versions sv ON br.version_id = sv.id
-                        JOIN strategy_configs sc ON sv.strategy_id = sc.id
-                        WHERE sc.name = :name AND sv.version = :ver
-                        ORDER BY
-                            CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
-                            br.start_date DESC,
-                            br.created_at DESC
-                        LIMIT 1
-                    """), {"name": name, "ver": ver}).fetchone()
-                else:
-                    row = conn.execute(text("""
-                        SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
-                               br.metrics_json, br.quality
-                        FROM backtest_results br
-                        JOIN strategy_versions sv ON br.version_id = sv.id
-                        JOIN strategy_configs sc ON sv.strategy_id = sc.id
-                        WHERE sc.name = :name
-                        ORDER BY
-                            CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
-                            br.start_date DESC,
-                            br.created_at DESC
-                        LIMIT 1
-                    """), {"name": name}).fetchone()
+                row = conn.execute(text("""
+                    SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
+                           br.metrics_json, br.quality
+                    FROM backtest_results br
+                    JOIN strategy_versions sv ON br.version_id = sv.id
+                    JOIN strategy_configs sc ON sv.strategy_id = sc.id
+                    WHERE sc.name = :name AND sv.version = :ver
+                    ORDER BY
+                        CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
+                        br.start_date DESC,
+                        br.created_at DESC
+                    LIMIT 1
+                """), {"name": name, "ver": ver}).fetchone()
 
                 if not row:
                     cards.append({
@@ -104,18 +84,8 @@ async def get_strategy_summary():
 
     # 构建卡片 HTML
     card_html = ""
-    type_labels = {
-        "舞": "ML大票", "小市值alpha": "ML小票",
-        "涨停策略": "规则筛选", "涨停策略ML": "ML选股",
-        "大小票平滑分配": "大小切换",
-    }
-    colors = {
-        "舞": ("#1565c0", "#e3f2fd"),
-        "小市值alpha": ("#2e7d32", "#e8f5e9"),
-        "涨停策略": ("#e65100", "#fff3e0"),
-        "涨停策略ML": ("#00838f", "#e0f7fa"),
-        "大小票平滑分配": ("#6a1b9a", "#f3e5f5"),
-    }
+    type_labels = {"涨停策略": "规则筛选"}
+    colors = {"涨停策略": ("#e65100", "#fff3e0")}
 
     for c in cards:
         name = c["name"]
@@ -131,7 +101,7 @@ async def get_strategy_summary():
                     <span style="font-size:11px;color:#999;">{label}</span>
                 </div>
                 <p style="color:#999;font-size:13px;margin:16px 0;">暂无回测数据</p>
-                <p style="font-size:11px;color:#aaa;">运行对应回测脚本生成</p>
+                <p style="font-size:11px;color:#aaa;">运行 scripts/bt_backtest.py 生成</p>
             </div>"""
         else:
             ar = c["annual_return"]
@@ -986,19 +956,20 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             all_codes = list(set(p[0] for p in positions) | set(s[1] for s in signals))
             name_map = {}
             if all_codes:
-                cl = ",".join([f"'{c}'" for c in all_codes])
-                names = conn.execute(text(f"SELECT code, name FROM stock_basic WHERE code IN ({cl})")).fetchall()
+                names = conn.execute(text(
+                    "SELECT code, name FROM stock_basic WHERE code = ANY(:codes)"
+                ), {"codes": all_codes}).fetchall()
                 name_map = {r[0]: r[1] for r in names}
             # 最新收盘价（用于计算当日涨幅）
             price_map = {}
             if all_codes:
-                prices = conn.execute(text(f"""
+                prices = conn.execute(text("""
                     SELECT DISTINCT ON (code) code, close,
                            (close - LAG(close) OVER (PARTITION BY code ORDER BY trade_date))
-                           / NULLIF(LAG(close) OVER (PARTITION BY code ORDER BY trade_date), 0) * 100 as chg_pct
-                    FROM stock_daily WHERE code IN ({cl})
+                           / NULLIF(LAG(close) OVER (PARTITION BY code ORDER BY trade_date), 0) * 100 AS chg_pct
+                    FROM stock_daily WHERE code = ANY(:codes)
                     ORDER BY code, trade_date DESC
-                """)).fetchall()
+                """), {"codes": all_codes}).fetchall()
                 for r in prices:
                     price_map[r[0]] = (float(r[1]), float(r[2]) if r[2] else 0)
     except Exception:
@@ -1133,66 +1104,14 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
                     LIMIT 25
                 """), {"rid": run_id}).fetchall()
                 if pending:
-                    # 加载黑名单标注
-                    bl_set = set()
-                    bl_expiry = ''
-                    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config', 'blacklist.json')
-                    if os.path.exists(bl_file):
-                        try:
-                            with open(bl_file) as f:
-                                bl_data = json.load(f)
-                            bl_set = set(bl_data.get('codes', []))
-                            bl_expiry = bl_data.get('expiry', '')
-                        except: pass
-
-                    pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span>"
-                    bl_count = sum(1 for p in pending if p[1] in bl_set)
-                    if bl_count > 0:
-                        pending_html += f" <span style='font-size:11px;color:#999;'>(含{bl_count}只黑名单已排除)</span>"
-                    pending_html += "</h3>"
-                    pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th><th>状态</th></tr></thead><tbody>"
+                    pending_html = f"<div class='card'><h3>待执行信号 (T+1) <span style='font-size:11px;color:#e65100;'>共{len(pending)}条</span></h3>"
+                    pending_html += "<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>评分</th><th>排名</th></tr></thead><tbody>"
                     for p in pending:
                         sd, sc, score, rank, nm = p
-                        if sc in bl_set:
-                            row_style = 'style=\"opacity:0.4;text-decoration:line-through;\"'
-                            bl_badge = f'<span style=\"background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;\" title=\"黑名单到期:{bl_expiry}\">🚫 已排除</span>'
-                        else:
-                            row_style = ''
-                            bl_badge = '<span style=\"color:#4caf50;font-size:11px;\">✓</span>'
-                        pending_html += f"<tr {row_style}><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td><td>{bl_badge}</td></tr>"
+                        pending_html += f"<tr><td>{sd}</td><td><strong>{sc}</strong></td><td>{nm or '?'}</td><td>{score:.4f}</td><td>#{rank}</td></tr>"
                     pending_html += "</tbody></table></div>"
     except Exception:
         pass
-
-    # 黑名单提示
-    bl_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config', 'blacklist.json')
-    if os.path.exists(bl_file):
-        try:
-            with open(bl_file) as f:
-                bl = json.load(f)
-            bl_codes = set(bl.get('codes', []))
-            if bl_codes:
-                # 查有多少黑名单股票出现在最新信号中
-                with engine.connect() as conn:
-                    latest_sig_date = conn.execute(text("SELECT MAX(signal_date) FROM paper_signals WHERE run_id = :rid"), {"rid": run_id}).fetchone()[0]
-                    if latest_sig_date:
-                        all_sigs = conn.execute(text("SELECT stock_code FROM paper_signals WHERE run_id = :rid AND signal_date = :d"),
-                                                {"rid": run_id, "d": latest_sig_date}).fetchall()
-                        all_set = set(r[0] for r in all_sigs)
-                        bl_in_signal = bl_codes & all_set
-                        if bl_in_signal:
-                            pending_html += f"""<div style='margin-top:8px;padding:8px 12px;background:#fff3e0;border-radius:4px;'>
-                            <strong style='color:#e65100;'>⚠ 黑名单排除 ({len(bl_in_signal)}只)</strong>
-                            <span style='font-size:11px;color:#999;'> | {bl.get('reason','')} | {bl.get('last_updated','')}</span>
-                            <div style='display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;'>"""
-                            for c in sorted(bl_in_signal):
-                                pending_html += f"<span style='background:#ffcdd2;color:#c62828;padding:1px 6px;border-radius:3px;font-size:11px;'>{c}</span>"
-                            pending_html += "</div></div>"
-                        else:
-                            pending_html += f"""<div style='font-size:10px;color:#999;margin-top:2px;'>
-                            📋 黑名单 {len(bl_codes)}只 | {bl.get('reason','')} | {bl.get('last_updated','')}</div>"""
-        except Exception:
-            pass
 
     # 权益曲线 + 基准叠加 + 每日盈亏
     chart_html = ""
@@ -1212,7 +1131,7 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
             # 基准：上证指数归一化
             benchmark_values = []
             try:
-                bench_rows = conn.execute(text(f"""
+                bench_rows = conn.execute(text("""
                     SELECT trade_date, close FROM index_daily WHERE code='000001'
                     AND trade_date BETWEEN :d1 AND :d2 ORDER BY trade_date
                 """), {"d1": eq_rows[0][0], "d2": eq_rows[-1][0]}).fetchall()
@@ -1266,13 +1185,12 @@ async def get_paper_run_detail(run_id: int, account_id: int = 15):
         if pos_codes:
             stock_codes = [r[0] for r in pos_codes]
             qty_map = {r[0]: int(r[1]) for r in pos_codes}
-            code_str = ",".join([f"'{c}'" for c in stock_codes])
             with engine.connect() as conn2:
-                board_rows = conn2.execute(text(
-                f"SELECT cs.stock_code, cb.name FROM concept_stock cs "
-                f"JOIN concept_board cb ON cs.board_code=cb.code "
-                f"WHERE cs.stock_code IN ({code_str})"
-            )).fetchall()
+                board_rows = conn2.execute(text("""
+                    SELECT cs.stock_code, cb.name FROM concept_stock cs
+                    JOIN concept_board cb ON cs.board_code = cb.code
+                    WHERE cs.stock_code = ANY(:codes)
+                """), {"codes": stock_codes}).fetchall()
             # 过滤噪声概念
             NOISE_WORDS = ["沪股通","深股通","融资融券","机构重仓","标准普尔","富时罗素",
                           "MSCI","证金","汇金","社保","QFII","破发","破增发","举牌",
@@ -1438,14 +1356,13 @@ async def get_data_status():
 
 
 @router.post("/paper/create")
-async def create_paper_run(strategy: str = "ML-默认集成", capital: float = 1_000_000,
+async def create_paper_run(strategy: str = "涨停策略", capital: float = 1_000_000,
                            start_date: str = "", end_date: str = ""):
     """创建模拟盘运行记录。需要 strategy_configs 中有对应策略。"""
     from datetime import date
     engine = get_engine()
     try:
         with engine.connect() as conn:
-            # Find strategy version
             row = conn.execute(text("""
                 SELECT sv.id FROM strategy_versions sv
                 JOIN strategy_configs sc ON sv.strategy_id = sc.id
@@ -1455,7 +1372,6 @@ async def create_paper_run(strategy: str = "ML-默认集成", capital: float = 1
                 return HTMLResponse(f"<p style='color:#ef5350;'>未找到策略: {strategy}</p>")
             version_id = row[0]
 
-            # Check existing running paper runs
             existing = conn.execute(text(
                 "SELECT id FROM paper_runs WHERE status = 'running' AND strategy_id = (SELECT id FROM strategy_configs WHERE name = :name)"
             ), {"name": strategy}).fetchone()
@@ -1471,10 +1387,7 @@ async def create_paper_run(strategy: str = "ML-默认集成", capital: float = 1
             """), {"name": strategy, "vid": version_id, "sd": sd, "ed": ed, "cap": capital})
             conn.commit()
 
-            return HTMLResponse(f"<p style='color:#66bb6a;'>模拟盘已创建: {strategy} v1.00, 初始资金 {capital:,.0f}, 起始日 {sd}</p>"
-                               f"<p style='color:#999;font-size:12px;margin-top:8px;'>模拟盘引擎运行方式: "
-                               f"<code>python -c \"from portfolio.paper_engine import PaperEngine; ...\"</code> "
-                               f"或在后台脚本中调用 PaperEngine.run_daily()</p>")
+            return HTMLResponse(f"<p style='color:#66bb6a;'>模拟盘已创建: {strategy} v1.00, 初始资金 {capital:,.0f}, 起始日 {sd}</p>")
     except Exception as e:
         return HTMLResponse(f"<p style='color:#ef5350;'>创建失败: {e}</p>")
 

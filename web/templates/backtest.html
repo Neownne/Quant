@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}回测对比 - Quant Monitor{% endblock %}
+{% block title %}涨停回测 - Quant Monitor{% endblock %}
 {% block content %}
 
 <!-- 策略概览卡片 -->
@@ -20,10 +20,7 @@
                     hx-get="/api/backtest-list" hx-trigger="change"
                     hx-target="#bt-table" hx-swap="innerHTML">
                 <option value="">全部策略</option>
-                <option value="舞">舞 (ML大票)</option>
-                <option value="小市值alpha">小市值alpha (ML小票)</option>
                 <option value="涨停策略">涨停策略 (规则筛选)</option>
-                <option value="大小票平滑分配">大小票平滑分配</option>
             </select>
         </div>
     </div>

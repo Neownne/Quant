@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-"""每日自动化任务 —— 数据同步 + 双模拟盘 + ETF监控。
+"""每日自动化任务 —— 数据同步 + 涨停模拟盘 + ETF监控。
 
 纯 cron 方案，一行命令搞定所有：
   ① 增量同步 stock_daily + index_daily
   ② 涨停 Top-5 模拟盘调仓
-  ③ 大小票 v4.0 模拟盘调仓
-  ④ ETF 三因子信号更新
+  ③ ETF 三因子信号更新
 
 用法:
     python scripts/run_daily_paper_auto.py              # 立即执行
@@ -16,7 +15,7 @@ crontab (每30分钟, 17:00~次日8:30):
     0,30 17-23,0-8 * * * cd /Users/chenwan/Documents/quant && .venv/bin/python scripts/run_daily_paper_auto.py >> logs/cron.log 2>&1
 """
 import sys, os, time, argparse, traceback
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
@@ -107,7 +106,11 @@ def sync_with_fallback(engine, trade_date_str):
         logger.warning(f"主力源失败: {e}")
 
     # 2. 检查覆盖率
-    cnt = pd.read_sql(f"SELECT COUNT(*) FROM stock_daily WHERE trade_date='{trade_date_str}'", engine).iloc[0,0]
+    cnt = pd.read_sql(
+        text("SELECT COUNT(*) FROM stock_daily WHERE trade_date = :d"),
+        engine,
+        params={"d": trade_date_str},
+    ).iloc[0, 0]
     logger.info(f"  主力源后: {cnt} 只")
 
     if cnt >= TARGET_COUNT:
@@ -116,16 +119,25 @@ def sync_with_fallback(engine, trade_date_str):
 
     # 3. 腾讯补漏：对缺失的活跃股用腾讯API拉
     logger.info(f"  不足 {TARGET_COUNT}, 腾讯补漏...")
-    missing = pd.read_sql(f"""
-        SELECT code FROM stock_basic WHERE is_st=FALSE
-        AND code NOT IN (SELECT DISTINCT code FROM stock_daily WHERE trade_date='{trade_date_str}')
-    """, engine)['code'].tolist()
+    missing = pd.read_sql(
+        text("""
+            SELECT code FROM stock_basic WHERE is_st = FALSE
+            AND code NOT IN (SELECT DISTINCT code FROM stock_daily WHERE trade_date = :d)
+        """),
+        engine,
+        params={"d": trade_date_str},
+    )['code'].tolist()
 
     # 只补TOP活跃股
-    active = pd.read_sql("""
-        SELECT code FROM (SELECT code, SUM(amount) as amt FROM stock_daily
-        WHERE trade_date >= CURRENT_DATE - 30 GROUP BY code ORDER BY amt DESC LIMIT 1000) t
-    """, engine)['code'].tolist()
+    active = pd.read_sql(
+        text("""
+            SELECT code FROM (
+                SELECT code, SUM(amount) AS amt FROM stock_daily
+                WHERE trade_date >= CURRENT_DATE - 30 GROUP BY code ORDER BY amt DESC LIMIT 1000
+            ) t
+        """),
+        engine,
+    )['code'].tolist()
     missing = [c for c in missing if c in set(active)]
     logger.info(f"  待补: {len(missing)} 只")
 
@@ -144,7 +156,11 @@ def sync_with_fallback(engine, trade_date_str):
     if all_data:
         result = pd.concat(all_data, ignore_index=True)
         upsert_df(result, 'stock_daily', engine)
-        cnt2 = pd.read_sql(f"SELECT COUNT(*) FROM stock_daily WHERE trade_date='{trade_date_str}'", engine).iloc[0,0]
+        cnt2 = pd.read_sql(
+            text("SELECT COUNT(*) FROM stock_daily WHERE trade_date = :d"),
+            engine,
+            params={"d": trade_date_str},
+        ).iloc[0, 0]
         logger.success(f"补完后: {cnt2} 只")
         return cnt2
 
@@ -156,7 +172,7 @@ def sync_index(engine):
     import akshare as ak
     from data.db import upsert_df
     idx_codes = ['000001','000300','000852','399001','399006','000688','000905']
-    latest = pd.read_sql("SELECT MAX(trade_date) FROM index_daily", engine).iloc[0, 0]
+    latest = pd.read_sql(text("SELECT MAX(trade_date) FROM index_daily"), engine).iloc[0, 0]
     all_data = []
     for code in idx_codes:
         try:
@@ -181,38 +197,29 @@ def sync_index(engine):
 
 def get_latest_trade_date(engine):
     """获取最近的交易日"""
-    row = pd.read_sql("SELECT MAX(trade_date) FROM stock_daily", engine).iloc[0, 0]
+    row = pd.read_sql(text("SELECT MAX(trade_date) FROM stock_daily"), engine).iloc[0, 0]
     return str(row) if row else None
 
 
-def run_paper_trading(trade_date, strategy='all', dry_run=False):
-    """跑模拟盘。strategy: 'lu'/'switch'/'all'"""
+def run_paper_trading(trade_date, dry_run=False):
+    """跑涨停模拟盘。"""
     import subprocess
-    scripts = []
-    if strategy in ('lu', 'all'):
-        scripts.append(('涨停Top-5', 'scripts/run_daily_paper_lu.py'))
-    if strategy in ('switch', 'all'):
-        scripts.append(('大小票v4.0', 'scripts/run_daily_paper_switch.py'))
-    if strategy in ('ml', 'all'):
-        scripts.append(('涨停ML-GBRT', 'scripts/run_daily_paper_ml.py'))
-
-    for name, script in scripts:
-        cmd = [sys.executable, script, '--date', trade_date, '--no-sync']
-        if dry_run: cmd.append('--dry-run')
-        logger.info(f"--- {name} ---")
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        for line in (r.stdout + r.stderr).split('\n'):
-            line = line.strip()
-            if any(kw in line for kw in ['交易日', '筛选结果', '执行完成', '估值更新',
-                                           '清仓', '弱势', '强势', 'CSI1000',
-                                           '涨停侧', '小票侧', '执行:', '估值:']):
-                logger.info(f"  {line}")
-        if r.returncode != 0:
-            logger.error(f"{name} 执行失败: {r.stderr[-300:]}")
+    cmd = [sys.executable, 'scripts/run_daily_paper_lu.py', '--date', trade_date, '--no-sync']
+    if dry_run:
+        cmd.append('--dry-run')
+    logger.info("--- 涨停Top-5 ---")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    for line in (r.stdout + r.stderr).split('\n'):
+        line = line.strip()
+        if any(kw in line for kw in ['交易日', '筛选结果', '执行完成', '估值更新',
+                                       '止损', 'CSV导出']):
+            logger.info(f"  {line}")
+    if r.returncode != 0:
+        logger.error(f"涨停Top-5 执行失败: {r.stderr[-300:]}")
 
 
-def sync_and_trade(engine, strategy='all', dry_run=False):
-    """完整流程：同步 → 模拟盘"""
+def sync_and_trade(engine, dry_run=False):
+    """完整流程：同步 → 模拟盘 → ETF监控"""
     print(f"\n{'='*60}")
     print(f"  自动模拟盘 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
@@ -230,13 +237,11 @@ def sync_and_trade(engine, strategy='all', dry_run=False):
 
     today_str = date.today().strftime('%Y-%m-%d')
     if trade_date < today_str:
-        # 今天的数据还没到，拉最新可用的
         logger.info(f"最新数据: {trade_date}, 今天 {today_str} 尚无数据")
 
     n_stocks = sync_with_fallback(engine, today_str)
 
     if n_stocks < TARGET_COUNT:
-        # 数据不全，尝试补拉最近可用的
         logger.warning(f"今天数据不足({n_stocks}/{TARGET_COUNT})，尝试补拉 {trade_date}")
         n2 = sync_with_fallback(engine, trade_date)
         if n2 >= TARGET_COUNT:
@@ -247,15 +252,14 @@ def sync_and_trade(engine, strategy='all', dry_run=False):
         logger.info(f"将在 {RETRY_INTERVAL//60} 分钟后重试...")
         return False
 
-    # 同步完成后，重新获取最新的交易日期（确保用最新数据跑模拟盘）
     effective_date = get_latest_trade_date(engine)
     if not effective_date:
         logger.error("同步后无法确定最新交易日")
         return False
 
-    # 3. 跑模拟盘
-    logger.info(f"[3/3] 模拟盘 (日期: {effective_date})...")
-    run_paper_trading(effective_date, strategy=strategy, dry_run=dry_run)
+    # 3. 跑涨停模拟盘
+    logger.info(f"[3/4] 涨停模拟盘 (日期: {effective_date})...")
+    run_paper_trading(effective_date, dry_run=dry_run)
 
     # 4. ETF监控
     logger.info("[4/4] ETF监控...")
@@ -271,12 +275,18 @@ def show_status(engine):
     """显示模拟盘状态"""
     try:
         pnl = pd.read_sql(
-            "SELECT trade_date, total_value, daily_return, drawdown "
-            "FROM paper_daily_pnl WHERE account_id=1 ORDER BY trade_date DESC LIMIT 5", engine)
+            text("SELECT trade_date, total_value, daily_return, drawdown "
+                 "FROM paper_daily_pnl WHERE account_id=1 ORDER BY trade_date DESC LIMIT 5"),
+            engine,
+        )
         pos = pd.read_sql(
-            "SELECT stock_code, entry_date FROM paper_positions "
-            "WHERE run_id=1 AND exit_date IS NULL", engine)
-        cash = pd.read_sql("SELECT cash FROM paper_account WHERE id=1", engine).iloc[0,0]
+            text("SELECT stock_code, entry_date FROM paper_positions "
+                 "WHERE run_id=1 AND exit_date IS NULL"),
+            engine,
+        )
+        cash = pd.read_sql(
+            text("SELECT cash FROM paper_account WHERE id=1"), engine
+        ).iloc[0, 0]
 
         print(f"\n  {'─'*40}")
         print(f"  模拟盘状态")
@@ -294,18 +304,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--strategy", type=str, default="all",
-                        choices=["lu", "switch", "ml", "all"], help="策略选择")
+                        choices=["lu", "all"], help="策略选择（目前仅支持涨停）")
     args = parser.parse_args()
 
     engine = get_engine()
 
+    if args.strategy != "all":
+        logger.warning(f"--strategy={args.strategy} 被忽略，当前仅支持涨停策略")
+
     # 单次执行 + 内置重试
-    success = sync_and_trade(engine, strategy=args.strategy, dry_run=args.dry_run)
+    success = sync_and_trade(engine, dry_run=args.dry_run)
     if not success and not args.dry_run:
         for attempt in range(1, MAX_RETRIES + 1):
             logger.info(f"重试 {attempt}/{MAX_RETRIES}，等待 {RETRY_INTERVAL//60} 分钟...")
             time.sleep(RETRY_INTERVAL)
-            success = sync_and_trade(engine, strategy=args.strategy, dry_run=False)
+            success = sync_and_trade(engine, dry_run=False)
             if success:
                 break
 
