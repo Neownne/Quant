@@ -84,6 +84,10 @@ class LuStrategy(bt.Strategy):
         self._had_signal_today = True
         targets = set(str(s.code).zfill(6) for _, s in sigs.iterrows())
 
+        # 手工跟踪（贯穿卖出→买入→持仓，统一口径）
+        self._running_cash = self.broker.getcash()
+        self._running_total = self.broker.getvalue()
+
         # ── 止损（支持固定止损 / 移动止盈）──
         stopped_out = set()
         stop_proceeds = 0.0
@@ -147,9 +151,9 @@ class LuStrategy(bt.Strategy):
                 if self.p.cooling_days > 0:
                     self._recently_sold[d._name] = pd.Timestamp(self.datas[0].datetime.date(0))
 
-        # 手工显示值：broker 在 coc 下不更新，买入/持仓行统一用此值
-        display_total = self.broker.getvalue()  # broker 已含所有持仓市值（coc 下买卖都次日结算）
-        available_cash = self.broker.getcash() + sell_proceeds
+        # 统一口径：_running_* 已累计卖出回款，贯穿卖出→买入→持仓
+        display_total = self._running_total
+        available_cash = self._running_cash
 
         # ── 金字塔加仓（盈利>阈值时追加现有仓位）──
         if self.p.pyramid_threshold > 0:
@@ -380,11 +384,15 @@ class LuStrategy(bt.Strategy):
         entry_qty = entry.get("quantity", size)
         today = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
         pnl_pct = round((exit_price / entry_px - 1) * 100, 2) if entry_px > 0 else 0
-        total = round(self.broker.getvalue(), 2)
+        # 手工跟踪：卖出回款到账，总资产只扣交易成本
+        sell_proceeds_this = size * exit_price * (1 - TradingConfig.SLIPPAGE - TradingConfig.COMMISSION - TradingConfig.STAMP_DUTY)
+        self._running_cash += sell_proceeds_this
+        self._running_total -= (size * exit_price - sell_proceeds_this)  # 只扣交易成本
         self._trade_log.append({
             "日期": today, "操作": f"卖出({reason})", "股票代码": code, "股票名称": "",
             "入场价": round(entry_px, 2), "当前价/出场价": round(exit_price, 2),
-            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": entry.get("entry_date", ""), "总资产": total, "当前现金": round(self.broker.getcash(), 2),
+            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": entry.get("entry_date", ""),
+            "总资产": round(self._running_total, 2), "当前现金": round(self._running_cash, 2),
         })
 
     def _confirm_settled_buys(self):
