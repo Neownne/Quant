@@ -239,6 +239,7 @@ class LuStrategy(bt.Strategy):
                 if sz <= 0:
                     self._today_skip_reasons[code] = "资金不足(硬限)"
                     continue
+            if sz <= 0:
                 self._today_skip_reasons[code] = f"资金不足(qty=0)"
                 continue
             self.buy(data=d, size=sz)
