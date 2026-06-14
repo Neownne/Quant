@@ -7,11 +7,12 @@
 """
 from __future__ import annotations
 
-import os, sys, time, signal, argparse
+import os, sys, time, signal, argparse, json
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from loguru import logger
+from sqlalchemy import text
 
 from lab.variant import StrategyVariant
 from lab.runner import LabRunner
@@ -110,7 +111,52 @@ def run_forever(args):
             except Exception as e:
                 logger.warning(f"lab_experiments 写入失败: {e}")
 
-        # 5. 如果有被采纳的变体，下次搜索可以围绕它们的参数方向
+        # 5. ML 因子优化（每5轮跑一次，全量88因子耗时较长）
+        if round_num % 5 == 0 and not _stop:
+            logger.info("ML 因子优化...")
+            try:
+                from lab.ml_runner import load_data, run_factor_pipeline
+                from data.db import get_engine as _eng
+                from factors import ALL_FACTORS
+
+                eng2 = _eng()
+                daily, extra_data = load_data(eng2, start=args.start,
+                                              end=args.end or date.today().strftime("%Y-%m-%d"))
+                eng2.dispose()
+
+                ml_result = run_factor_pipeline(
+                    daily, extra_data,
+                    run_name=f"ml_r{round_num}_{date.today().strftime('%Y%m%d')}",
+                    factor_names=list(ALL_FACTORS.keys()),
+                    industry_neutralize=True,
+                )
+                logger.info(f"  ML: {ml_result.n_factors_total}因子 → "
+                            f"IC通过{ml_result.n_factors_passed_ic} → "
+                            f"正交保留{ml_result.n_factors_selected}")
+                logger.info(f"  三窗口Sharpe: train={ml_result.train_sharpe:.2f} "
+                            f"val={ml_result.val_sharpe:.2f} test={ml_result.test_sharpe:.2f}")
+                logger.info(f"  判定: {ml_result.verdict}")
+
+                # 保存结果到 DB
+                if ml_result.selected_factors:
+                    try:
+                        eng3 = _eng()
+                        with eng3.begin() as conn:
+                            conn.execute(text("""
+                                INSERT INTO lab_experiments (variant_name, composite_score, verdict, variant_params_json)
+                                VALUES (:vn, :sc, :ve, :pj)
+                            """), {
+                                "vn": ml_result.run_name,
+                                "sc": round(ml_result.test_sharpe, 4),
+                                "ve": ml_result.verdict,
+                                "pj": json.dumps(ml_result.to_dict(), ensure_ascii=False),
+                            })
+                        eng3.dispose()
+                    except Exception as e:
+                        logger.warning(f"ML结果写入DB失败: {e}")
+            except Exception as e:
+                logger.warning(f"ML因子优化失败: {e}")
+
         if _stop:
             break
         logger.info(f"第 {round_num} 轮完成，等待下一轮...\n")
