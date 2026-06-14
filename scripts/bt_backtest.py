@@ -464,6 +464,10 @@ def run_bt(args):
     # Cheat-On-Close：--exec-close 时订单在当日收盘价成交（模拟 14:50 行情→收盘执行）
     if args.exec_close:
         cerebro.broker.set_coc(True)
+        # coc 下 broker 现金在 next() 期间不更新（卖出回款 T+1 才到账）
+        # 允许短期负现金：当天卖出→买入的资金链是真实的（T+1 交割制），
+        # backtrader 在 bar 收盘结算时会自动轧平
+        cerebro.broker.set_shortcash(True)
 
     # 信号
     sdf = pd.read_csv(args.signals)
