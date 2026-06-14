@@ -42,57 +42,291 @@ class LuStrategy(bt.Strategy):
         df["date"] = pd.to_datetime(df["date"])
         self.signals = {d: g for d, g in df.groupby("date")}
         self.sig_dates = set(self.signals.keys())
+        self._trade_log = []       # 自记录交割单
+        self._open_trades = {}     # {code: {entry_date, entry_price, quantity}}（由 _record_holdings 同步）
+        self._bought_today = {}    # 本轮买入 {code: price}
+        self._sold_today = {}      # 本轮卖出 {code: (price, reason)}
+        self._today_signals = {}   # 今日信号 {code: close}
+        self._today_skip_reasons = {}  # 跳过的候选 {code: reason}
+        self._last_signal_date = None  # 上一个有信号的交易日
+
+    def prenext(self):
+        """委托给 next()，避免因部分 feed 无数据而阻塞整个回测。"""
+        self.next()
 
     def next(self):
+        # 确认上日挂单成交（coc 在 bar 之间结算）
+        self._confirm_settled_buys()
+
         today = pd.Timestamp(self.datas[0].datetime.date(0))
         if today not in self.sig_dates:
+            # 非信号日只同步持仓快照
+            self._record_holdings()
+            self._validate()
             return
 
         sigs = self.signals[today]
-        targets = set(str(s.code) for _, s in sigs.iterrows())
+        self._last_signal_date = today
+        targets = set(str(s.code).zfill(6) for _, s in sigs.iterrows())
 
-        # ── 止损 ──
+        # ── 止损（T 日收盘价判断，含跌停检查）──
+        stopped_out = set()
+        stop_proceeds = 0.0
+        NET_SELL = 1.0 - TradingConfig.SLIPPAGE - TradingConfig.COMMISSION - TradingConfig.STAMP_DUTY
         for d in self.datas:
+            if len(d) == 0:
+                continue
             pos = self.getposition(d)
             if pos.size <= 0 or d.close[0] >= pos.price * (1 - self.p.exit_stop):
                 continue
+            # 跌停检查（与调仓卖出一致）
+            prev_c = d.close[-1] if len(d) > 1 else d.close[0]
+            if prev_c > 0 and TradingConfig.is_at_limit_down(d.close[0], prev_c, d._name):
+                continue  # 跌停卖不掉，顺延
+            # 记录止损出场 + 累计回款
+            self._record_exit(d._name, d.close[0], pos.size, pos.price, "止损")
+            self._sold_today[d._name] = (d.close[0], "止损")
+            stop_proceeds += pos.size * d.close[0] * NET_SELL
             self.close(data=d)
+            stopped_out.add(d._name)
 
         # ── 调仓 ──
-        held = {d._name for d in self.datas if self.getposition(d).size > 0}
-        to_sell = held - targets
+        held = {d._name for d in self.datas if len(d) > 0 and self.getposition(d).size > 0}
+        to_sell = held - targets - stopped_out  # 排除已止损的
 
+        # 计算同日卖出预期回款（含止损 + 调仓）
+        sell_proceeds = stop_proceeds
+        sold_codes = stopped_out.copy()  # 实际已卖出（含止损）
         for d in self.datas:
+            if len(d) == 0:
+                continue
             if d._name in to_sell:
                 prev_c = d.close[-1] if len(d) > 1 else d.close[0]
-                if prev_c > 0 and d.close[0] / prev_c - 1 <= TradingConfig.LIMIT_DOWN_PCT:
+                if prev_c > 0 and TradingConfig.is_at_limit_down(d.close[0], prev_c, d._name):
                     continue  # 跌停卖不掉
+                pos = self.getposition(d)
+                if pos.size > 0:
+                    sell_proceeds += pos.size * d.close[0] * NET_SELL
+                self._record_exit(d._name, d.close[0], pos.size if pos.size > 0 else 0, pos.price, "调仓")
+                self._sold_today[d._name] = (d.close[0], "调仓")
                 self.close(data=d)
+                sold_codes.add(d._name)
 
-        portfolio_value = self.broker.getvalue()
-        cash = self.broker.getcash()
-        to_buy = targets - held
-        n = len(to_buy)
-        if n == 0:
-            return
+        portfolio_value = self.broker.getvalue()  # 已含所有持仓市值
+        available_cash = self.broker.getcash() + sell_proceeds
 
+        available_feeds = {d._name for d in self.datas if len(d) > 0 and d._name != "bench"}
+        # 从排名列表中按序买入，跳过涨停的，凑满 top_n 只
         target_ps = portfolio_value / max(self.p.top_n, 1)
-        per_stock = min(cash / n, target_ps * 1.5)
+        max_per_stock = target_ps * 1.5
 
-        for d in self.datas:
-            code = d._name
-            if code not in to_buy:
+        # 记录今日信号
+        self._today_signals = {str(s.code).zfill(6): s.close for _, s in sigs.iterrows()}
+        self._today_skip_reasons = {}
+
+        for _, s in sigs.iterrows():
+            code = str(s.code).zfill(6)
+            # 跳过已持有或本轮已卖出（防 T+0）
+            if code in self._open_trades or code in self._sold_today:
+                self._today_skip_reasons[code] = "已持有"
                 continue
-            px = d.close[0] if self.p.exec_close else d.open[0]
-            if self.p.exec_close:
-                prev_c = d.close[-1] if len(d) > 1 else px
-                if prev_c > 0 and px / prev_c - 1 >= TradingConfig.LIMIT_UP_PCT:
-                    continue  # 涨停买不到
+            if code not in available_feeds:
+                self._today_skip_reasons[code] = "无数据"
+                continue
+            d = next((x for x in self.datas if x._name == code), None)
+            if d is None or len(d) == 0:
+                self._today_skip_reasons[code] = "无数据"
+                continue
+            px = d.close[0]
+            prev_c = d.close[-1] if len(d) > 1 else px
+            if prev_c > 0 and TradingConfig.is_at_limit_up(px, prev_c, code):
+                self._today_skip_reasons[code] = "涨停"
+                continue
+
+            slots_left = self.p.top_n - len(self._open_trades)
+            if slots_left <= 0:
+                self._today_skip_reasons[code] = "仓位已满"
+                break
+            est_cash_per_stock = available_cash / max(slots_left, 1)
+            per_stock = min(est_cash_per_stock, max_per_stock)
             sz = int(per_stock / px / 100) * 100
             if sz <= 0:
+                self._today_skip_reasons[code] = f"资金不足(qty=0)"
                 continue
             self.buy(data=d, size=sz)
+            self._bought_today[code] = px
+            # 立即记入 _open_trades + 买入日志
+            today_str = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
+            self._open_trades[code] = {"entry_date": today_str, "entry_price": px, "quantity": sz}
+            self._trade_log.append({
+                "日期": today_str, "操作": "买入", "股票代码": code, "股票名称": "",
+                "入场价": round(px, 2), "当前价/出场价": "", "盈亏%": "",
+                "股数": sz, "入场日期": "", "总资产": round(self.broker.getvalue(), 2),
+            })
+            available_cash -= sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
 
+        # 日终持仓快照 + 校验
+        self._record_holdings()
+        self._validate()
+
+    def _validate(self):
+        """日终全面校验：资金 / 持仓 / 买卖逻辑 / 止损 / 顺延 / 信号。"""
+        today = self.datas[0].datetime.date(0)
+        cash = self.broker.getcash()
+
+        # ── 1. 资金 ──
+        assert cash >= -0.01, f"[{today}] 现金为负: {cash:.2f}"
+
+        bt_pv = 0.0
+        bt_held = {}
+        for d in self.datas:
+            if len(d) == 0: continue
+            sz = float(self.getposition(d).size)
+            if sz > 0:
+                bt_pv += sz * d.close[0]
+                bt_held[d._name] = (sz, self.getposition(d).price, d.close[0])
+        nav = cash + bt_pv
+        broker_nav = self.broker.getvalue()
+        drift = abs(nav - broker_nav) / max(broker_nav, 1)
+        assert drift < 0.01, \
+            f"[{today}] 总资产不匹配: nav={nav:.0f} broker={broker_nav:.0f} drift={drift:.2%}"
+
+        # ── 2. 持仓上限 ──
+        assert len(self._open_trades) <= self.p.top_n, \
+            f"[{today}] 持仓 {len(self._open_trades)} > top_n={self.p.top_n}"
+
+        # ── 3. 买入必须来自当日信号 ──
+        for code in self._bought_today:
+            assert code in self._today_signals, \
+                f"[{today}] 买入 {code} 不在当日信号中! signals={list(self._today_signals.keys())[:10]}"
+
+        # ── 4. 买入不能是涨停板 ──
+        for code, px in self._bought_today.items():
+            d = next((x for x in self.datas if x._name == code), None)
+            if d is None or len(d) < 2: continue
+            prev_c = d.close[-1]
+            assert not TradingConfig.is_at_limit_up(px, prev_c, code), \
+                f"[{today}] 买入 {code} 涨停封板! close={px} prev={prev_c}"
+
+        # ── 5. 卖出不能是跌停板 ──
+        for code, (px, reason) in self._sold_today.items():
+            d = next((x for x in self.datas if x._name == code), None)
+            if d is None or len(d) < 2: continue
+            prev_c = d.close[-1]
+            assert not TradingConfig.is_at_limit_down(px, prev_c, code), \
+                f"[{today}] 卖出 {code}({reason}) 跌停封板! close={px} prev={prev_c}"
+
+        # ── 6. T+0 禁止：同日不能又买又卖同一只 ──
+        t0 = set(self._bought_today) & set(self._sold_today)
+        assert len(t0) == 0, f"[{today}] T+0 交易: {t0}"
+
+        # ── 7. 止损：持仓收盘价 < 入场价*0.92 必须已触发卖出 ──
+        if today in self.sig_dates:
+            for code, entry in self._open_trades.items():
+                d = next((x for x in self.datas if x._name == code), None)
+                if d is None or len(d) == 0: continue
+                close_p = d.close[0]
+                stop_line = entry["entry_price"] * (1 - self.p.exit_stop)
+                if close_p < stop_line and code not in self._sold_today:
+                    # 检查是否跌停封死（无法卖）
+                    prev_c = d.close[-1] if len(d) > 1 else close_p
+                    if not TradingConfig.is_at_limit_down(close_p, prev_c, code):
+                        assert False, \
+                            f"[{today}] {code} 止损未触发! close={close_p:.2f} entry={entry['entry_price']:.2f} stop={stop_line:.2f}"
+
+        # ── 8. 当持有不到 top_n 且有未涨停候选时，必须继续买入 ──
+        if today in self.sig_dates and len(self._open_trades) < self.p.top_n:
+            remaining = self.p.top_n - len(self._open_trades)
+            skipped_buyable = 0
+            for _, s in self.signals[today].iterrows():
+                code = str(s.code).zfill(6)
+                if code in self._open_trades: continue
+                reason = self._today_skip_reasons.get(code, "")
+                if reason in ("仓位已满",): continue  # 正常的停止原因
+                if reason in ("涨停",): continue  # 涨停不能买
+                # 还能买但跳过了
+                skipped_buyable += 1
+            # 只告警不中断：可能因为资金不足
+            if skipped_buyable > 0:
+                logger.debug(f"[{today}] 尚有 {remaining} 个空位但跳过了 {skipped_buyable} 个可买候选")
+
+        # ── 9. 持仓股不在信号也不在卖出 → 可能跌停封死或遗漏 ──
+        if today in self.sig_dates:
+            targets = set(str(s.code).zfill(6) for _, s in self.signals[today].iterrows())
+            for code in self._open_trades:
+                if code not in targets and code not in self._sold_today:
+                    # 检查是否因跌停无法卖出
+                    d = next((x for x in self.datas if x._name == code), None)
+                    is_ld = False
+                    if d and len(d) >= 2:
+                        is_ld = TradingConfig.is_at_limit_down(d.close[0], d.close[-1], code)
+                    if not is_ld:
+                        logger.warning(f"[{today}] {code} 不在信号也不在卖出列表，疑似调仓遗漏")
+
+        # ── 10. 卖出必须有原因（止损或调仓）──
+        for code, (_, reason) in self._sold_today.items():
+            assert reason in ("止损", "调仓"), \
+                f"[{today}] {code} 卖出原因异常: {reason}"
+
+        # 清理当日追踪
+        self._bought_today.clear()
+        self._sold_today.clear()
+        self._today_signals.clear()
+        self._today_skip_reasons.clear()
+        """买入时暂不记录——等 _record_holdings 确认 backtrader 有仓位再说。"""
+        pass
+
+    def _record_exit(self, code, exit_price, size, entry_price, reason):
+        """记录卖出并从 _open_trades 移除。"""
+        entry = self._open_trades.pop(code, {})
+        entry_px = entry.get("entry_price", entry_price)
+        entry_qty = entry.get("quantity", size)
+        today = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
+        pnl_pct = round((exit_price / entry_px - 1) * 100, 2) if entry_px > 0 else 0
+        total = round(self.broker.getvalue(), 2)
+        self._trade_log.append({
+            "日期": today, "操作": f"卖出({reason})", "股票代码": code, "股票名称": "",
+            "入场价": round(entry_px, 2), "当前价/出场价": round(exit_price, 2),
+            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": "", "总资产": total,
+        })
+
+    def _confirm_settled_buys(self):
+        """用 backtrader 实际成交价更新 _open_trades 中的估算入场价。"""
+        for d in self.datas:
+            if len(d) == 0: continue
+            pos = self.getposition(d)
+            if pos.size > 0 and pos.price > 0 and d._name in self._open_trades:
+                # 更新为 backtrader 的实际均价（含滑点）
+                self._open_trades[d._name]["entry_price"] = pos.price
+                self._open_trades[d._name]["quantity"] = int(pos.size)
+
+    def _record_holdings(self):
+        """记录当日持仓快照。同步 _open_trades 与 backtrader（清理已结算卖出）。"""
+        today = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
+        total = round(self.broker.getvalue(), 2)
+
+        # 清理 backtrader 已结算的卖出
+        bt_held = set()
+        for d in self.datas:
+            if len(d) == 0: continue
+            pos = self.getposition(d)
+            if pos.size > 0 and pos.price > 0:
+                bt_held.add(d._name)
+        for code in list(self._open_trades.keys()):
+            if code not in bt_held and code not in self._bought_today:
+                del self._open_trades[code]
+
+        # 记录所有持仓
+        for code, entry in self._open_trades.items():
+            d = next((x for x in self.datas if x._name == code), None)
+            if d is None or len(d) == 0: continue
+            cur_price = d.close[0]
+            pnl_pct = round((cur_price / entry["entry_price"] - 1) * 100, 2) if entry["entry_price"] > 0 else 0
+            self._trade_log.append({
+                "日期": today, "操作": "持仓", "股票代码": code, "股票名称": "",
+                "入场价": round(entry["entry_price"], 2), "当前价/出场价": round(cur_price, 2),
+                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "", "总资产": total,
+            })
 
 # ── 权益曲线 Observer ──
 class EquityObserver(bt.Observer):
@@ -102,6 +336,9 @@ class EquityObserver(bt.Observer):
 
     def __init__(self):
         self._history = []
+
+    def prenext(self):
+        self.next()
 
     def next(self):
         dt = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
@@ -123,10 +360,14 @@ def run_bt(args):
         CNStockComm(commission=tc.COMMISSION, stamp_duty=tc.STAMP_DUTY))
     cerebro.broker.set_slippage_perc(tc.SLIPPAGE)
 
+    # Cheat-On-Close：--exec-close 时订单在当日收盘价成交（模拟 14:50 行情→收盘执行）
+    if args.exec_close:
+        cerebro.broker.set_coc(True)
+
     # 信号
     sdf = pd.read_csv(args.signals)
     sdf["date"] = pd.to_datetime(sdf["date"])
-    codes = [str(int(c)) for c in sorted(sdf["code"].unique())]
+    codes = [str(c).zfill(6) for c in sorted(sdf["code"].unique())]
     start_dt = pd.Timestamp(args.start)
     end_dt = pd.Timestamp(args.end) if args.end else sdf["date"].max()
 
@@ -172,17 +413,31 @@ def run_bt(args):
     fv = cerebro.broker.getvalue()
     ret = (fv - args.cash) / args.cash
 
+    # ── 权益曲线提取（先于终端输出，供自行计算 MDD）──
+    obs = [o for o in strat.getobservers() if hasattr(o, '_history')][0]
+    equity = obs._history
+
+    # 自行计算最大回撤（峰-谷算法），比 backtrader 内置 analyzer 更可靠
+    equity_values = [e["value"] for e in equity]
+    mdd = 0.0
+    if equity_values:
+        peak = equity_values[0]
+        for v in equity_values:
+            if v > peak:
+                peak = v
+            dd_pct = (peak - v) / peak if peak > 0 else 0.0
+            mdd = max(mdd, dd_pct)
+
     # ── 终端输出 ──
     print(f"\n{'='*60}")
     print(f"  backtrader 涨停策略 Top-{args.top_n}")
     print(f"  本金 {args.cash:,.0f} | 终值 {fv:,.0f} | 收益 {ret:+.1%}")
     print(f"  成本: 买{tc.COMMISSION+tc.SLIPPAGE:.4%} 卖{tc.COMMISSION+tc.STAMP_DUTY+tc.SLIPPAGE:.4%}")
+    print(f"  执行: {'收盘价 (coc)' if args.exec_close else 'T+1开盘价'}")
     sh = strat.analyzers.sharpe.get_analysis()
     if sh and sh.get("sharperatio") is not None:
         print(f"  Sharpe: {sh['sharperatio']:.2f}")
-    dd = strat.analyzers.dd.get_analysis()
-    if dd and "max" in dd:
-        print(f"  最大回撤: {dd['max']['drawdown']:.1%}")
+    print(f"  最大回撤: {mdd:.1%}")
     ann = strat.analyzers.ann.get_analysis()
     if ann:
         print("  年度:")
@@ -196,8 +451,6 @@ def run_bt(args):
     print(f"{'='*60}\n")
 
     # ── 权益曲线导出 ──
-    obs = [o for o in strat.getobservers() if hasattr(o, '_history')][0]
-    equity = obs._history
     os.makedirs("data/backtest_trades", exist_ok=True)
     equity_path = f"data/backtest_trades/equity_top{args.top_n}.json"
     with open(equity_path, "w") as f:
@@ -210,27 +463,59 @@ def run_bt(args):
     logger.info(f"权益曲线: {equity_path} ({len(equity)}天)")
 
     # ── 交易明细导出 ──
+    # 加载股票名称
+    name_map = {}
+    try:
+        sdf_names = pd.read_csv(args.signals)
+        name_map = dict(zip(sdf_names["code"].astype(str).str.zfill(6), sdf_names["name"]))
+    except Exception:
+        pass
+
     trades_path = f"data/backtest_trades/trades_top{args.top_n}.csv"
+    trade_log = getattr(strat, "_trade_log", [])
     with open(trades_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["入场日期", "出场日期", "股票代码", "入场价", "出场价", "盈亏%", "盈亏额", "出场原因"])
-        # strat._trades: {data_name: [Trade, ...]}
-        for data_key, trade_list in getattr(strat, "_trades", {}).items():
-            for tk in trade_list:
-                if not hasattr(tk, "history") or len(tk.history) < 2:
-                    continue
-                e = tk.history[0].status
-                x = tk.history[-1].status
-                ep, xp = e.price, x.price
-                pnl_pct = (xp - ep) / ep if ep else 0
-                w.writerow([
-                    str(e.dt)[:10] if e.dt else "",
-                    str(x.dt)[:10] if x.dt else "",
-                    str(data_key), round(ep, 2), round(xp, 2),
-                    round(pnl_pct * 100, 2), round(tk.pnl, 2), ""])
-    logger.info(f"交易明细: {trades_path}")
+        w.writerow(["日期", "操作", "股票代码", "股票名称", "入场价", "当前价/出场价", "盈亏%", "股数", "入场日期", "总资产"])
+        # 按日期排序，同一天内买入→持仓→卖出
+        def _sort_key(t):
+            op = t["操作"]
+            if op.startswith("卖出"): order = 0   # 先卖
+            elif op == "买入": order = 1           # 后买
+            else: order = 2                        # 持仓
+            return (t["日期"], order)
+        trade_log.sort(key=_sort_key)
+        for t in trade_log:
+            code = str(t["股票代码"]).zfill(6)
+            t["股票名称"] = name_map.get(code, "")
+            w.writerow([t["日期"], t["操作"], code, t["股票名称"],
+                        t["入场价"], t["当前价/出场价"],
+                        t["盈亏%"], t["股数"], t["入场日期"], t["总资产"]])
+    logger.info(f"交易明细: {trades_path} ({len(trade_log)} 笔)")
 
-    # ── DB 写入（略，backtrader 结果通过 JSON 文件服务）──
+    # ── DB 写入 backtest_results（Web 展示用）──
+    eq_dict = {e["date"]: e["value"] for e in equity}
+    metrics = {
+        "start": args.start, "end": str(end_dt.date()), "top_n": args.top_n,
+        "cash": args.cash, "final_value": round(fv, 2), "return": round(ret, 6),
+        "sharpe": round(sh["sharperatio"], 2) if sh and sh.get("sharperatio") is not None else None,
+        "max_drawdown": round(mdd, 4), "trades": n_tr, "exec_mode": "close" if args.exec_close else "T+1_open",
+    }
+    dr_dict = {}  # daily returns can be computed from equity if needed
+    try:
+        eng = get_engine()
+        with eng.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO backtest_results (version_id, start_date, end_date,
+                    quality, metrics_json, equity_curve_json, daily_returns_json)
+                VALUES (:v, :s, :e, 'valid', :m, :eq, :dr)
+            """), {"v": 49, "s": args.start, "e": str(end_dt.date()),
+                   "m": json.dumps(metrics, ensure_ascii=False),
+                   "eq": json.dumps(eq_dict), "dr": json.dumps(dr_dict)})
+        eng.dispose()
+        logger.info("回测结果已写入 backtest_results")
+    except Exception as e:
+        logger.warning(f"DB 写入失败（Web 无法展示本次回测）: {e}")
+
     return {"final_value": fv, "return": ret, "equity": equity}
 
 

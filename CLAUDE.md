@@ -14,27 +14,24 @@
 ## 快速参考
 
 ```bash
+# 一键回测管线（信号生成 → 回测 → CSV → Web）
+python scripts/run_backtest_pipeline.py --start 2025-01-01 --top-n 5
+
+# 生成涨停信号（供回测用，市值数据已固化到 DB，无需 --mcap-proxy）
+python scripts/gen_signals.py --start 2020-01-01 --end 2026-06-12 --top-n 5
+
+# 涨停策略回测
+python scripts/bt_backtest.py --start 2025-01-01 --end 2026-06-12 --top-n 5 \
+    --signals data/signals/bt_signals.csv --exec-close
+
 # 每日自动化（数据同步 + 涨停模拟盘 + ETF监控）
 python scripts/run_daily_paper_auto.py
 
 # 单独跑涨停模拟盘
 python scripts/run_daily_paper_lu.py --date 2026-06-12 --no-sync
 
-# 生成涨停信号（供回测用）
-python scripts/gen_signals.py --start 2025-01-01 --end 2026-06-12 --top-n 5
-
-# 涨停策略回测（默认收盘价执行，为实时数据接入做准备）
-python scripts/bt_backtest.py --start 2025-01-01 --end 2026-06-12 --top-n 5 \
-    --signals data/signals/bt_signals.csv --exec-close
-
-# 数据同步
-python -c "
-from data.db import get_engine
-from data.sync import sync_stock_daily, sync_daily_extra
-e = get_engine()
-sync_stock_daily(e, start_date='2026-06-12', workers=8)
-sync_daily_extra(e, start_date='2026-06-12', workers=8)
-"
+# 数据质量检查
+python scripts/check_data_integrity.py
 
 # Web
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
@@ -46,6 +43,14 @@ python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
 pg_ctl -D /opt/homebrew/var/postgresql@18 start
 pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 ```
+
+## 数据覆盖
+
+| 数据 | 起始 | 最新 | 说明 |
+|------|------|------|------|
+| stock_daily | 2015-01-05 | 至今 | 2779 个交易日，日均 3922 只 |
+| stock_daily_extra | 2015-01-05 | 至今 | 1155 万行市值（含隐含股本估算） |
+| stock_mcap_proxy | — | — | 5505 只股票的隐含股本，用于估算历史市值 |
 
 ## 项目范围
 
@@ -78,13 +83,15 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
-| 数据加载 | `data/loader.py` | 日线/市值/价格查询，参数化 SQL |
+| 数据加载 | `data/loader.py` | 日线/市值/价格查询，含隐含股本自动回退 |
 | 选股 | `strategies/limit_up/base.py` | `LimitUpParams` + `run_screening` |
-| 执行 | `strategies/limit_up/execution.py` | T+1开盘执行、涨跌停流动性、交易成本 |
+| 执行 | `strategies/limit_up/execution.py` | T日收盘主路径 + T+1开盘顺延（涨跌停封板时） |
 | 净值 | `strategies/limit_up/pnl.py` | 日净值、回撤、现金 |
-| 信号生成 | `scripts/gen_signals.py` | 批量生成 CSV 信号 |
-| 回测 | `scripts/bt_backtest.py` | backtrader 回测 |
+| 信号生成 | `scripts/gen_signals.py` | 批量生成 CSV 信号，含评分增强 |
+| 回测引擎 | `scripts/bt_backtest.py` | backtrader + coc=True，T日收盘执行，10项日终校验 |
+| 回测管线 | `scripts/run_backtest_pipeline.py` | 一键：信号→回测→CSV→Web |
 | 模拟盘 | `scripts/run_daily_paper_lu.py` | 每日模拟盘入口 |
+| 数据完整性 | `scripts/check_data_integrity.py` | 各表最新日期/覆盖率/缺失检查 |
 
 ## 模拟盘 run_id 分配
 
@@ -104,9 +111,13 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 | LIMIT_UP_PCT | 0.09 | 涨停阈值 |
 | LIMIT_DOWN_PCT | -0.09 | 跌停阈值 |
 
-选股管线：4条件筛选 → 按涨停次数排序 → Top-5选股 → 等权分配
-风控管线：个股止损-8% → 组合回撤-20%减仓 → 组合回撤-25%清仓
-执行规则：T+1 开盘价成交（模拟盘），回测默认收盘价执行（为实时接入做准备）
+选股管线：4条件筛选 → 按涨停次数排序 → 排名顺延（涨停跳过，下一位补上）
+风控管线：个股止损-8% → 跌停封死顺延 → 日终 10 项校验
+执行模型：
+  - 主路径 T 日收盘价成交（coc=True，模拟 14:50 实时行情→收盘下单）
+  - 涨跌停封板顺延到 T+1 开盘
+  - 候选 Top-5 买不到则顺延到 rank 6/7/8…直到填满
+回测输出：固定格式 CSV（含股数/卖出原因/每日持仓快照）+ Web 展示
 
 ## CSV 信号导出
 

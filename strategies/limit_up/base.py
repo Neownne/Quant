@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 import pandas as pd
+from loguru import logger
 
 from config.settings import TradingConfig
 
@@ -23,29 +24,20 @@ class LimitUpParams:
     min_listed_days: int = 120
 
 
-def run_screening(trade_date, daily_df, extra_df, code_set, params=None):
+def run_screening(trade_date, daily_df, extra_df, code_set, params=None,
+                  daily_by_date: dict | None = None):
     """执行涨停策略 4 条件筛选。
 
     Parameters
     ----------
-    trade_date: pd.Timestamp
-    daily_df: pd.DataFrame
-        含 code, trade_date, open, close, ret, ma5, ma10 的日线数据
-    extra_df: pd.DataFrame
-        含 code, trade_date, market_cap 的市值数据
-    code_set: set[str]
-        候选股票代码集合（已做 ST/上市天数过滤）
-    params: LimitUpParams | None
-
-    Returns
-    -------
-    list[tuple[str, int, float]]
-        [(code, lu_count, close), ...]，按涨停次数降序、最近涨停距今升序排列
+    daily_by_date : dict, optional
+        预分组的 {date: DataFrame(index=code)}，避免重复 groupby。
     """
     params = params or LimitUpParams()
     trade_date = pd.Timestamp(trade_date)
 
-    daily_by_date = {d: g.set_index("code") for d, g in daily_df.groupby("trade_date")}
+    if daily_by_date is None:
+        daily_by_date = {d: g.set_index("code") for d, g in daily_df.groupby("trade_date")}
     if trade_date not in daily_by_date:
         return []
 
@@ -59,6 +51,11 @@ def run_screening(trade_date, daily_df, extra_df, code_set, params=None):
     extra_by_date = {d: g.set_index("code") for d, g in extra_df.groupby("trade_date")} if not extra_df.empty else {}
     avail = sorted([d for d in extra_by_date if d <= trade_date], reverse=True)
     mcap_s = extra_by_date[avail[0]]["market_cap"] if avail else None
+
+    if mcap_s is None:
+        logger.warning("无可用市值数据，所有股票将因 C1 失败而排除！请检查 stock_daily_extra 表。")
+    elif avail and (trade_date - avail[0]).days > 5:
+        logger.warning(f"最新市值日期为 {avail[0]}，距今 {(trade_date - avail[0]).days} 天，数据可能过时")
 
     passed = []
     for code in td.index:

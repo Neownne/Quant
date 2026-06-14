@@ -166,6 +166,17 @@ CREATE TABLE IF NOT EXISTS stock_daily_extra (
 """
 
 # DDL —— 股东户数（散户代理变量）
+DDL_STOCK_MCAP_PROXY = """
+CREATE TABLE IF NOT EXISTS stock_mcap_proxy (
+    code VARCHAR(10) PRIMARY KEY,
+    implied_share DOUBLE PRECISION NOT NULL,
+    base_mcap DOUBLE PRECISION,
+    base_close DOUBLE PRECISION,
+    base_date DATE,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
 DDL_STOCK_SHAREHOLDER = """
 CREATE TABLE IF NOT EXISTS stock_shareholder (
     code               VARCHAR(10),
@@ -816,6 +827,7 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_TICK))
         conn.execute(text(DDL_STOCK_MINUTE))
         conn.execute(text(DDL_STOCK_DAILY_EXTRA))
+        conn.execute(text(DDL_STOCK_MCAP_PROXY))
         conn.execute(text(DDL_STOCK_SHAREHOLDER))
         conn.execute(text(DDL_STOCK_FINANCIAL))
         conn.execute(text(DDL_STOCK_FINANCIAL_V2))

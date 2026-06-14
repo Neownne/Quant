@@ -51,15 +51,20 @@ def parse_args():
     return p.parse_args()
 
 
-def _infer_end_date(engine):
-    """根据最近两日数据完整度推断最新可用交易日。"""
+def _infer_end_date(engine, min_records: int = 2500):
+    """根据最近两日数据完整度推断最新可用交易日。
+
+    回退条件：T日记录数不足 T-1 的 80%，且 T-1 至少有 min_records 条。
+    """
     last_two = pd.read_sql(
         text("SELECT trade_date, COUNT(*) AS n FROM stock_daily "
              "GROUP BY trade_date ORDER BY trade_date DESC LIMIT 2"),
         engine,
     )
-    if len(last_two) >= 2 and last_two.iloc[1]["n"] > last_two.iloc[0]["n"] * 0.8:
-        return str(last_two.iloc[1]["trade_date"])[:10]
+    if len(last_two) >= 2:
+        n_today, n_yesterday = last_two.iloc[0]["n"], last_two.iloc[1]["n"]
+        if n_today < n_yesterday * 0.8 and n_yesterday >= min_records:
+            return str(last_two.iloc[1]["trade_date"])[:10]
     return str(last_two.iloc[0]["trade_date"])[:10]
 
 
@@ -84,7 +89,7 @@ def _load_csi1k_trend(engine, start, end):
     return dict(zip(df["trade_date"], df["close"] > df["ma60"]))
 
 
-def compute_streak_map(daily, lu_pct):
+def compute_streak_map(daily, lu_pct, lookback: int = 20):
     """预计算连板数 {(code, date): max_consecutive_lu}，O(n) 实现。"""
     smap = {}
     for code, grp in daily.groupby("code"):
@@ -93,7 +98,7 @@ def compute_streak_map(daily, lu_pct):
         is_lu = [(r >= lu_pct) for r in grp["ret"]]
         n = len(dates)
         for i in range(n):
-            start_i = max(0, i - 19)
+            start_i = max(0, i - (lookback - 1))
             streak = 0
             max_streak = 0
             for j in range(start_i, i + 1):
@@ -141,8 +146,8 @@ def _apply_scoring(code, lu_n, lb, today, args):
     return score
 
 
-def screen_day(today, daily, extra_df, implied_shares, code_set, csi1k_up,
-               streak_map, args):
+def screen_day(today, daily, extra_df, code_set, csi1k_up,
+               streak_map, args, daily_by_date=None, extra_by_date=None):
     """在 today 执行筛选+评分，返回 [(code, score, close, is_limit_up, is_limit_down)]"""
     params = LimitUpParams(
         mcap_min=args.mcap_min, mcap_max=args.mcap_max,
@@ -152,61 +157,62 @@ def screen_day(today, daily, extra_df, implied_shares, code_set, csi1k_up,
         min_conditions=args.min_conditions,
     )
 
-    # 基础筛选（去跌停，4条件）
-    base_signals = run_screening(today, daily, extra_df, code_set, params)
+    # 基础筛选（mcap 数据已在 load_mcap_data(use_proxy=True) 中补全）
+    base_signals = run_screening(today, daily, extra_df, code_set, params,
+                                  daily_by_date=daily_by_date)
     if not base_signals:
         return []
-
-    # 如果启用 mcap proxy，重新覆盖市值条件结果
-    if args.mcap_proxy and implied_shares:
-        filtered = []
-        for code, lu_n, close_p in base_signals:
-            if code in implied_shares:
-                proxy = implied_shares[code] * close_p
-                if args.mcap_min <= proxy <= args.mcap_max:
-                    filtered.append((code, lu_n, close_p))
-        base_signals = filtered
-
-    if args.no_mcap:
-        # 不限制市值：这里不额外过滤，但 base.run_screening 已用市值条件
-        pass
 
     # 趋势过滤：CSI1000 < MA60 → 空仓
     if args.trend_filter and csi1k_up is not None:
         if not csi1k_up.get(today, True):
             return []
 
-    daily_by_date = {d: g.set_index("code") for d, g in daily.groupby("trade_date")}
-    td = daily_by_date[today]
+    td = daily_by_date.get(today) if daily_by_date else None
+    if td is None:
+        return []
+    # 是否启用任何评分增强
+    use_scoring = any([args.lu_score, args.lu_decay, args.lu_quality, args.lu_streak])
+
     lookback_start = today - timedelta(days=args.limit_up_lookback + 5)
-    lb = daily[(daily["trade_date"] >= lookback_start) & (daily["trade_date"] <= today)]
+    lb = None
+    if use_scoring or args.no_5day_streak:
+        lb = daily[(daily["trade_date"] >= lookback_start) & (daily["trade_date"] <= today)]
+
+    # 批量取前收盘（避免逐股查 DataFrame）
+    prev_close_map = {}
+    if daily_by_date:
+        sorted_dates = sorted(d for d in daily_by_date if d < today)
+        if sorted_dates:
+            prev_day_df = daily_by_date[sorted_dates[-1]]
+            prev_close_map = prev_day_df["close"].to_dict()
 
     passed = []
     for code, lu_n, close_p in base_signals:
-        # 过滤 5 连板
-        if args.no_5day_streak:
+        if args.no_5day_streak and lb is not None:
             max_streak_recent = max(
                 (streak_map.get((code, today - timedelta(days=d)), 0)
                  for d in range(args.streak_lookback)), default=0)
             if max_streak_recent >= 5:
                 continue
 
-        score = _apply_scoring(code, lu_n, lb, today, args)
+        score = _apply_scoring(code, lu_n, lb, today, args) if use_scoring else float(lu_n)
 
-        # 涨跌停标记（给 backtrader 判断流动性）
-        prev_rows = daily[(daily["code"] == code) & (daily["trade_date"] < today)].tail(1)
-        prev_cp = prev_rows["close"].values[0] if not prev_rows.empty else None
+        prev_cp = prev_close_map.get(code)
         is_limit_up = prev_cp and prev_cp > 0 and (close_p / prev_cp - 1) >= TradingConfig.LIMIT_UP_PCT
         is_limit_down = prev_cp and prev_cp > 0 and (close_p / prev_cp - 1) <= TradingConfig.LIMIT_DOWN_PCT
 
         passed.append((code, score, close_p, is_limit_up, is_limit_down))
 
-    # 按评分降序；同分按最近涨停距今升序
-    lu_dates_map = {}
-    for code, _, _, _, _ in passed:
-        code_lu = lb[(lb['code'] == code) & (lb['ret'] >= TradingConfig.LIMIT_UP_PCT)]
-        lu_dates_map[code] = (today - code_lu['trade_date'].max()).days if not code_lu.empty else 99
-    passed.sort(key=lambda x: (x[1], -lu_dates_map.get(x[0], 99)), reverse=True)
+    # 排序：无评分增强时信号已由 run_screening 排好，跳过
+    if use_scoring:
+        if lb is None:
+            lb = daily[(daily["trade_date"] >= lookback_start) & (daily["trade_date"] <= today)]
+        lu_dates_map = {}
+        for code, _, _, _, _ in passed:
+            code_lu = lb[(lb['code'] == code) & (lb['ret'] >= TradingConfig.LIMIT_UP_PCT)]
+            lu_dates_map[code] = (today - code_lu['trade_date'].max()).days if not code_lu.empty else 99
+        passed.sort(key=lambda x: (x[1], -lu_dates_map.get(x[0], 99)), reverse=True)
 
     return passed[:args.top_n]
 
@@ -223,39 +229,34 @@ def main():
 
     logger.info(f"加载数据: {args.start} → {end_date_str}")
     daily = load_daily_data(engine, code_set, pre_start, end_date_str, cols=["open", "high", "close"])
-    extra = load_mcap_data(engine, code_set, pre_start, end_date_str)
-    logger.info(f"日线: {len(daily)} 行, {daily['code'].nunique()} 只")
-
-    # 隐含股本（mcap proxy 用）
-    implied_shares = {}
-    if args.mcap_proxy:
-        last_close = daily.sort_values("trade_date").groupby("code").last()["close"]
-        for code in code_set:
-            extra_code = extra[extra["code"] == code]
-            if extra_code.empty:
-                continue
-            valid = extra_code[extra_code["market_cap"].notna() & (extra_code["market_cap"] > 0)]
-            if valid.empty:
-                continue
-            latest = valid.sort_values("trade_date").iloc[-1]
-            if latest["market_cap"] > 0 and code in last_close.index and last_close[code] > 0:
-                implied_shares[code] = latest["market_cap"] / last_close[code] / 1e8
+    extra = load_mcap_data(engine, code_set, pre_start, end_date_str, use_proxy=args.mcap_proxy)
+    logger.info(f"日线: {len(daily)} 行, {daily['code'].nunique()} 只"
+                f" | 市值: {len(extra)} 行" + (" (含proxy)" if args.mcap_proxy else ""))
 
     csi1k_up = _load_csi1k_trend(engine, args.start, end_date_str) if args.trend_filter else None
 
-    logger.info("计算连板数据...")
-    streak_map = compute_streak_map(daily, TradingConfig.LIMIT_UP_PCT)
+    # 连板数据仅在启用评分/过滤时才计算
+    if any([args.lu_streak, args.no_5day_streak]):
+        logger.info("计算连板数据...")
+        streak_map = compute_streak_map(daily, TradingConfig.LIMIT_UP_PCT, args.limit_up_lookback)
+    else:
+        streak_map = {}
 
     all_dates = sorted(daily["trade_date"].unique())
     trade_dates = [d for d in all_dates
                    if pd.Timestamp(args.start) <= d <= pd.Timestamp(end_date_str)]
     logger.info(f"生成信号: {len(trade_dates)} 个交易日")
 
+    # 预分组避免每天重复 groupby（6年数据每天重分非常慢）
+    daily_by_date = {d: g.set_index("code") for d, g in daily.groupby("trade_date")}
+    extra_by_date = {d: g.set_index("code") for d, g in extra.groupby("trade_date")} if not extra.empty else {}
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     rows = []
     for today in trade_dates:
-        signals = screen_day(today, daily, extra, implied_shares,
-                             code_set, csi1k_up, streak_map, args)
+        signals = screen_day(today, daily, extra,
+                             code_set, csi1k_up, streak_map, args,
+                             daily_by_date=daily_by_date, extra_by_date=extra_by_date)
         for i, (code, score, close_p, is_lu, is_ld) in enumerate(signals):
             rows.append({
                 "date": today.strftime("%Y-%m-%d"),

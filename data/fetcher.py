@@ -110,7 +110,7 @@ def fetch_stock_list() -> pd.DataFrame:
 
 def enrich_stock_basic() -> pd.DataFrame:
     """
-    获取股票基本信息（直接使用交易所接口，废弃东方财富）。
+    获取股票基本信息（数据源：深交所 + 上交所官网）。
     """
     stocks = fetch_stock_list()
     return stocks
@@ -226,7 +226,7 @@ def fetch_index_daily(
 def fetch_etf_list() -> pd.DataFrame:
     """
     获取全市场 ETF 列表。
-    数据源：东方财富。
+    数据源：新浪财经。
     返回 columns: code, name, category
     """
     logger.info("正在获取 ETF 列表 ...")
@@ -287,56 +287,22 @@ def fetch_etf_daily(
 def fetch_fund_list() -> pd.DataFrame:
     """
     获取开放式基金列表。
-    数据源：天天基金。
+    数据源：已禁用（原东方财富）。
     返回 columns: code, name, fund_type
     """
-    logger.info("正在获取基金列表 ...")
-    # 通过基金排名接口获取，取所有类型的前10000只
-    all_funds = []
-    for ftype in ["", "gp", "hh", "zq", "zs", "qdii"]:
-        try:
-            time.sleep(DataConfig.REQUEST_INTERVAL)
-            raw = ak.fund_open_fund_rank_em(symbol=ftype if ftype else "全部")
-            all_funds.append(raw[["基金代码", "基金简称"]])
-        except Exception as e:
-            logger.warning(f"基金类型 {ftype or '全部'} 获取失败: {e}")
-
-    if not all_funds:
-        return pd.DataFrame()
-
-    raw = pd.concat(all_funds).drop_duplicates()
-
-    df = pd.DataFrame()
-    df["code"] = raw["基金代码"]
-    df["name"] = raw["基金简称"]
-    logger.success(f"获取到 {len(df)} 只基金")
-    return df
+    logger.info("fetch_fund_list: 东方财富接口已禁用，返回空 DataFrame")
+    return pd.DataFrame(columns=["code", "name"])
 
 
 @retry_on_network_error()
 def fetch_fund_nav(code: str) -> pd.DataFrame:
     """
     获取单只基金的净值走势。
-
+    数据源：已禁用（原东方财富）。
     返回 columns: code, nav_date, unit_nav, accumulated_nav, daily_return
     """
-    raw = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
-
-    if raw.empty:
-        return pd.DataFrame()
-
-    raw = raw.reset_index(drop=True)
-    # AKShare 仅返回：净值日期、单位净值、日增长率 —— 无累计净值
-    df = pd.DataFrame({
-        "code": code,
-        "nav_date": pd.to_datetime(raw["净值日期"].values, errors="coerce").date,
-        "unit_nav": pd.to_numeric(raw["单位净值"].values, errors="coerce"),
-        "accumulated_nav": np.nan,
-        "daily_return": pd.to_numeric(raw.get("日增长率", pd.Series([0])).values, errors="coerce"),
-    })
-
-    df = df.dropna(subset=["unit_nav"])
-    return df
+    logger.info(f"fetch_fund_nav({code}): 东方财富接口已禁用，返回空 DataFrame")
+    return pd.DataFrame(columns=["code", "nav_date", "unit_nav", "accumulated_nav", "daily_return"])
 
 
 # ============================================================
@@ -381,24 +347,11 @@ def fetch_stock_lg_indicator(symbol: str) -> pd.DataFrame:
 @retry_on_network_error()
 def fetch_shareholder_count(symbol: str) -> pd.DataFrame:
     """获取单只股票的股东户数变化历史。
-    数据源：东方财富。
+    数据源：已禁用（原东方财富）。
     返回 columns: code, end_date, shareholder_count, avg_holding_value, avg_holding_amount, total_market_cap"""
-    try:
-        raw = ak.stock_zh_a_gdhs_detail_em(symbol=symbol)
-    except Exception:
-        return pd.DataFrame()
-    if raw.empty:
-        return pd.DataFrame()
-    raw = raw.reset_index(drop=True)
-    df = pd.DataFrame({
-        "code": symbol,
-        "end_date": pd.to_datetime(raw["股东户数统计截止日"].values, errors="coerce").date,
-        "shareholder_count": pd.to_numeric(raw.get("股东户数-本次", 0), errors="coerce"),
-        "avg_holding_value": pd.to_numeric(raw.get("户均持股市值", 0), errors="coerce"),
-        "avg_holding_amount": pd.to_numeric(raw.get("户均持股数量", 0), errors="coerce"),
-        "total_market_cap": pd.to_numeric(raw.get("总市值", 0), errors="coerce"),
-    })
-    return df.dropna(subset=["end_date"])
+    logger.info(f"fetch_shareholder_count({symbol}): 东方财富接口已禁用，返回空 DataFrame")
+    return pd.DataFrame(columns=["code", "end_date", "shareholder_count", "avg_holding_value",
+                                  "avg_holding_amount", "total_market_cap"])
 
 
 # ============================================================
@@ -620,28 +573,12 @@ def fetch_financial_supplement(symbol: str) -> pd.DataFrame:
 @retry_on_network_error()
 def fetch_pledge_data() -> pd.DataFrame:
     """获取全市场股权质押比例。
-
-    数据源：东方财富 stock_gpzy_pledge_ratio_em。
+    数据源：已禁用（原东方财富 stock_gpzy_pledge_ratio_em）。
     返回 columns: code, trade_date, pledge_ratio, pledge_shares, pledge_market_cap, pledge_count
     """
-    try:
-        raw = ak.stock_gpzy_pledge_ratio_em()
-    except Exception as e:
-        logger.warning(f"质押数据获取失败: {e}")
-        return pd.DataFrame()
-
-    if raw.empty:
-        return pd.DataFrame()
-
-    df = pd.DataFrame({
-        "code": raw["股票代码"].astype(str).str.replace(" ", ""),
-        "trade_date": pd.to_datetime(raw["交易日期"], errors="coerce").dt.date,
-        "pledge_ratio": pd.to_numeric(raw["质押比例"], errors="coerce"),
-        "pledge_shares": pd.to_numeric(raw["质押股数"], errors="coerce"),
-        "pledge_market_cap": pd.to_numeric(raw["质押市值"], errors="coerce"),
-        "pledge_count": pd.to_numeric(raw["质押笔数"], errors="coerce"),
-    })
-    return df.dropna(subset=["code", "trade_date"])
+    logger.info("fetch_pledge_data: 东方财富接口已禁用，返回空 DataFrame")
+    return pd.DataFrame(columns=["code", "trade_date", "pledge_ratio", "pledge_shares",
+                                  "pledge_market_cap", "pledge_count"])
 #  行业分类数据
 # ============================================================
 

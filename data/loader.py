@@ -61,8 +61,8 @@ def load_daily_data(engine, codes, start, end, cols=None):
     return df
 
 
-def load_mcap_data(engine, codes, start, end):
-    """加载市值数据。"""
+def load_mcap_data(engine, codes, start, end, use_proxy: bool = False):
+    """加载市值数据。use_proxy=True 时对缺失日期用隐含股本估算补全。"""
     codes = _to_code_list(codes)
     if not codes:
         return pd.DataFrame(columns=["code", "trade_date", "market_cap"])
@@ -81,6 +81,38 @@ def load_mcap_data(engine, codes, start, end):
     df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["code", "trade_date", "market_cap"])
     if not df.empty:
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+    # 隐含股本回退：为没有真实 mcap 的 (code, trade_date) 补充估算值
+    if use_proxy:
+        proxy = pd.read_sql(
+            text("SELECT code, implied_share FROM stock_mcap_proxy WHERE code = ANY(:codes)"),
+            engine, params={"codes": codes},
+        )
+        if not proxy.empty:
+            proxy_map = dict(zip(proxy["code"], proxy["implied_share"]))
+            # 找出已有数据的 (code, date) 对
+            existing_pairs = set()
+            if not df.empty:
+                existing_pairs = set(zip(df["code"], df["trade_date"].astype(str)))
+            # 所有需要 mcap 的 code
+            proxy_codes = [c for c in codes if c in proxy_map]
+            if proxy_codes:
+                close_df = load_daily_data(engine, proxy_codes, start, end, cols=["close"])
+                if not close_df.empty:
+                    close_df["trade_date_str"] = close_df["trade_date"].astype(str)
+                    close_df["key"] = close_df["code"] + "_" + close_df["trade_date_str"]
+                    # 只补没有真实数据的行
+                    existing_keys = {f"{c}_{d}" for c, d in existing_pairs}
+                    missing = close_df[~close_df["key"].isin(existing_keys)]
+                    if len(missing) > 0:
+                        missing = missing.copy()
+                        missing["market_cap"] = missing["code"].map(proxy_map) * missing["close"]
+                        missing = missing[missing["market_cap"] > 0]
+                        proxy_extra = missing[["code", "trade_date", "market_cap"]]
+                        df = pd.concat([df, proxy_extra], ignore_index=True) if not df.empty else proxy_extra
+            # 去重
+            if not df.empty:
+                df = df.drop_duplicates(subset=["code", "trade_date"], keep="first")
     return df
 
 

@@ -21,7 +21,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from data.db import get_engine
-from data.sync import sync_stock_daily, sync_daily_extra
+from data.sync import sync_stock_basic, sync_stock_daily, sync_daily_extra
 from data.loader import (
     load_daily_data, load_mcap_data, get_latest_trade_date, get_stock_basic,
 )
@@ -45,9 +45,10 @@ LU_PARAMS = LimitUpParams(
 
 
 def sync_data(engine):
-    """增量同步日线 + 市值数据。"""
+    """增量同步日线 + 市值数据 + 股票列表（刷新 ST 标志）。"""
     today = date.today().strftime("%Y-%m-%d")
     logger.info(f"同步数据至 {today} ...")
+    sync_stock_basic(engine)  # 刷新 ST/上市状态
     sync_stock_daily(engine, start_date=today, workers=8)
     sync_daily_extra(engine, start_date=today, workers=8)
 
@@ -106,6 +107,9 @@ def main():
     parser.add_argument("--date", type=str, default=None, help="回测日期 YYYY-MM-DD")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-sync", action="store_true")
+    parser.add_argument("--weight-mode", type=str, default="equal",
+                        choices=["equal", "volatility_inverse", "score_weighted"],
+                        help="仓位分配模式（默认 equal）")
     args = parser.parse_args()
 
     engine = get_engine()
@@ -174,6 +178,8 @@ def main():
         trade_date=trade_date, signals=signals, positions=positions,
         top_n=TOP_N, stop_loss_pct=TradingConfig.STOP_LOSS_PCT,
         dry_run=args.dry_run,
+        weight_mode=args.weight_mode,
+        daily_df=daily,
     )
 
     engine.dispose()

@@ -34,7 +34,7 @@ class DataConfig:
     # 请求间隔（秒），避免被封
     REQUEST_INTERVAL = 0.5
 
-    # 默认同步的指数列表（东方财富代码）
+    # 默认同步的指数列表（腾讯财经源）
     INDEX_CODES = {
         "000001": "上证指数",
         "399001": "深证成指",
@@ -68,9 +68,50 @@ class TradingConfig:
     INDEX_CRASH_LOOKBACK = 15          # 指数大跌检测窗口（天）
     INDEX_CRASH_THRESHOLD = -0.12      # 指数15日跌超12%空仓
 
-    # 涨跌停阈值（A股普通股票）
-    LIMIT_UP_PCT = 0.09                # 涨停阈值 9%
-    LIMIT_DOWN_PCT = -0.09             # 跌停阈值 -9%
+    # 涨跌停板幅度（按代码前缀区分）
+    # 主板(0/6): ±10%，科创板(688): ±20%，创业板(300/301): ±20%
+    LIMIT_UP_PCT = 0.09                # 涨停阈值（回退值）
+    LIMIT_DOWN_PCT = -0.09             # 跌停阈值（回退值）
+
+    @staticmethod
+    def get_limit_multiplier(code: str) -> float:
+        """根据股票代码返回涨跌停倍数。
+
+        主板(0xxxxx/6xxxxx): 1.1 / 0.9
+        科创板(688xxx): 1.2 / 0.8
+        创业板(300xxx/301xxx): 1.2 / 0.8
+        """
+        code = str(code).zfill(6)
+        if code.startswith(("688", "300", "301")):
+            return 1.2  # 20% 涨跌停
+        return 1.1       # 10% 涨跌停
+
+    @staticmethod
+    def calc_limit_price(prev_close: float, code: str, is_up: bool = True) -> float:
+        """计算实际涨跌停价格（A股四舍五入规则）。
+
+        limit_price = round(prev_close × multiplier, 2)
+        """
+        if prev_close <= 0:
+            return 0.0
+        mult = TradingConfig.get_limit_multiplier(code)
+        return round(prev_close * (mult if is_up else (2 - mult)), 2)
+
+    @staticmethod
+    def is_at_limit_up(close: float, prev_close: float, code: str) -> bool:
+        """判断是否涨停封板（无法买入）。"""
+        if prev_close <= 0 or close <= 0:
+            return False
+        limit_price = TradingConfig.calc_limit_price(prev_close, code, is_up=True)
+        return close >= limit_price
+
+    @staticmethod
+    def is_at_limit_down(close: float, prev_close: float, code: str) -> bool:
+        """判断是否跌停封板（无法卖出）。"""
+        if prev_close <= 0 or close <= 0:
+            return False
+        limit_price = TradingConfig.calc_limit_price(prev_close, code, is_up=False)
+        return close <= limit_price
 
     # 调仓
     REBALANCE_FREQ = 5                 # 默认周度调仓（交易日）

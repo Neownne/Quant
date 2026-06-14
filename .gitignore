@@ -13,3 +13,8 @@ build/
 output/
 learning/__pycache__/
 output/
+data/signals
+data/backtest_trades
+data/paper_signals
+data/cache/
+data/data_integrity_report.json
