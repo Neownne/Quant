@@ -231,7 +231,14 @@ class LuStrategy(bt.Strategy):
             est_cash_per_stock = available_cash / max(slots_left, 1)
             per_stock = min(est_cash_per_stock, max_per_stock)
             sz = int(per_stock / px / 100) * 100
-            if sz <= 0:
+            # 硬限：买入成本不能超过可用现金（留2%缓冲）
+            max_cost = available_cash * 0.98
+            actual_cost = sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+            if actual_cost > max_cost:
+                sz = int(max_cost / px / (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE) / 100) * 100
+                if sz <= 0:
+                    self._today_skip_reasons[code] = "资金不足(硬限)"
+                    continue
                 self._today_skip_reasons[code] = f"资金不足(qty=0)"
                 continue
             self.buy(data=d, size=sz)
