@@ -174,7 +174,7 @@ class LuStrategy(bt.Strategy):
                 self._trade_log.append({
                     "日期": today_str, "操作": "加仓", "股票代码": d._name, "股票名称": "",
                     "入场价": round(d.close[0], 2), "当前价/出场价": "",
-                    "盈亏%": f"{profit_pct:+.1%}", "股数": add_sz, "入场日期": "",
+                    "盈亏%": f"{profit_pct:+.1%}", "股数": add_sz, "入场日期": today_str,
                     "总资产": round(self.broker.getvalue(), 2),
                     "当前现金": round(self.broker.getcash(), 2),
                 })
@@ -240,7 +240,7 @@ class LuStrategy(bt.Strategy):
             self._trade_log.append({
                 "日期": today_str, "操作": "买入", "股票代码": code, "股票名称": "",
                 "入场价": round(px, 2), "当前价/出场价": "", "盈亏%": "",
-                "股数": sz, "入场日期": "",
+                "股数": sz, "入场日期": today_str,
                 "总资产": total_after, "当前现金": round(cash_after, 2),
             })
             available_cash = cash_after
@@ -371,7 +371,7 @@ class LuStrategy(bt.Strategy):
         self._trade_log.append({
             "日期": today, "操作": f"卖出({reason})", "股票代码": code, "股票名称": "",
             "入场价": round(entry_px, 2), "当前价/出场价": round(exit_price, 2),
-            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": "", "总资产": total, "当前现金": round(self.broker.getcash(), 2),
+            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": entry.get("entry_date", ""), "总资产": total, "当前现金": round(self.broker.getcash(), 2),
         })
 
     def _confirm_settled_buys(self):
@@ -425,7 +425,7 @@ class LuStrategy(bt.Strategy):
             self._trade_log.append({
                 "日期": today, "操作": "持仓", "股票代码": code, "股票名称": "",
                 "入场价": round(entry["entry_price"], 2), "当前价/出场价": round(cur_price, 2),
-                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "",
+                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": entry.get("entry_date", ""),
                 "总资产": total, "当前现金": calc_cash,
             })
 
