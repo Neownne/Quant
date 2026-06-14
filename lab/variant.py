@@ -92,12 +92,13 @@ class StrategyVariant:
     def to_gen_signals_args(self) -> list[str]:
         """生成 gen_signals.py CLI 参数列表。"""
         args = []
-        # 筛选参数（只传非默认值）
-        for key in ["mcap_min", "mcap_max", "price_min", "price_max",
-                    "lu_lookback", "lu_count", "min_conditions", "min_listed_days"]:
+        # int 参数（mcap/price 用 int，gen_signals.py 期望 int 类型）
+        int_keys = {"mcap_min", "mcap_max", "price_min", "price_max",
+                    "lu_lookback", "lu_count", "min_conditions", "min_listed_days"}
+        for key in int_keys:
             val = getattr(self, key)
             if val is not None:
-                args.extend([f"--{key.replace('_', '-')}", str(val)])
+                args.extend([f"--{key.replace('_', '-')}", str(int(val))])
         # 布尔开关
         for flag in ["lu_score", "lu_decay", "lu_quality", "lu_streak",
                      "trend_filter", "no_5day_streak"]:
