@@ -35,64 +35,73 @@ async def ping():
 
 @router.get("/strategy-summary")
 async def get_strategy_summary():
-    """返回涨停策略最新回测概览卡片 HTML。"""
+    """返回涨停策略所有变体最新回测概览卡片 HTML，按复合评分排序。"""
     engine = get_engine()
-    targets = [
-        ("涨停策略", "lu5sE4"),  # E4: 4条件去跌停
-    ]
     cards = []
     try:
         with engine.connect() as conn:
-            for name, ver in targets:
-                row = conn.execute(text("""
-                    SELECT br.id, sc.name, sv.version, br.start_date, br.end_date,
-                           br.metrics_json, br.quality
-                    FROM backtest_results br
-                    JOIN strategy_versions sv ON br.version_id = sv.id
-                    JOIN strategy_configs sc ON sv.strategy_id = sc.id
-                    WHERE sc.name = :name AND sv.version = :ver
-                    ORDER BY
-                        CASE WHEN br.start_date <= '2020-01-01' THEN 0 ELSE 1 END,
-                        br.start_date DESC,
-                        br.created_at DESC
-                    LIMIT 1
-                """), {"name": name, "ver": ver}).fetchone()
+            # 查询 limit_up 策略族下所有变体的最新回测结果
+            rows = conn.execute(text("""
+                SELECT DISTINCT ON (sv.version)
+                    br.id, sv.strategy_id, sv.version, br.start_date, br.end_date,
+                    br.metrics_json, br.quality, le.composite_score, le.verdict
+                FROM backtest_results br
+                JOIN strategy_versions sv ON br.version_id = sv.id
+                JOIN strategy_configs sc ON sv.strategy_id = sc.id
+                LEFT JOIN lab_experiments le ON le.backtest_result_id = br.id
+                WHERE sc.name = 'limit_up'
+                ORDER BY sv.version, br.created_at DESC
+            """)).mappings().all()
 
-                if not row:
-                    cards.append({
-                        "name": name, "version": ver or "—",
-                        "status": "no_data",
-                    })
+            for row in rows:
+                m = json.loads(str(row["metrics_json"])) if isinstance(row["metrics_json"], str) else (row["metrics_json"] or {})
+                # 计算复合评分（如果 lab_experiments 有则用，否则用简化版）
+                sh = m.get("sharpe") or 0
+                ret = m.get("return") or 0
+                mdd = m.get("max_drawdown") or 0
+                # 过滤：Sharpe < -0.5 或 MDD > 80% 的不展示
+                if sh < -0.5 or mdd > 0.80:
                     continue
-
-                bt_id, sname, sver, sstart, send, metrics_raw, quality = row
-                m = json.loads(str(metrics_raw)) if isinstance(metrics_raw, str) else (metrics_raw or {})
+                # 简化评分（和 lab/judge.py 一致）
+                composite = row.get("composite_score") or 0
+                if not composite:
+                    composite = round(sh * 0.4 + ret * 0.3 + (1 - mdd) * 0.3, 4)
 
                 cards.append({
-                    "id": bt_id, "name": sname, "version": sver,
-                    "start": str(sstart or ""), "end": str(send or ""),
-                    "annual_return": m.get("annual_return", 0) or 0,
-                    "sharpe": m.get("sharpe", 0) or 0,
-                    "max_drawdown": m.get("max_drawdown", 0) or 0,
-                    "win_rate": m.get("win_rate", 0) or 0,
-                    "n_days": m.get("n_days", 0),
-                    "quality": quality or "valid",
+                    "id": row["id"], "name": "涨停策略", "version": row["version"],
+                    "start": str(row["start_date"] or ""), "end": str(row["end_date"] or ""),
+                    "annual_return": ret, "sharpe": sh, "max_drawdown": mdd,
+                    "return": ret, "n_days": m.get("n_days", 0),
+                    "quality": row["quality"] or "valid",
+                    "verdict": row.get("verdict") or "",
+                    "composite": composite,
+                    "exec_mode": m.get("exec_mode", ""),
+                    "trades": m.get("trades", 0),
                     "status": "ok",
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"strategy-summary 查询失败: {e}")
+
+    # 按复合评分降序排列，top-20 展示
+    cards.sort(key=lambda c: c["composite"], reverse=True)
+    cards = cards[:20]
+
+    if not cards:
+        cards.append({"name": "涨停策略", "version": "—", "status": "no_data"})
 
     # 构建卡片 HTML
     card_html = ""
     type_labels = {"涨停策略": "规则筛选"}
     colors = {"涨停策略": ("#e65100", "#fff3e0")}
+    verdict_icons = {"promising": "🟢", "baseline": "🟡", "reject": "🔴"}
 
     for c in cards:
-        name = c["name"]
+        ver = c.get("version", "")
+        name = c.get("name", "涨停策略")
         accent, bg = colors.get(name, ("#666", "#f5f5f5"))
         label = type_labels.get(name, "")
 
-        if c["status"] == "no_data":
+        if c.get("status") == "no_data":
             card_html += f"""
             <div style="flex:1;min-width:220px;padding:16px;border-radius:8px;
                         background:{bg};border-left:4px solid {accent};">
@@ -101,13 +110,14 @@ async def get_strategy_summary():
                     <span style="font-size:11px;color:#999;">{label}</span>
                 </div>
                 <p style="color:#999;font-size:13px;margin:16px 0;">暂无回测数据</p>
-                <p style="font-size:11px;color:#aaa;">运行 scripts/bt_backtest.py 生成</p>
+                <p style="font-size:11px;color:#aaa;">运行 scripts/run_lab.py auto 生成</p>
             </div>"""
         else:
             ar = c["annual_return"]
             mdd = c["max_drawdown"]
             sh = c["sharpe"]
             ret_color = "#c62828" if ar > 0 else "#2e7d32"
+            v_icon = verdict_icons.get(c.get("verdict", ""), "")
             card_html += f"""
             <div style="flex:1;min-width:220px;padding:16px;border-radius:8px;
                         background:{bg};border-left:4px solid {accent};
@@ -118,12 +128,12 @@ async def get_strategy_summary():
                  hx-target="#detail-panel" hx-swap="innerHTML"
                  onclick="document.getElementById('detail-panel').style.display='block';">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <strong style="font-size:15px;">{name}</strong>
-                    <span style="font-size:11px;color:#999;">{label} · {c['version']}</span>
+                    <strong style="font-size:15px;">{ver}</strong>
+                    <span style="font-size:11px;color:#999;">{label} {v_icon}</span>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;">
                     <div>
-                        <div style="font-size:10px;color:#999;">年化收益</div>
+                        <div style="font-size:10px;color:#999;">累计收益</div>
                         <div style="font-size:20px;font-weight:700;color:{ret_color};">{ar*100:+.1f}%</div>
                     </div>
                     <div>
