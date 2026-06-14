@@ -60,6 +60,7 @@ class LuStrategy(bt.Strategy):
         self._today_skip_reasons = {}  # 跳过的候选 {code: reason}
         self._last_signal_date = None  # 上一个有信号的交易日
         self._recently_sold = {}   # {code: sell_date} 冷却期追踪
+        self._manual_cash = None   # 手工跟踪现金（coc 延迟时用）
 
     def prenext(self):
         """委托给 next()，避免因部分 feed 无数据而阻塞整个回测。"""
@@ -244,6 +245,9 @@ class LuStrategy(bt.Strategy):
             })
             available_cash = cash_after
 
+        # 手工现金（coc 下 broker.getcash() 当天不变，用此变量）
+        self._manual_cash = available_cash
+
         # 日终持仓快照 + 校验
         self._record_holdings()
         self._validate()
@@ -382,7 +386,22 @@ class LuStrategy(bt.Strategy):
     def _record_holdings(self):
         """记录当日持仓快照。同步 _open_trades 与 backtrader（清理已结算卖出）。"""
         today = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
-        total = round(self.broker.getvalue(), 2)
+        # 按当天收盘算持仓总市值（用于总资产 = 市值 + 现金）
+        pos_val = 0.0
+        for code, entry in self._open_trades.items():
+            d = next((x for x in self.datas if x._name == code), None)
+            if d is not None and len(d) > 0 and d.close[0] > 0:
+                pos_val += entry["quantity"] * d.close[0]
+            else:
+                pos_val += entry["quantity"] * entry["entry_price"]
+
+        # 手工总资产优先（coc 日 broker 未结算），否则回退 broker
+        if self._manual_cash is not None:
+            total = round(self._manual_cash + pos_val, 2)
+            calc_cash = round(self._manual_cash, 2)
+        else:
+            total = round(self.broker.getvalue(), 2)
+            calc_cash = round(total - pos_val, 2)
 
         # 清理 backtrader 已结算的卖出
         bt_held = set()
@@ -400,14 +419,14 @@ class LuStrategy(bt.Strategy):
             d = next((x for x in self.datas if x._name == code), None)
             if d is None or len(d) == 0: continue
             cur_price = d.close[0]
-            # 更新最高价（移动止盈用）
             prev_high = entry.get("highest_price", entry["entry_price"])
             entry["highest_price"] = max(prev_high, cur_price)
             pnl_pct = round((cur_price / entry["entry_price"] - 1) * 100, 2) if entry["entry_price"] > 0 else 0
             self._trade_log.append({
                 "日期": today, "操作": "持仓", "股票代码": code, "股票名称": "",
                 "入场价": round(entry["entry_price"], 2), "当前价/出场价": round(cur_price, 2),
-                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "", "总资产": total, "当前现金": round(self.broker.getcash(), 2),
+                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "",
+                "总资产": total, "当前现金": calc_cash,
             })
 
 # ── 权益曲线 Observer ──
