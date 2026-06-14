@@ -111,7 +111,45 @@ def run_forever(args):
             except Exception as e:
                 logger.warning(f"lab_experiments 写入失败: {e}")
 
-        # 5. ML 因子优化（每5轮跑一次，全量88因子耗时较长）
+        # 5. 行业轮动（每3轮跑一次）
+        if round_num % 3 == 0 and not _stop:
+            logger.info("行业轮动回测...")
+            try:
+                from lab.sector_runner import run_sector_rotation, load_sector_data
+                from data.db import get_engine as _eng2
+
+                eng_s = _eng2()
+                daily_s, industry_map_s, extra_s = load_sector_data(
+                    eng_s, args.start, args.end or date.today().strftime("%Y-%m-%d"))
+                eng_s.dispose()
+
+                sec_result = run_sector_rotation(
+                    daily_s, industry_map_s, extra_s,
+                    start=args.start, end=args.end or date.today().strftime("%Y-%m-%d"),
+                )
+                logger.info(f"  行业轮动: Sharpe={sec_result.sharpe:.2f} "
+                            f"Ret={sec_result.total_return:.1%} MDD={sec_result.max_drawdown:.1%}")
+
+                if not sec_result.error:
+                    try:
+                        eng4 = _eng()
+                        with eng4.begin() as conn:
+                            conn.execute(text("""
+                                INSERT INTO lab_experiments (variant_name, composite_score, verdict, variant_params_json)
+                                VALUES (:vn, :sc, :ve, :pj)
+                            """), {
+                                "vn": f"sector_{date.today().strftime('%Y%m%d')}",
+                                "sc": round(sec_result.sharpe, 4),
+                                "ve": sec_result.verdict,
+                                "pj": json.dumps(sec_result.to_dict(), ensure_ascii=False),
+                            })
+                        eng4.dispose()
+                    except Exception as e:
+                        logger.warning(f"行业轮动结果写入DB失败: {e}")
+            except Exception as e:
+                logger.warning(f"行业轮动失败: {e}")
+
+        # 6. ML 因子优化（每5轮跑一次，全量88因子耗时较长）
         if round_num % 5 == 0 and not _stop:
             logger.info("ML 因子优化...")
             try:
