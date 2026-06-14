@@ -1,5 +1,15 @@
 # 项目规范
 
+## 铁律 —— 绝对禁止的操作
+
+| # | 规则 | 原因 |
+|---|------|------|
+| 1 | **跑回测必须用管线** `python scripts/run_backtest_pipeline.py --start X --top-n N` | 管线自动处理信号深度（`max(N*4,20)`），手动调 gen_signals 的 --top-n 会导致候选池太浅、全涨停日买不到票 |
+| 2 | **不得手动拼接 gen_signals + bt_backtest** | 参数传递容易出错（--top-n 深度、--mcap-proxy、--exec-close），管线已封装 |
+| 3 | **不得修改 bt_backtest.py 交易逻辑** | coc 现金跟踪公式已验证正确，重复"修复"会引入新 bug。卖出回款公式 `available_cash = broker.getcash() + sell_proceeds` 是 coc 下唯一正确做法 |
+| 4 | **策略实验用 lab** `python scripts/run_lab_forever.py` | 不要手动逐个跑变体。lab 负责：搜索→变体生成→批量回测→评分→报告 |
+| 5 | **新增变体只改 variant JSON** | 不要直接改 bt_backtest.py 参数。在 `lab/variants/` 里加 JSON，lab 会自动跑 |
+
 ## Claude Code 八荣八耻
 
 1. 以认真查询为荣，以猜测接口为耻。
@@ -131,7 +141,30 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 stop
 - 交易成本必须计入模拟盘现金更新。
 - 新增功能前优先复用 `data/loader.py` 中的工具函数。
 
-## 常见问题
+## 策略实验室 (lab/)
+
+```bash
+# 持续优化循环（搜索→回测→评判→循环）
+python scripts/run_lab_forever.py --start 2020-01-01 --parallel 2
+
+# 列出所有变体
+python scripts/run_lab.py list
+
+# 生成排名报告
+python scripts/run_lab.py report
+```
+
+三管线：涨停策略变体（每轮）+ 行业轮动（每3轮）+ ML因子优化（每5轮）
+
+新增策略变体：编辑 `lab/variants/` 下的 JSON 文件，不要改 bt_backtest.py。
+
+## 已知问题（不要修）
+
+| 问题 | 原因 | 为什么不动 |
+|------|------|-----------|
+| 交割单跨日总资产跳变 | coc 模式下 broker 持仓归零但现金 T+1 才到账 | 这是 backtrader coc 的固有行为，改成手工跟踪会让现金漂移更严重 |
+| 买入当天现金偶尔为负（-500 以内） | NET_SELL 公式与 broker 实际扣费差 <0.02% | 不影响策略判断，修了会引入更大的漂移 bug |
+| gen_signals 的 `--lu-lookback` vs `--limit-up-lookback` 参数名不一致 | gen_signals 用 DEFAULTS 的 `limit_up_lookback` 自动生成参数名 | 已在 `lab/variant.py` 的 `key_map` 中映射，不要改 gen_signals 的参数名 |
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
