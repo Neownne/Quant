@@ -51,7 +51,7 @@ class LabRunner:
 
         logger.info(f"  [{variant.name}] 生成信号 {self.benchmark_start}~{self.benchmark_end} ...")
         r = subprocess.run(gen_args, capture_output=True, text=True, cwd=PROJECT_ROOT,
-                          timeout=600)
+                          timeout=1200)
         if r.returncode != 0:
             err_tail = (r.stderr or "")[-300:]
             logger.error(f"  [{variant.name}] gen_signals 失败: {err_tail}")
@@ -75,7 +75,7 @@ class LabRunner:
 
         logger.info(f"  [{variant.name}] 回测中 ...")
         r = subprocess.run(bt_args, capture_output=True, text=True, cwd=PROJECT_ROOT,
-                          timeout=600)
+                          timeout=1200)
         if r.returncode != 0:
             err_tail = (r.stderr or "")[-300:]
             logger.error(f"  [{variant.name}] bt_backtest 失败: {err_tail}")
