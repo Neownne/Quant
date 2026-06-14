@@ -332,6 +332,23 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 
 DDL_BACKTEST_RESULTS_IDX = "CREATE INDEX IF NOT EXISTS idx_br_version ON backtest_results (version_id);"
 
+# DDL —— 策略实验室实验记录
+DDL_LAB_EXPERIMENTS = """
+CREATE TABLE IF NOT EXISTS lab_experiments (
+    id SERIAL PRIMARY KEY,
+    batch_label VARCHAR(100),
+    variant_name VARCHAR(100) NOT NULL,
+    variant_params_json JSONB DEFAULT '{}',
+    source VARCHAR(50) DEFAULT 'manual',
+    source_url TEXT DEFAULT '',
+    backtest_result_id INT REFERENCES backtest_results(id),
+    composite_score DOUBLE PRECISION,
+    rank INT,
+    verdict VARCHAR(20),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+
 DDL_ML_STRATEGY_CONFIG = """
 CREATE TABLE IF NOT EXISTS ml_strategy_config (
     id              SERIAL PRIMARY KEY,
@@ -850,6 +867,8 @@ def init_db() -> None:
         # ========== 回测结果（新版：挂钩 strategy_versions） ==========
         conn.execute(text(DDL_BACKTEST_RESULTS))
         conn.execute(text(DDL_BACKTEST_RESULTS_IDX))
+        # ========== 策略实验室 ==========
+        conn.execute(text(DDL_LAB_EXPERIMENTS))
         # ========== 模拟盘运行记录 ==========
         conn.execute(text(DDL_PAPER_RUNS))
         conn.execute(text(DDL_PAPER_SIGNALS))

@@ -35,7 +35,17 @@ class CNStockComm(bt.CommInfoBase):
 
 # ── 策略 ──
 class LuStrategy(bt.Strategy):
-    params = dict(top_n=5, signals_csv="", exit_stop=0.08, exec_close=True)
+    params = dict(
+        top_n=5, signals_csv="", exit_stop=0.08, exec_close=True,
+        # 移动止盈
+        trailing_stop=0.0,            # >0 启用，从最高点回落 X% 卖出
+        # 金字塔加仓
+        pyramid_threshold=0.0,        # >0 启用，盈利>X% 触发
+        pyramid_ratio=0.5,            # 加原仓位 X 倍
+        # 入场冷却
+        cooling_days=0,               # >0 启用，卖出后 N 天不买回
+        require_positive_day=False,   # 买入当天收阳才买
+    )
 
     def __init__(self):
         df = pd.read_csv(self.p.signals_csv)
@@ -43,12 +53,13 @@ class LuStrategy(bt.Strategy):
         self.signals = {d: g for d, g in df.groupby("date")}
         self.sig_dates = set(self.signals.keys())
         self._trade_log = []       # 自记录交割单
-        self._open_trades = {}     # {code: {entry_date, entry_price, quantity}}（由 _record_holdings 同步）
+        self._open_trades = {}     # {code: {entry_date, entry_price, quantity, highest_price}}
         self._bought_today = {}    # 本轮买入 {code: price}
         self._sold_today = {}      # 本轮卖出 {code: (price, reason)}
         self._today_signals = {}   # 今日信号 {code: close}
         self._today_skip_reasons = {}  # 跳过的候选 {code: reason}
         self._last_signal_date = None  # 上一个有信号的交易日
+        self._recently_sold = {}   # {code: sell_date} 冷却期追踪
 
     def prenext(self):
         """委托给 next()，避免因部分 feed 无数据而阻塞整个回测。"""
@@ -69,7 +80,7 @@ class LuStrategy(bt.Strategy):
         self._last_signal_date = today
         targets = set(str(s.code).zfill(6) for _, s in sigs.iterrows())
 
-        # ── 止损（T 日收盘价判断，含跌停检查）──
+        # ── 止损（支持固定止损 / 移动止盈）──
         stopped_out = set()
         stop_proceeds = 0.0
         NET_SELL = 1.0 - TradingConfig.SLIPPAGE - TradingConfig.COMMISSION - TradingConfig.STAMP_DUTY
@@ -77,18 +88,35 @@ class LuStrategy(bt.Strategy):
             if len(d) == 0:
                 continue
             pos = self.getposition(d)
-            if pos.size <= 0 or d.close[0] >= pos.price * (1 - self.p.exit_stop):
+            if pos.size <= 0:
                 continue
+
+            # 确定止损价：移动止盈 vs 固定止损
+            if self.p.trailing_stop > 0:
+                highest = self._open_trades.get(d._name, {}).get("highest_price", pos.price)
+                stop_price = highest * (1 - self.p.trailing_stop)
+                triggered = d.close[0] < stop_price
+            else:
+                stop_price = pos.price * (1 - self.p.exit_stop)
+                triggered = d.close[0] < stop_price
+
+            if not triggered:
+                continue
+
             # 跌停检查（与调仓卖出一致）
             prev_c = d.close[-1] if len(d) > 1 else d.close[0]
             if prev_c > 0 and TradingConfig.is_at_limit_down(d.close[0], prev_c, d._name):
-                continue  # 跌停卖不掉，顺延
-            # 记录止损出场 + 累计回款
-            self._record_exit(d._name, d.close[0], pos.size, pos.price, "止损")
-            self._sold_today[d._name] = (d.close[0], "止损")
+                continue  # 跌停卖不掉
+
+            reason = "移动止盈" if self.p.trailing_stop > 0 else "止损"
+            self._record_exit(d._name, d.close[0], pos.size, pos.price, reason)
+            self._sold_today[d._name] = (d.close[0], reason)
             stop_proceeds += pos.size * d.close[0] * NET_SELL
             self.close(data=d)
             stopped_out.add(d._name)
+            # 记入冷却列表
+            if self.p.cooling_days > 0:
+                self._recently_sold[d._name] = pd.Timestamp(self.datas[0].datetime.date(0))
 
         # ── 调仓 ──
         held = {d._name for d in self.datas if len(d) > 0 and self.getposition(d).size > 0}
@@ -111,9 +139,44 @@ class LuStrategy(bt.Strategy):
                 self._sold_today[d._name] = (d.close[0], "调仓")
                 self.close(data=d)
                 sold_codes.add(d._name)
+                # 记入冷却列表
+                if self.p.cooling_days > 0:
+                    self._recently_sold[d._name] = pd.Timestamp(self.datas[0].datetime.date(0))
 
         portfolio_value = self.broker.getvalue()  # 已含所有持仓市值
         available_cash = self.broker.getcash() + sell_proceeds
+
+        # ── 金字塔加仓（盈利>阈值时追加现有仓位）──
+        if self.p.pyramid_threshold > 0:
+            for d in self.datas:
+                if len(d) == 0:
+                    continue
+                pos = self.getposition(d)
+                if pos.size <= 0 or d._name in self._sold_today:
+                    continue
+                profit_pct = (d.close[0] - pos.price) / pos.price if pos.price > 0 else 0
+                if profit_pct < self.p.pyramid_threshold:
+                    continue
+                # 加仓金额不超过原始仓位的 pyramid_ratio 倍
+                add_val = pos.size * pos.price * self.p.pyramid_ratio
+                add_sz = int(add_val / d.close[0] / 100) * 100
+                if add_sz <= 0:
+                    continue
+                add_cost = add_sz * d.close[0] * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+                if add_cost > available_cash * 0.3:  # 单次加仓不超过可用现金30%
+                    add_sz = int(available_cash * 0.3 / d.close[0] / 100) * 100
+                    if add_sz <= 0:
+                        continue
+                self.buy(data=d, size=add_sz)
+                available_cash -= add_sz * d.close[0] * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+                today_str = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
+                self._trade_log.append({
+                    "日期": today_str, "操作": "加仓", "股票代码": d._name, "股票名称": "",
+                    "入场价": round(d.close[0], 2), "当前价/出场价": "",
+                    "盈亏%": f"{profit_pct:+.1%}", "股数": add_sz, "入场日期": "",
+                    "总资产": round(self.broker.getvalue(), 2),
+                })
+                logger.info(f"  [金字塔] {d._name} 加仓 {add_sz}股 @ {d.close[0]:.2f} (盈利{profit_pct:.1%})")
 
         available_feeds = {d._name for d in self.datas if len(d) > 0 and d._name != "bench"}
         # 从排名列表中按序买入，跳过涨停的，凑满 top_n 只
@@ -130,6 +193,12 @@ class LuStrategy(bt.Strategy):
             if code in self._open_trades or code in self._sold_today:
                 self._today_skip_reasons[code] = "已持有"
                 continue
+            # ── 冷却期检查 ──
+            if self.p.cooling_days > 0 and code in self._recently_sold:
+                sell_dt = self._recently_sold[code]
+                if (today - sell_dt).days <= self.p.cooling_days:
+                    self._today_skip_reasons[code] = f"冷却期({(today-sell_dt).days}d)"
+                    continue
             if code not in available_feeds:
                 self._today_skip_reasons[code] = "无数据"
                 continue
@@ -139,6 +208,10 @@ class LuStrategy(bt.Strategy):
                 continue
             px = d.close[0]
             prev_c = d.close[-1] if len(d) > 1 else px
+            # ── 收阳确认 ──
+            if self.p.require_positive_day and px <= prev_c:
+                self._today_skip_reasons[code] = "未收阳"
+                continue
             if prev_c > 0 and TradingConfig.is_at_limit_up(px, prev_c, code):
                 self._today_skip_reasons[code] = "涨停"
                 continue
@@ -263,9 +336,10 @@ class LuStrategy(bt.Strategy):
                     if not is_ld:
                         logger.warning(f"[{today}] {code} 不在信号也不在卖出列表，疑似调仓遗漏")
 
-        # ── 10. 卖出必须有原因（止损或调仓）──
+        # ── 10. 卖出必须有原因 ──
+        VALID_REASONS = ("止损", "调仓", "移动止盈")
         for code, (_, reason) in self._sold_today.items():
-            assert reason in ("止损", "调仓"), \
+            assert reason in VALID_REASONS, \
                 f"[{today}] {code} 卖出原因异常: {reason}"
 
         # 清理当日追踪
@@ -321,6 +395,9 @@ class LuStrategy(bt.Strategy):
             d = next((x for x in self.datas if x._name == code), None)
             if d is None or len(d) == 0: continue
             cur_price = d.close[0]
+            # 更新最高价（移动止盈用）
+            prev_high = entry.get("highest_price", entry["entry_price"])
+            entry["highest_price"] = max(prev_high, cur_price)
             pnl_pct = round((cur_price / entry["entry_price"] - 1) * 100, 2) if entry["entry_price"] > 0 else 0
             self._trade_log.append({
                 "日期": today, "操作": "持仓", "股票代码": code, "股票名称": "",
@@ -398,8 +475,14 @@ def run_bt(args):
         added += 1
 
     # 策略 + Observer + Analyzer
+    py_thresh, py_ratio = args.pyramid if args.pyramid else (0.0, 0.5)
     cerebro.addstrategy(LuStrategy, top_n=args.top_n, signals_csv=args.signals,
-                         exit_stop=args.exit_stop, exec_close=args.exec_close)
+                         exit_stop=args.exit_stop, exec_close=args.exec_close,
+                         trailing_stop=args.trailing_stop or 0.0,
+                         pyramid_threshold=py_thresh,
+                         pyramid_ratio=py_ratio,
+                         cooling_days=args.cooling_days if args.cooling else 0,
+                         require_positive_day=args.require_positive_day)
     cerebro.addobserver(EquityObserver)
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="dd")
@@ -501,22 +584,63 @@ def run_bt(args):
         "max_drawdown": round(mdd, 4), "trades": n_tr, "exec_mode": "close" if args.exec_close else "T+1_open",
     }
     dr_dict = {}  # daily returns can be computed from equity if needed
+    # ── 确定 version_id ──
     try:
         eng = get_engine()
+        if args.variant_label:
+            version_id = _ensure_strategy_version(eng, args.variant_label)
+        elif args.version_id:
+            version_id = args.version_id
+        else:
+            version_id = 49  # 兼容旧调用
         with eng.begin() as conn:
             conn.execute(text("""
                 INSERT INTO backtest_results (version_id, start_date, end_date,
                     quality, metrics_json, equity_curve_json, daily_returns_json)
                 VALUES (:v, :s, :e, 'valid', :m, :eq, :dr)
-            """), {"v": 49, "s": args.start, "e": str(end_dt.date()),
+            """), {"v": version_id, "s": args.start, "e": str(end_dt.date()),
                    "m": json.dumps(metrics, ensure_ascii=False),
                    "eq": json.dumps(eq_dict), "dr": json.dumps(dr_dict)})
         eng.dispose()
-        logger.info("回测结果已写入 backtest_results")
+        logger.info(f"回测结果已写入 backtest_results (version_id={version_id})")
     except Exception as e:
         logger.warning(f"DB 写入失败（Web 无法展示本次回测）: {e}")
 
     return {"final_value": fv, "return": ret, "equity": equity}
+
+
+def _ensure_strategy_version(engine, label: str) -> int:
+    """确保 strategy_configs + strategy_versions 有对应行，返回 version_id。"""
+    with engine.begin() as conn:
+        # 确保 strategy_configs 存在（先查后插，避免 RETURNING 在 ON CONFLICT DO NOTHING 返回空）
+        sid = conn.execute(
+            text("SELECT id FROM strategy_configs WHERE name = 'limit_up'")
+        ).scalar()
+        if not sid:
+            conn.execute(text("""
+                INSERT INTO strategy_configs (name, type, description)
+                VALUES ('limit_up', 'static', '涨停动量策略（规则型）')
+                ON CONFLICT (name) DO NOTHING
+            """))
+            sid = conn.execute(
+                text("SELECT id FROM strategy_configs WHERE name = 'limit_up'")
+            ).scalar()
+        if not sid:
+            raise RuntimeError("无法创建 strategy_configs 行")
+
+        # 确保 strategy_versions 存在
+        conn.execute(text("""
+            INSERT INTO strategy_versions (strategy_id, version, algorithm_type, feature_list_version)
+            VALUES (:sid, :ver, 'rule_based', 'v1')
+            ON CONFLICT (strategy_id, version) DO NOTHING
+        """), {"sid": sid, "ver": label})
+        vid = conn.execute(
+            text("SELECT id FROM strategy_versions WHERE strategy_id = :sid AND version = :ver"),
+            {"sid": sid, "ver": label},
+        ).scalar()
+        if not vid:
+            raise RuntimeError(f"无法创建 strategy_versions 行: sid={sid}, ver={label}")
+        return vid
 
 
 def parse_args():
@@ -528,6 +652,21 @@ def parse_args():
     p.add_argument("--signals", default="data/signals/bt_signals.csv")
     p.add_argument("--exec-close", action="store_true")
     p.add_argument("--exit-stop", type=float, default=0.08)
+    p.add_argument("--variant-label", type=str, default=None,
+                   help="策略变体标签，自动注册 strategy_configs/versions")
+    p.add_argument("--version-id", type=int, default=None,
+                   help="直接指定 strategy_versions.id（覆盖 variant-label）")
+    # 移动止盈
+    p.add_argument("--trailing-stop", type=float, default=0.0,
+                   help=">0 启用移动止盈，从最高点回落 X 卖出")
+    # 金字塔加仓
+    p.add_argument("--pyramid", nargs=2, type=float, default=None,
+                   metavar=("THRESHOLD", "RATIO"),
+                   help="金字塔加仓: 盈利阈值 加仓比例")
+    # 入场冷却
+    p.add_argument("--cooling", action="store_true", help="启用入场冷却期")
+    p.add_argument("--cooling-days", type=int, default=3, help="冷却天数")
+    p.add_argument("--require-positive-day", action="store_true", help="买入当天必须收阳")
     return p.parse_args()
 
 
