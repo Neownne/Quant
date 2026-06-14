@@ -148,7 +148,7 @@ class LuStrategy(bt.Strategy):
                     self._recently_sold[d._name] = pd.Timestamp(self.datas[0].datetime.date(0))
 
         # 手工显示值：broker 在 coc 下不更新，买入/持仓行统一用此值
-        display_total = self.broker.getvalue() + sell_proceeds
+        display_total = self.broker.getvalue()  # broker 已含所有持仓市值（coc 下买卖都次日结算）
         available_cash = self.broker.getcash() + sell_proceeds
 
         # ── 金字塔加仓（盈利>阈值时追加现有仓位）──
