@@ -61,6 +61,7 @@ class LuStrategy(bt.Strategy):
         self._last_signal_date = None  # 上一个有信号的交易日
         self._recently_sold = {}   # {code: sell_date} 冷却期追踪
         self._manual_cash = None   # 手工跟踪现金（coc 延迟时用）
+        self._had_signal_today = False
 
     def prenext(self):
         """委托给 next()，避免因部分 feed 无数据而阻塞整个回测。"""
@@ -69,6 +70,7 @@ class LuStrategy(bt.Strategy):
     def next(self):
         # 确认上日挂单成交（coc 在 bar 之间结算）
         self._confirm_settled_buys()
+        self._had_signal_today = False
 
         today = pd.Timestamp(self.datas[0].datetime.date(0))
         if today not in self.sig_dates:
@@ -79,6 +81,7 @@ class LuStrategy(bt.Strategy):
 
         sigs = self.signals[today]
         self._last_signal_date = today
+        self._had_signal_today = True
         targets = set(str(s.code).zfill(6) for _, s in sigs.iterrows())
 
         # ── 止损（支持固定止损 / 移动止盈）──
@@ -144,7 +147,8 @@ class LuStrategy(bt.Strategy):
                 if self.p.cooling_days > 0:
                     self._recently_sold[d._name] = pd.Timestamp(self.datas[0].datetime.date(0))
 
-        portfolio_value = self.broker.getvalue()  # 已含所有持仓市值
+        # 手工显示值：broker 在 coc 下不更新，买入/持仓行统一用此值
+        display_total = self.broker.getvalue() + sell_proceeds
         available_cash = self.broker.getcash() + sell_proceeds
 
         # ── 金字塔加仓（盈利>阈值时追加现有仓位）──
@@ -169,20 +173,22 @@ class LuStrategy(bt.Strategy):
                     if add_sz <= 0:
                         continue
                 self.buy(data=d, size=add_sz)
-                available_cash -= add_sz * d.close[0] * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+                py_cost = add_sz * d.close[0] * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+                available_cash -= py_cost
+                display_total -= (py_cost - add_sz * d.close[0])  # 只扣交易费
                 today_str = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
                 self._trade_log.append({
                     "日期": today_str, "操作": "加仓", "股票代码": d._name, "股票名称": "",
                     "入场价": round(d.close[0], 2), "当前价/出场价": "",
                     "盈亏%": f"{profit_pct:+.1%}", "股数": add_sz, "入场日期": today_str,
-                    "总资产": round(self.broker.getvalue(), 2),
-                    "当前现金": round(self.broker.getcash(), 2),
+                    "总资产": round(display_total, 2),
+                    "当前现金": round(available_cash, 2),
                 })
                 logger.info(f"  [金字塔] {d._name} 加仓 {add_sz}股 @ {d.close[0]:.2f} (盈利{profit_pct:.1%})")
 
         available_feeds = {d._name for d in self.datas if len(d) > 0 and d._name != "bench"}
         # 从排名列表中按序买入，跳过涨停的，凑满 top_n 只
-        target_ps = portfolio_value / max(self.p.top_n, 1)
+        target_ps = display_total / max(self.p.top_n, 1)
         max_per_stock = target_ps * 1.5
 
         # 记录今日信号
@@ -230,23 +236,22 @@ class LuStrategy(bt.Strategy):
                 continue
             self.buy(data=d, size=sz)
             self._bought_today[code] = px
-            # 立即记入 _open_trades + 买入日志
             today_str = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
             self._open_trades[code] = {"entry_date": today_str, "entry_price": px, "quantity": sz}
             buy_cost = sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
-            cash_after = available_cash - buy_cost
-            # 总资产 = 买入前资产 + 新持仓市值 - 交易成本
-            total_after = round(portfolio_value + sz * px - buy_cost, 2)
+            available_cash -= buy_cost
+            display_total -= (buy_cost - sz * px)  # 只扣交易佣金
             self._trade_log.append({
                 "日期": today_str, "操作": "买入", "股票代码": code, "股票名称": "",
                 "入场价": round(px, 2), "当前价/出场价": "", "盈亏%": "",
                 "股数": sz, "入场日期": today_str,
-                "总资产": total_after, "当前现金": round(cash_after, 2),
+                "总资产": round(display_total, 2), "当前现金": round(available_cash, 2),
             })
-            available_cash = cash_after
 
-        # 手工现金（coc 下 broker.getcash() 当天不变，用此变量）
+        # 手工值（coc 下 broker 不变，信号日始终用此值）
         self._manual_cash = available_cash
+        self._manual_total = display_total
+        self._had_signal_today = True
 
         # 日终持仓快照 + 校验
         self._record_holdings()
@@ -396,12 +401,13 @@ class LuStrategy(bt.Strategy):
                 pos_val += entry["quantity"] * entry["entry_price"]
 
         # 手工总资产优先（coc 日 broker 未结算），否则回退 broker
-        if self._manual_cash is not None:
-            total = round(self._manual_cash + pos_val, 2)
+        # 信号日用手工值（coc 下 broker 当日不更新买卖），非信号日 broker 已结算
+        if self._manual_cash is not None and self._had_signal_today:
             calc_cash = round(self._manual_cash, 2)
+            total = round(calc_cash + pos_val, 2)
         else:
-            total = round(self.broker.getvalue(), 2)
-            calc_cash = round(total - pos_val, 2)
+            calc_cash = round(self.broker.getcash(), 2)
+            total = round(calc_cash + pos_val, 2)
 
         # 清理 backtrader 已结算的卖出
         bt_held = set()
