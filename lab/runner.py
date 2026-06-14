@@ -7,8 +7,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
-from pathlib import Path
 
 from loguru import logger
 from sqlalchemy import text
@@ -38,7 +36,6 @@ class LabRunner:
     def run_one(self, variant: StrategyVariant) -> dict:
         """运行单个变体，返回包含 metrics 和 variant_name 的 dict。"""
         t0 = time.time()
-        logger.info(f"── 变体: {variant.name} ──")
 
         # 1. 生成信号
         signals_csv = self._signals_path(variant.name)
@@ -52,11 +49,19 @@ class LabRunner:
         ]
         gen_args.extend(variant.to_gen_signals_args())
 
-        logger.debug(f"  gen_signals: {variant.name}")
-        r = subprocess.run(gen_args, capture_output=True, text=True, cwd=PROJECT_ROOT)
+        logger.info(f"  [{variant.name}] 生成信号 {self.benchmark_start}~{self.benchmark_end} ...")
+        r = subprocess.run(gen_args, capture_output=True, text=True, cwd=PROJECT_ROOT,
+                          timeout=600)
         if r.returncode != 0:
-            logger.error(f"  gen_signals 失败: {r.stderr[-500:]}")
-            return {"variant_name": variant.name, "error": "gen_signals_failed", "stderr": r.stderr[-500:]}
+            err_tail = (r.stderr or "")[-300:]
+            logger.error(f"  [{variant.name}] gen_signals 失败: {err_tail}")
+            return {"variant_name": variant.name, "error": "gen_signals_failed", "stderr": err_tail}
+        # 提取信号条数
+        sig_info = ""
+        for line in (r.stderr or "").split("\n"):
+            if "信号导出" in line:
+                sig_info = line.strip()
+        logger.info(f"  [{variant.name}] {sig_info}")
 
         # 2. 跑回测
         bt_args = [
@@ -68,22 +73,24 @@ class LabRunner:
         ]
         bt_args.extend(variant.to_bt_args(signals_csv))
 
-        logger.debug(f"  bt_backtest: {variant.name}")
-        r = subprocess.run(bt_args, capture_output=True, text=True, cwd=PROJECT_ROOT)
+        logger.info(f"  [{variant.name}] 回测中 ...")
+        r = subprocess.run(bt_args, capture_output=True, text=True, cwd=PROJECT_ROOT,
+                          timeout=600)
         if r.returncode != 0:
-            logger.error(f"  bt_backtest 失败: {r.stderr[-500:]}")
-            return {"variant_name": variant.name, "error": "bt_backtest_failed", "stderr": r.stderr[-500:]}
+            err_tail = (r.stderr or "")[-300:]
+            logger.error(f"  [{variant.name}] bt_backtest 失败: {err_tail}")
+            return {"variant_name": variant.name, "error": "bt_backtest_failed", "stderr": err_tail}
 
         # 3. 从 DB 读取最新指标
         metrics = self._read_latest_metrics(variant.name)
         elapsed = time.time() - t0
         if metrics:
-            logger.info(f"  {variant.name}: Sharpe={metrics.get('sharpe', 'N/A')}, "
+            logger.info(f"  [{variant.name}] Sharpe={metrics.get('sharpe', 'N/A')}, "
                         f"MDD={metrics.get('max_drawdown', 'N/A')}, "
-                        f"Return={metrics.get('return', 'N/A')} "
+                        f"Ret={metrics.get('return', 'N/A')} "
                         f"({elapsed:.0f}s)")
         else:
-            logger.warning(f"  {variant.name}: 未能读取回测指标 ({elapsed:.0f}s)")
+            logger.warning(f"  [{variant.name}] 无回测指标 ({elapsed:.0f}s)")
 
         return {"variant_name": variant.name, "elapsed": elapsed, **metrics} if metrics else \
                {"variant_name": variant.name, "error": "metrics_read_failed"}
@@ -116,7 +123,7 @@ class LabRunner:
             return []
 
         logger.info(f"═══ 批量回测 {len(variants)} 个变体 "
-                     f"({self.benchmark_start} → {self.benchmark_end}) ═══")
+                     f"({self.benchmark_start} -> {self.benchmark_end}) ═══")
 
         if parallel <= 1:
             results = []
@@ -125,7 +132,7 @@ class LabRunner:
                 results.append(self.run_one(v))
             return results
 
-        # 并行模式：每个 worker 独立进程
+        # 并行模式
         logger.info(f"  并行模式: {parallel} workers")
         results = []
         with ProcessPoolExecutor(max_workers=parallel) as ex:
