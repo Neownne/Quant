@@ -175,6 +175,7 @@ class LuStrategy(bt.Strategy):
                     "入场价": round(d.close[0], 2), "当前价/出场价": "",
                     "盈亏%": f"{profit_pct:+.1%}", "股数": add_sz, "入场日期": "",
                     "总资产": round(self.broker.getvalue(), 2),
+                    "当前现金": round(self.broker.getcash(), 2),
                 })
                 logger.info(f"  [金字塔] {d._name} 加仓 {add_sz}股 @ {d.close[0]:.2f} (盈利{profit_pct:.1%})")
 
@@ -235,6 +236,7 @@ class LuStrategy(bt.Strategy):
                 "日期": today_str, "操作": "买入", "股票代码": code, "股票名称": "",
                 "入场价": round(px, 2), "当前价/出场价": "", "盈亏%": "",
                 "股数": sz, "入场日期": "", "总资产": round(self.broker.getvalue(), 2),
+                    "当前现金": round(self.broker.getcash(), 2),
             })
             available_cash -= sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
 
@@ -361,17 +363,16 @@ class LuStrategy(bt.Strategy):
         self._trade_log.append({
             "日期": today, "操作": f"卖出({reason})", "股票代码": code, "股票名称": "",
             "入场价": round(entry_px, 2), "当前价/出场价": round(exit_price, 2),
-            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": "", "总资产": total,
+            "盈亏%": pnl_pct, "股数": entry_qty, "入场日期": "", "总资产": total, "当前现金": round(self.broker.getcash(), 2),
         })
 
     def _confirm_settled_buys(self):
-        """用 backtrader 实际成交价更新 _open_trades 中的估算入场价。"""
+        """确认 backtrader 已结算买入——只同步数量，入场价保持下单价不变。"""
         for d in self.datas:
             if len(d) == 0: continue
             pos = self.getposition(d)
             if pos.size > 0 and pos.price > 0 and d._name in self._open_trades:
-                # 更新为 backtrader 的实际均价（含滑点）
-                self._open_trades[d._name]["entry_price"] = pos.price
+                # 只更新数量（coc 模式下应与下单数量一致），入场价固定
                 self._open_trades[d._name]["quantity"] = int(pos.size)
 
     def _record_holdings(self):
@@ -402,7 +403,7 @@ class LuStrategy(bt.Strategy):
             self._trade_log.append({
                 "日期": today, "操作": "持仓", "股票代码": code, "股票名称": "",
                 "入场价": round(entry["entry_price"], 2), "当前价/出场价": round(cur_price, 2),
-                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "", "总资产": total,
+                "盈亏%": pnl_pct, "股数": entry["quantity"], "入场日期": "", "总资产": total, "当前现金": round(self.broker.getcash(), 2),
             })
 
 # ── 权益曲线 Observer ──
@@ -558,7 +559,7 @@ def run_bt(args):
     trade_log = getattr(strat, "_trade_log", [])
     with open(trades_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["日期", "操作", "股票代码", "股票名称", "入场价", "当前价/出场价", "盈亏%", "股数", "入场日期", "总资产"])
+        w.writerow(["日期", "操作", "股票代码", "股票名称", "入场价", "当前价/出场价", "盈亏%", "股数", "入场日期", "总资产", "当前现金"])
         # 按日期排序，同一天内买入→持仓→卖出
         def _sort_key(t):
             op = t["操作"]
@@ -572,7 +573,7 @@ def run_bt(args):
             t["股票名称"] = name_map.get(code, "")
             w.writerow([t["日期"], t["操作"], code, t["股票名称"],
                         t["入场价"], t["当前价/出场价"],
-                        t["盈亏%"], t["股数"], t["入场日期"], t["总资产"]])
+                        t["盈亏%"], t["股数"], t["入场日期"], t["总资产"], t.get("当前现金", "")])
     logger.info(f"交易明细: {trades_path} ({len(trade_log)} 笔)")
 
     # ── DB 写入 backtest_results（Web 展示用）──
