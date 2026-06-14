@@ -24,6 +24,7 @@ def parse_args():
     p.add_argument("--end", default=None)
     p.add_argument("--top-n", type=int, default=5)
     p.add_argument("--cash", type=float, default=1_000_000)
+    p.add_argument("--label", type=str, default=None, help="策略标签(用于文件名)")
     return p.parse_args()
 
 
@@ -56,9 +57,19 @@ def main():
     ]
     subprocess.run(bt_cmd, check=True)
 
-    # ── Step 3: 输出 ──
-    trades_csv = os.path.join(TRADES_DIR, f"trades_top{args.top_n}.csv")
-    equity_json = os.path.join(TRADES_DIR, f"equity_top{args.top_n}.json")
+    # ── Step 3: 输出（文件名含日期区间+策略名）──
+    date_tag = f"{args.start.replace('-','')}_{end_date.replace('-','')}"
+    label = args.label or "E4"
+    safe_label = label.replace("/", "_").replace(" ", "_")
+    trades_csv = os.path.join(TRADES_DIR, f"trades_top{args.top_n}_{date_tag}_{safe_label}.csv")
+    equity_json = os.path.join(TRADES_DIR, f"equity_top{args.top_n}_{date_tag}_{safe_label}.json")
+    # 重命名 bt_backtest 输出的固定文件名
+    src_trades = os.path.join(TRADES_DIR, f"trades_top{args.top_n}.csv")
+    src_equity = os.path.join(TRADES_DIR, f"equity_top{args.top_n}.json")
+    if os.path.exists(src_trades):
+        os.rename(src_trades, trades_csv)
+    if os.path.exists(src_equity):
+        os.rename(src_equity, equity_json)
     logger.info(f"═══ 完成 ═══")
     logger.info(f"  交割单: {trades_csv}")
     logger.info(f"  权益曲线: {equity_json}")
