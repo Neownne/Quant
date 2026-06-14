@@ -1,25 +1,42 @@
 # 项目规范
 
-## 铁律 —— 绝对禁止的操作
+## 铁律
+
+### 回测
 
 | # | 规则 | 原因 |
 |---|------|------|
-| 1 | **跑回测必须用管线** `python scripts/run_backtest_pipeline.py --start X --top-n N` | 管线自动处理信号深度（`max(N*4,20)`），手动调 gen_signals 的 --top-n 会导致候选池太浅、全涨停日买不到票 |
-| 2 | **不得手动拼接 gen_signals + bt_backtest** | 参数传递容易出错（--top-n 深度、--mcap-proxy、--exec-close），管线已封装 |
-| 3 | **不得修改 bt_backtest.py 交易逻辑** | coc 现金跟踪公式已验证正确，重复"修复"会引入新 bug。卖出回款公式 `available_cash = broker.getcash() + sell_proceeds` 是 coc 下唯一正确做法 |
-| 4 | **策略实验用 lab** `python scripts/run_lab_forever.py` | 不要手动逐个跑变体。lab 负责：搜索→变体生成→批量回测→评分→报告 |
-| 5 | **新增变体只改 variant JSON** | 不要直接改 bt_backtest.py 参数。在 `lab/variants/` 里加 JSON，lab 会自动跑 |
+| 1 | **跑回测只用管线** `python scripts/run_backtest_pipeline.py --start 2025-01-01 --top-n 5` | 管线自动处理信号深度 `max(N*4,20)`，保证涨停顺延有足够候选。永远不要手动调 gen_signals 的 `--top-n` |
+| 2 | **不手动拼 gen_signals + bt_backtest** | `--top-n`、`--mcap-proxy`、`--exec-close` 等参数组合已被管线固化，手拼必出错 |
+| 3 | **不改 bt_backtest.py 交易逻辑** | coc 下 `available_cash = broker.getcash() + sell_proceeds` 是唯一正确公式，已验证。不要因为"现金负数"、"跨日跳变"等表面现象去"修复"它 |
 
-## Claude Code 八荣八耻
+### 实验
 
-1. 以认真查询为荣，以猜测接口为耻。
-2. 以寻求确认为荣，以模糊执行为耻。
-3. 以人类确认为荣，以臆想业务为耻。
-4. 以复用现有为荣，以新造接口为耻。
-5. 以主动验证为荣，以跳过测试为耻。
-6. 以遵循规范为荣，以破坏架构为耻。
-7. 以诚实承认无知为荣，以假装理解为耻。
-8. 以谨慎重构为荣，以盲目修改为耻。
+| # | 规则 | 原因 |
+|---|------|------|
+| 4 | **批量策略搜索用 lab** `python scripts/run_lab_forever.py --start 2020-01-01 --parallel 2` | lab 负责搜索→变体→批量回测→评分排名→循环。不要手动逐个跑变体 |
+| 5 | **新变体只写 JSON**，不改 bt_backtest.py | 所有参数（市值/均线/止损/移动止盈/金字塔/冷却）都在 `lab/variants/` 的 JSON 里，lab 自动传给管线 |
+
+### 行为
+
+| # | 八荣八耻 | 具体体现 |
+|---|---------|---------|
+| 6 | 认真查询，不猜测接口 | 改代码前先 grep/read 确认函数签名、参数名、调用方式 |
+| 7 | 复用现有，不新造接口 | 能用 `run_backtest_pipeline.py` 就别写新脚本；能用 `load_daily_data()` 就别写新 SQL |
+| 8 | 主动验证，不跳过测试 | 改完就跑 `python scripts/run_backtest_pipeline.py --start 2025-01-01 --top-n 2` 验证 |
+| 9 | 遵循规范，不破坏架构 | 策略逻辑放 `strategies/limit_up/`；实验放 `lab/`；不改 `bt_backtest.py` 交易核心 |
+| 10 | 承认无知，不假装理解 | 不确定的参数先去查 `config/settings.py`、`lab/variant.py` 或问用户 |
+| 11 | 谨慎重构，不盲目修改 | 改 bt_backtest.py、gen_signals.py、execution.py 前先确认影响范围 |
+
+## 管线 vs 实验室
+
+| | `run_backtest_pipeline.py` | `run_lab_forever.py` |
+|---|---|---|
+| 用途 | **单次回测**：一组参数 → 一个结果 | **持续优化**：搜索→N组变体→批量回测→评分→循环 |
+| 参数 | `--start` `--top-n` `--cash` | `--start` `--parallel` |
+| 输出 | 一个 CSV + JSON + DB 记录 | 每轮一个排名报告，所有结果入 `backtest_results` 表 |
+| 谁用 | 你手动验证某个参数组合 | 后台自己跑，不断找更好的策略 |
+| 信号深度 | 自动 `max(N*4, 20)` | 同上，通过 variant JSON 传参 |
 
 ## 快速参考
 
