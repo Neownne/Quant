@@ -95,10 +95,16 @@ class StrategyVariant:
         # int 参数（mcap/price 用 int，gen_signals.py 期望 int 类型）
         int_keys = {"mcap_min", "mcap_max", "price_min", "price_max",
                     "lu_lookback", "lu_count", "min_conditions", "min_listed_days"}
+        # gen_signals.py 的参数名映射
+        key_map = {
+            "lu_lookback": "limit-up-lookback",
+            "lu_count": "limit-up-count",
+        }
         for key in int_keys:
             val = getattr(self, key)
             if val is not None:
-                args.extend([f"--{key.replace('_', '-')}", str(int(val))])
+                cli_key = key_map.get(key, key.replace("_", "-"))
+                args.extend([f"--{cli_key}", str(int(val))])
         # 布尔开关
         for flag in ["lu_score", "lu_decay", "lu_quality", "lu_streak",
                      "trend_filter", "no_5day_streak"]:
