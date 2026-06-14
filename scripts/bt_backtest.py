@@ -232,13 +232,17 @@ class LuStrategy(bt.Strategy):
             # 立即记入 _open_trades + 买入日志
             today_str = self.datas[0].datetime.date(0).strftime("%Y-%m-%d")
             self._open_trades[code] = {"entry_date": today_str, "entry_price": px, "quantity": sz}
+            buy_cost = sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+            cash_after = available_cash - buy_cost
+            # 总资产 = 买入前资产 + 新持仓市值 - 交易成本
+            total_after = round(portfolio_value + sz * px - buy_cost, 2)
             self._trade_log.append({
                 "日期": today_str, "操作": "买入", "股票代码": code, "股票名称": "",
                 "入场价": round(px, 2), "当前价/出场价": "", "盈亏%": "",
-                "股数": sz, "入场日期": "", "总资产": round(self.broker.getvalue(), 2),
-                    "当前现金": round(self.broker.getcash(), 2),
+                "股数": sz, "入场日期": "",
+                "总资产": total_after, "当前现金": round(cash_after, 2),
             })
-            available_cash -= sz * px * (1 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE)
+            available_cash = cash_after
 
         # 日终持仓快照 + 校验
         self._record_holdings()
