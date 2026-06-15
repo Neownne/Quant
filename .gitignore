@@ -18,3 +18,6 @@ data/backtest_trades
 data/paper_signals
 data/cache/
 data/data_integrity_report.json
+data/models/
+data/signals/bt_signals_*.csv
+*.pkl
