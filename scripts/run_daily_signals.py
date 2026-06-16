@@ -20,6 +20,9 @@ import pandas as pd
 from loguru import logger
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 from config.settings import TradingConfig
@@ -29,11 +32,12 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 # ── 邮箱配置 ──
 EMAIL_CONFIG = {
-    "smtp_host": os.environ.get("SMTP_HOST", "smtp.qq.com"),
-    "smtp_port": int(os.environ.get("SMTP_PORT", "465")),
-    "user": os.environ.get("SMTP_USER", ""),
-    "password": os.environ.get("SMTP_PASS", ""),
-    "to": os.environ.get("EMAIL_TO", ""),
+    "smtp_host": os.getenv("SMTP_HOST", "smtp.qq.com"),
+    "smtp_port": int(os.getenv("SMTP_PORT", "465")),
+    "user": os.getenv("SMTP_USER", ""),
+    "password": os.getenv("SMTP_PASS", ""),
+    "from_addr": os.getenv("EMAIL_FROM", ""),
+    "to": os.getenv("EMAIL_TO", ""),
 }
 
 
@@ -131,21 +135,30 @@ def screen_limit_up():
     today['ret_calc'] = today['close'] / today['prev_close'] - 1
     today['mcap'] = ex_td.get('market_cap', np.nan) if not ex_td.empty else np.nan
 
-    # 涨停筛选
-    lu = today[today['ret_calc'] >= 0.09].copy()
+    # 涨停筛选：复用项目标准 (LimitUpParams: 市值30-500亿, 股价5-63, MA5>MA10, 近20日>1次涨停)
+    daily['ma5'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(5,min_periods=3).mean())
+    daily['ma10'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(10,min_periods=5).mean())
+    daily['lu_20d'] = daily.groupby('code')['ret'].transform(lambda x: (x>=0.09).rolling(20,min_periods=10).sum())
+    today_all = daily[daily['trade_date'] == td].set_index('code')
+    today_all['prev_close'] = prev['close']
+    today_all['ret_calc'] = today_all['close'] / today_all['prev_close'] - 1
+    today_all['mcap'] = ex_td.get('market_cap', np.nan) if not ex_td.empty else np.nan
+
+    lu = today_all[
+        (today_all['ret_calc'] >= 0.09) &
+        (today_all['mcap'].between(30, 500)) &
+        (today_all['close'].between(5, 63)) &
+        (today_all['ma5'] > today_all['ma10']) &
+        (today_all['lu_20d'] > 1) &
+        (today_all['close'] > 0)
+    ].copy()
+
     if lu.empty:
         return pd.DataFrame()
 
-    # 基础过滤
-    mask = (
-        (lu['mcap'].between(10, 500) if 'mcap' in lu.columns else True) &
-        (lu['close'].between(3, 100)) &
-        (lu['close'] > 0)
-    )
-    lu = lu[mask]
     lu['name'] = lu.index.map(name_map)
     lu['industry'] = lu.index.map(ind_map)
-    lu['limit_up_score'] = (lu['ret_calc'] * 100).round(1)  # 涨停强度
+    lu['limit_up_score'] = (lu['ret_calc'] * 100).round(1)
 
     result = lu.nlargest(30, 'ret_calc')[
         ['name','industry','close','mcap','limit_up_score']
@@ -246,10 +259,10 @@ def screen_yaogu():
     return pd.DataFrame(signals).sort_values('yaogu_score', ascending=False) if signals else pd.DataFrame()
 
 
-def screen_bull():
+def screen_bull(exclude_gem_star=False):
     """牛股池：复用 screen_bull.py。"""
     from scripts.screen_bull import screen
-    return screen()
+    return screen(exclude_gem_star=exclude_gem_star)
 
 
 def find_intersections(limit_up_df, yaogu_df, bull_df):
@@ -285,7 +298,7 @@ def find_intersections(limit_up_df, yaogu_df, bull_df):
     return intersections
 
 
-def build_report(snapshot, limit_up, yaogu, bull, intersections):
+def build_report(snapshot, limit_up, yaogu, bull):
     """生成文本报告。"""
     lines = []
     lines.append("=" * 70)
@@ -305,7 +318,7 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections):
     lines.append("")
 
     # 涨停池
-    lines.append(f"【涨停池】{len(limit_up)} 只 — 今日涨停+基础过滤")
+    lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件筛选(市值/股价/均线/涨停次数)")
     if not limit_up.empty:
         for _, r in limit_up.head(10).iterrows():
             lines.append(f"  {r['代码']} {r['名称']:<8s} "
@@ -340,18 +353,13 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections):
         lines.append("  (今日无符合条件的牛股)")
     lines.append("")
 
-    # 交集
-    lines.append("【池子交集】— 同时被多策略选中的高置信候选")
-    for name, df in intersections.items():
-        if df is not None and not df.empty:
-            lines.append(f"  {name}: {len(df)}只")
-            for _, r in df.head(5).iterrows():
-                code = r.get('代码', r.name) if '代码' in df.columns else r.name
-                name_str = r.get('名称', '')
-                score = r.get('牛股评分', r.get('yaogu_score', ''))
-                lines.append(f"    {code} {name_str:<8s} 评分{score}")
-        else:
-            lines.append(f"  {name}: 无")
+    # 规则展示
+    lines.append("【各池规则】")
+    lines.append("  涨停池: 4条件(市值30-500亿+股价5-63+MA5>MA10+20日>1涨停) → 按涨停强度排序")
+    lines.append("  妖股池: 一字板(+3) + 低振幅<8%(+2) + 缩量板(+1) + 非量能极值(+1)")
+    lines.append("          + 连板≥2(+1) + 缩量整理≥1天(+1) → 评分≥3入选")
+    lines.append("  牛股池: 市值5-50亿 + 收盘<MA40 + 缩量 + 20日波动<3% + 60日无涨停")
+    lines.append("          → 综合评分(市值+偏离度+量比+波动+涨停次)")
     lines.append("")
 
     lines.append("=" * 70)
@@ -364,12 +372,13 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections):
 def send_email(subject, body):
     """发送邮件。"""
     if not EMAIL_CONFIG['user'] or not EMAIL_CONFIG['to']:
-        logger.warning("邮箱未配置，跳过发送。设置环境变量: QUANT_EMAIL_USER, QUANT_EMAIL_PASS, QUANT_EMAIL_TO")
+        logger.warning("邮箱未配置，跳过发送")
         return False
 
     msg = MIMEMultipart()
-    msg['From'] = EMAIL_CONFIG['user']
-    msg['To'] = EMAIL_CONFIG['to']
+    msg['From'] = EMAIL_CONFIG.get('from_addr', EMAIL_CONFIG['user'])
+    recipients = [r.strip() for r in EMAIL_CONFIG['to'].split(',') if r.strip()]
+    msg['To'] = ', '.join(recipients)
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
@@ -380,7 +389,7 @@ def send_email(subject, body):
             server = smtplib.SMTP(EMAIL_CONFIG['smtp_host'], EMAIL_CONFIG['smtp_port'], timeout=10)
             server.starttls()
         server.login(EMAIL_CONFIG['user'], EMAIL_CONFIG['password'])
-        server.sendmail(EMAIL_CONFIG['user'], EMAIL_CONFIG['to'], msg.as_string())
+        server.sendmail(EMAIL_CONFIG['user'], recipients, msg.as_string())
         server.quit()
         logger.success(f"邮件已发送到 {EMAIL_CONFIG['to']}")
         return True
@@ -393,6 +402,7 @@ def main():
     p = argparse.ArgumentParser(description="每日信号聚合器")
     p.add_argument("--send-email", action="store_true", help="发送邮件")
     p.add_argument("--no-email", action="store_true", help="不发送邮件(默认)")
+    p.add_argument("--exclude-gem-star", action="store_true", help="排除创业/科创板")
     args = p.parse_args()
 
     print("=" * 60)
@@ -413,14 +423,20 @@ def main():
     print(f"    妖股池: {len(yaogu)}只")
 
     print("  扫描牛股池...")
-    bull = screen_bull()
+    bull = screen_bull(exclude_gem_star=args.exclude_gem_star)
     print(f"    牛股池: {len(bull)}只")
 
-    # 交集
-    intersections = find_intersections(limit_up, yaogu, bull)
+    # 排除创业/科创板
+    if args.exclude_gem_star:
+        if not limit_up.empty:
+            limit_up = limit_up[~limit_up['代码'].astype(str).str.startswith(('300','301','688'))]
+        if not yaogu.empty:
+            code_col = 'code' if 'code' in yaogu.columns else '代码'
+            yaogu = yaogu[~yaogu[code_col].astype(str).str.startswith(('300','301','688'))]
+        print(f"    排除创业/科创后: 涨停{len(limit_up)} 妖股{len(yaogu)}")
 
     # 报告
-    report = build_report(snapshot, limit_up, yaogu, bull, intersections)
+    report = build_report(snapshot, limit_up, yaogu, bull)
     print("\n" + report)
 
     # 保存
@@ -445,6 +461,19 @@ def main():
         # 如果配置了邮箱，默认发送
         subject = f"量化信号日报 {snapshot['date']} | 涨停{len(limit_up)} 妖股{len(yaogu)} 牛股{len(bull)}"
         send_email(subject, report)
+
+    # 同花顺自选股导入文件
+    date_tag = snapshot['date'].replace('-', '')
+    ths_path = f"{OUT_DIR}/ths_import_{date_tag}.txt"
+    all_codes = set()
+    for df in [limit_up, yaogu, bull]:
+        if df is not None and not df.empty:
+            codes = df['代码'].tolist() if '代码' in df.columns else df.index.tolist()
+            all_codes.update(str(c).zfill(6) for c in codes)
+    with open(ths_path, 'w') as f:
+        for c in sorted(all_codes):
+            f.write(f"{c}\n")
+    print(f"同花顺导入: {ths_path} ({len(all_codes)}只)")
 
     print(f"\n报告已保存: {report_path}")
 

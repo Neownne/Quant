@@ -27,7 +27,7 @@ from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
 
-def screen(date_str=None):
+def screen(date_str=None, exclude_gem_star=False):
     """主筛选函数，返回 DataFrame。"""
     target_date = pd.Timestamp(date_str) if date_str else None
 
@@ -100,6 +100,9 @@ def screen(date_str=None):
         (td_data['lu_60d'].fillna(0) < 2) &
         (td_data['close'] > 0)
     )
+    # 排除创业/科创板
+    if exclude_gem_star:
+        mask = mask & (~td_data.index.str.startswith(('300','301','688')))
     sel = td_data[mask].copy()
 
     if sel.empty:
@@ -151,18 +154,31 @@ def main():
     p.add_argument("--date", default=None)
     p.add_argument("--top", type=int, default=30, help="输出Top-N")
     p.add_argument("--json", action="store_true", help="输出JSON")
+    p.add_argument("--exclude-gem-star", action="store_true", help="排除创业/科创板(300/301/688)")
+    p.add_argument("--ths", action="store_true", help="输出同花顺自选股导入格式")
     args = p.parse_args()
 
-    df = screen(args.date)
+    df = screen(args.date, exclude_gem_star=args.exclude_gem_star)
 
     if df.empty:
         print("今日无符合条件的牛股候选")
         return
 
     print(f"\n{'='*80}")
-    print(f"  牛股候选池 (缩量筑底) — {len(df)} 只")
+    print(f"  牛股候选池 (缩量筑底) — {len(df)} 只" + (" [排除创业/科创]" if args.exclude_gem_star else ""))
     print(f"{'='*80}")
     print(df.head(args.top).to_string())
+
+    # 同花顺自选股导入格式
+    if args.ths:
+        out_dir = "data/arsenal"
+        os.makedirs(out_dir, exist_ok=True)
+        date_tag = args.date or date.today().strftime("%Y%m%d")
+        ths_path = f"{out_dir}/bull_ths_{date_tag}.txt"
+        with open(ths_path, 'w') as f:
+            for code in df.head(args.top).index:
+                f.write(f"{code}\n")
+        print(f"\n同花顺导入文件: {ths_path} (可直接导入自选股)")
 
     if args.json:
         import json

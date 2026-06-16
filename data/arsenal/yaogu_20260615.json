@@ -276,18 +276,6 @@
     "vol_ratio":0.92
   },
   {
-    "code":26,
-    "name":"逸豪新材",
-    "industry":"C 制造业",
-    "close":67.92,
-    "yaogu_score":4,
-    "yiziban":0,
-    "streak":2,
-    "ret_today":20.0,
-    "seal":1.0,
-    "vol_ratio":0.56
-  },
-  {
     "code":6,
     "name":"振华科技",
     "industry":"C 制造业",
