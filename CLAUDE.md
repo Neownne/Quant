@@ -52,9 +52,21 @@
 | 策略 | 脚本 | 状态 | 定位 |
 |------|------|------|------|
 | 小市值反转 | `bt_small_cap.py` | **主力** | 底仓，2025年+87% |
+| 三池信号 | `run_daily_signals.py` | **日常** | 涨停+妖股+牛股，邮件推送 |
+| 牛股筛选 | `screen_bull.py` | **日常** | 缩量筑底，同花顺可导入 |
 | 妖股规则 | `bt_yaogu.py` | 卫星 | 6规则评分≥6，大涨率33.7% |
 | 涨停 Top-N | `run_backtest_pipeline.py` | 维护中 | 旧管线，-99.9% |
-| 武器库 | `run_arsenal.py` | **日常** | 行业热力图+信号扫描 |
+| 武器库 | `run_arsenal.py` | 辅助 | 行业热力图+信号扫描 |
+
+## 三池信号速查
+
+```
+每日运行: python scripts/run_daily_signals.py --exclude-gem-star --send-email
+
+涨停池: 4条件(市值30-500亿 + 股价5-63 + MA5>MA10 + 20日>1涨停)
+妖股池: 6规则(一字板+3 + 低振幅+2 + 缩量板+1 + 非量能极值+1 + 连板≥2+1 + 缩量整理+1) → ≥3入选
+牛股池: 5条件(市值5-50亿 + <MA40 + 缩量 + 波动<3% + 60日无涨停) → 评分0-100
+```
 
 ## 妖股规则速查
 
@@ -91,19 +103,20 @@ from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 
 ## ML 探索结论
 
-经过分类→回归→自适应→板块轮动全链路实验，核心结论：
-
 1. **纯日线 OHLCV 技术因子对 A 股中期收益预测力有限**，IC 天花板 ≈ -0.10
 2. **妖股规则是唯一有效产出**：不是预测收益率，而是从涨停股中筛选高质量形态
-3. **ML 不能替代 alpha 来源**：XGBoost分类PR-AUC=0.19、回归R²=0.04，均无法产生持续正收益
+3. **ML 不能替代 alpha 来源**：XGBoost分类PR-AUC=0.19、回归R²=0.04
 4. **板块级信号比个股级更可靠**：155只涨停的板块 vs 单只涨停股，前者更有信息量
 
 ## 快速参考
 
 ```bash
 # ── 每日 ──
-python scripts/run_daily_paper_auto.py                    # 数据同步+模拟盘
-python scripts/run_arsenal.py                             # 武器库面板
+python scripts/run_daily_paper_auto.py                           # 数据同步+模拟盘
+python scripts/run_daily_signals.py --exclude-gem-star --send-email  # 三池信号+邮件
+
+# ── 牛股筛选 ──
+python scripts/screen_bull.py --exclude-gem-star --ths   # 输出+同花顺导入
 
 # ── 小市值反转（主力）──
 python scripts/bt_small_cap.py --start 2020-01-01 --top-n 10
@@ -123,9 +136,11 @@ python scripts/featurize_signals.py --signals data/signals/bt_signals_full.csv
 # ── ML训练（实验性）──
 python scripts/train_signal_quality.py --start 2020-01-01
 
+# ── 武器库 ──
+python scripts/run_arsenal.py
+
 # ── Web ──
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
-# → http://localhost:8899/backtest
 
 # ── 数据库 ──
 pg_ctl -D /opt/homebrew/var/postgresql@18 start
