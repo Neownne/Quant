@@ -83,6 +83,7 @@ def wait_for_buyable(high_signals, daily, all_dates, date_idx):
         idx = date_idx.get(sig_date)
         if idx is None: continue
 
+        bought = False
         for offset in range(1, 11):
             nxt = idx + offset
             if nxt >= len(all_dates): break
@@ -96,7 +97,10 @@ def wait_for_buyable(high_signals, daily, all_dates, date_idx):
                 if TradingConfig.is_at_limit_down(px, prev_c, code): continue
             rows.append({"date": nd, "code": code, "score": int(sig["rule_score"]),
                          "close": float(px), "signal_date": sig_date, "wait_days": offset})
+            bought = True
             break
+        if not bought:
+            logger.warning(f"  {code} 信号日{sig_date.date()} 后10日无买入窗口（连续封板），信号丢弃")
     return pd.DataFrame(rows)
 
 

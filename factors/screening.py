@@ -16,7 +16,7 @@ def filter_factors_by_ic(
     """IC 门禁：过滤预测力不足的因子。
 
     对每个因子计算逐日 RankIC，保留满足以下条件的因子：
-    - |mean IC| > ic_threshold (default 0.02)
+    - |mean IC| > ic_threshold (default 0.03)
     - |t-statistic| > t_threshold (default 2.0)
 
     返回通过门禁的因子名列表。

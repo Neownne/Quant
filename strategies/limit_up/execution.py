@@ -325,11 +325,12 @@ def _execute_deferred_at_open(
 
         if direction == "SELL":
             pos = item["pos"]
-            prev_close = item["prev_close"]
-            sell_price = open_price if open_price else item["t_close"]
+            # T 日收盘价作 T+1 跌停基准（T-1 收盘价在涨跌停下已过时）
+            t_close = item["t_close"]
+            sell_price = open_price if open_price else t_close
 
-            # T+1 开盘跌停检查
-            if prev_close and sell_price and IS_LIMIT_DOWN(sell_price, prev_close, code):
+            # T+1 开盘跌停检查（以 T 日收盘为基准）
+            if t_close and sell_price and IS_LIMIT_DOWN(sell_price, t_close, code):
                 logger.info(f"  {code} T+1开盘仍跌停，写入pending")
                 _write_pending_order(engine, account_id, code, "SELL",
                                      sell_price, pos["quantity"],

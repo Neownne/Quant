@@ -24,6 +24,16 @@ from config.settings import TradingConfig
 
 REBALANCE_DAYS = 5  # 周频调仓
 
+# ── 涨停阈值（板别感知）──
+_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
+_DEFAULT_LIMIT = 0.10
+
+def _get_limit(code: str) -> float:
+    for prefix, limit in _LIMIT_MAP.items():
+        if str(code).startswith(prefix):
+            return limit
+    return _DEFAULT_LIMIT
+
 def parse_args():
     p = argparse.ArgumentParser(description="主力+妖股 混合策略")
     p.add_argument("--start", default="2020-01-01")
@@ -142,9 +152,12 @@ def compute_sector_flow(daily, ind_map, all_dates, current_idx):
     sector_adv = today_data.groupby("industry")["ret"].apply(
         lambda x: (x > 0).mean() if len(x) > 0 else 0.5)
 
-    # 4. 板块内涨停家数占比
-    sector_lu = today_data.groupby("industry")["ret"].apply(
-        lambda x: (x > 0.09).mean() if len(x) > 0 else 0)
+    # 4. 板块内涨停家数占比（板别感知）
+    today_data["is_lu"] = today_data.apply(
+        lambda r: 1 if pd.notna(r["ret"]) and r["ret"] >= _get_limit(str(r["code"])) * 0.98 else 0, axis=1
+    )
+    sector_lu = today_data.groupby("industry")["is_lu"].apply(
+        lambda x: x.mean() if len(x) > 0 else 0)
 
     # 综合（动量最重要，放量确认，宽度辅助）
     score = (sector_mom.fillna(0) * 0.35 +

@@ -374,8 +374,6 @@ class LuStrategy(bt.Strategy):
         self._sold_today.clear()
         self._today_signals.clear()
         self._today_skip_reasons.clear()
-        """买入时暂不记录——等 _record_holdings 确认 backtrader 有仓位再说。"""
-        pass
 
     def _record_exit(self, code, exit_price, size, entry_price, reason):
         """记录卖出并从 _open_trades 移除。"""

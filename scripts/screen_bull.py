@@ -21,64 +21,97 @@ import numpy as np
 import pandas as pd
 from datetime import date, timedelta
 from loguru import logger
+from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
+# ── 涨停阈值（板别感知）──
+_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
+_DEFAULT_LIMIT = 0.10
 
-def screen(date_str=None, exclude_gem_star=False):
-    """主筛选函数，返回 DataFrame。"""
+def _get_limit(code: str) -> float:
+    for prefix, limit in _LIMIT_MAP.items():
+        if str(code).startswith(prefix):
+            return limit
+    return _DEFAULT_LIMIT
+
+
+def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
+           name_map=None, ind_map=None):
+    """主筛选函数，返回 DataFrame。
+
+    支持两种模式:
+    - 独立模式: 不传 daily_df/extra_df，自行加载数据
+    - 集成模式: 传入预加载的 daily_df/extra_df（跳过加载，节省时间）
+      同时传入 name_map/ind_map 用于显示
+    """
     target_date = pd.Timestamp(date_str) if date_str else None
 
-    engine = get_engine()
+    if daily_df is not None and extra_df is not None:
+        # ── 集成模式：使用预加载数据 ──
+        daily = daily_df.copy()
+        extra = extra_df.copy()
+        # 确定目标日期
+        if target_date is None:
+            target_date = daily['trade_date'].max()
+        engine = None
+        if name_map is None:
+            name_map = {}
+        if ind_map is None:
+            ind_map = {}
+        codes_in_data = daily['code'].unique().tolist()
+    else:
+        # ── 独立模式：自行加载 ──
+        engine = get_engine()
 
-    # ── 股票池 ──
-    min_list = (target_date or pd.Timestamp(date.today())) - timedelta(days=252)
-    with engine.connect() as conn:
-        codes_df = pd.read_sql(
-            __import__('sqlalchemy').text(
-                "SELECT code, name, industry FROM stock_basic "
-                "WHERE is_st=FALSE AND list_date <= :ld"
-            ), conn, params={"ld": min_list.strftime("%Y-%m-%d")}
-        )
-    codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)
-    codes = codes_df['code'].tolist()
-    name_map = dict(zip(codes_df['code'], codes_df['name']))
-    ind_map = dict(zip(codes_df['industry'].fillna('其他'), codes_df['industry'].fillna('其他')))
-
-    # ── 确定目标日期 ──
-    with engine.connect() as conn:
-        r = conn.execute(
-            __import__('sqlalchemy').text(
-                "SELECT MAX(trade_date) FROM stock_daily"
+        # 股票池
+        min_list = (target_date or pd.Timestamp(date.today())) - timedelta(days=252)
+        with engine.connect() as conn:
+            codes_df = pd.read_sql(
+                text("SELECT code, name, industry FROM stock_basic "
+                     "WHERE is_st=FALSE AND list_date <= :ld"
+                ), conn, params={"ld": min_list.strftime("%Y-%m-%d")}
             )
-        ).fetchone()
-    latest = pd.Timestamp(r[0]) if r and r[0] else pd.Timestamp(date.today())
-    if target_date is None or target_date > latest:
-        target_date = latest
+        codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)
+        codes = codes_df['code'].tolist()
+        name_map = dict(zip(codes_df['code'], codes_df['name']))
+        ind_map = dict(zip(codes_df['code'], codes_df['industry'].fillna('其他')))
 
-    # ── 加载数据 ──
-    pre_start = (target_date - timedelta(days=120)).strftime("%Y-%m-%d")
-    end_str = target_date.strftime("%Y-%m-%d")
+        # 确定目标日期
+        with engine.connect() as conn:
+            r = conn.execute(text("SELECT MAX(trade_date) FROM stock_daily")).fetchone()
+        latest = pd.Timestamp(r[0]) if r and r[0] else pd.Timestamp(date.today())
+        if target_date is None or target_date > latest:
+            target_date = latest
 
-    daily = load_daily_data(engine, codes, pre_start, end_str,
-                            cols=['open','high','low','close','volume','turnover'])
-    daily['code'] = daily['code'].astype(str).str.zfill(6)
-    daily['trade_date'] = pd.to_datetime(daily['trade_date'])
-    daily = daily.sort_values(['code','trade_date'])
-    daily['ret'] = daily.groupby('code')['close'].pct_change()
+        # 加载数据
+        pre_start = (target_date - timedelta(days=120)).strftime("%Y-%m-%d")
+        end_str = target_date.strftime("%Y-%m-%d")
 
-    extra = load_mcap_data(engine, codes, pre_start, end_str, use_proxy=True)
-    extra['code'] = extra['code'].astype(str).str.zfill(6)
-    extra['trade_date'] = pd.to_datetime(extra['trade_date'])
-    engine.dispose()
+        daily = load_daily_data(engine, codes, pre_start, end_str,
+                                cols=['open','high','low','close','volume','turnover'])
+        daily['code'] = daily['code'].astype(str).str.zfill(6)
+        daily['trade_date'] = pd.to_datetime(daily['trade_date'])
+        daily = daily.sort_values(['code','trade_date'])
+        daily['ret'] = daily.groupby('code')['close'].pct_change()
 
-    # ── 因子计算 ──
+        extra = load_mcap_data(engine, codes, pre_start, end_str, use_proxy=True)
+        extra['code'] = extra['code'].astype(str).str.zfill(6)
+        extra['trade_date'] = pd.to_datetime(extra['trade_date'])
+        engine.dispose()
+        codes_in_data = codes
+
+    # ── 因子计算（共用）──
     daily['ma40'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(40,min_periods=20).mean())
     daily['vol_ma40'] = daily.groupby('code')['volume'].transform(lambda x: x.rolling(40,min_periods=20).mean())
     daily['ret_vol_20'] = daily.groupby('code')['ret'].transform(lambda x: x.rolling(20,min_periods=10).std())
-    daily['lu_60d'] = daily.groupby('code')['ret'].transform(lambda x: (x>=0.09).rolling(60,min_periods=30).sum())
+    # 板别感知涨停标记
+    daily['is_lu'] = daily.apply(
+        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0, axis=1
+    )
+    daily['lu_60d'] = daily.groupby('code')['is_lu'].transform(lambda x: x.rolling(60,min_periods=30).sum())
     daily['low60'] = daily.groupby('code')['low'].transform(lambda x: x.rolling(60,min_periods=30).min())
 
     # 取目标日截面

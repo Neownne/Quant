@@ -19,6 +19,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 
 OUT_DIR = "data/arsenal"
+
+# ── 涨停阈值（板别感知）──
+_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
+_DEFAULT_LIMIT = 0.10
+
+def _get_limit(code: str) -> float:
+    for prefix, limit in _LIMIT_MAP.items():
+        if str(code).startswith(prefix):
+            return limit
+    return _DEFAULT_LIMIT
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
@@ -58,11 +68,15 @@ def today_sector_heatmap():
 
     df = df.merge(prev, on='code', how='left')
     df['ret'] = (df['close'] - df['prev_close']) / df['prev_close']
+    # 板别感知涨停标记
+    df['is_lu'] = df.apply(
+        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0, axis=1
+    )
 
     sector = df.groupby('industry').agg(
         n=('code', 'count'),
         avg_ret=('ret', 'mean'),
-        lu_n=('ret', lambda x: (x >= 0.09).sum()),
+        lu_n=('is_lu', 'sum'),
         up_ratio=('ret', lambda x: (x > 0).mean()),
         volume_sum=('volume', 'sum'),
         turnover_avg=('turnover', 'mean'),
@@ -116,8 +130,8 @@ def today_yaogu_signals(min_score=6):
             continue
         r = today_row.iloc[-1]
 
-        # 涨停检测
-        limit = 0.20 if str(code).startswith(('688','300','301')) else 0.10
+        # 涨停检测（板别感知）
+        limit = _get_limit(code)
         is_lu = r['ret'] >= limit * 0.98 if pd.notna(r['ret']) else False
 
         if not is_lu:
