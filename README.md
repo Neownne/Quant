@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-06-16 (v7.1 三池信号系统 + 每日邮件)  
+> 最后更新：2026-06-17 (v7.2 午盘扫描 + 时间门控自动模式)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)
 
 ---
@@ -23,11 +23,11 @@
 source .venv/bin/activate
 pg_ctl -D /opt/homebrew/var/postgresql@18 start
 
-# 每日数据同步 + 模拟盘
-python scripts/run_daily_paper_auto.py
+# 每日信号 + 邮件推送（自动判断午盘/日终）
+python scripts/run_daily_signals.py --send-email
 
-# 三池信号 + 邮件推送（日常用这个）
-python scripts/run_daily_signals.py --exclude-gem-star --send-email
+# 午盘快速扫描（腾讯实时行情）
+python scripts/scan_intraday.py
 
 # 牛股筛选器单独运行
 python scripts/screen_bull.py --exclude-gem-star --ths
@@ -49,7 +49,21 @@ python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
 
 ## 三池信号系统
 
-每天早盘前运行，三个独立池子并行扫描全市场，输出信号报告 + 邮件推送 + 同花顺导入文件。
+**一条命令，全天候自动**：程序根据当前时间自动判断模式。
+
+```bash
+python scripts/run_daily_signals.py --send-email
+```
+
+| 运行时间 | 自动行为 |
+|----------|----------|
+| < 11:30 | 等到上午收盘 → 午盘扫描（腾讯实时行情）→ 发邮件 |
+| 11:30 – 15:00 | 立即午盘扫描 → 发邮件 |
+| > 15:00 | 日终模式（同步数据 + 日线信号）→ 发邮件 |
+
+三个池子并行扫描全市场，输出信号报告 + JSON + 同花顺导入文件。
+
+**午盘扫描** 用腾讯实时 API（~9s 拉齐 5000 只行情）拼 DB 历史日线做因子计算，24s 出结果。
 
 ### 涨停池（4条件）
 
@@ -191,7 +205,8 @@ quant/
 │   └── market_breadth.py / sector_breadth.py
 ├── scripts/
 │   ├── bt_small_cap.py           # 小市值反转（主力）
-│   ├── run_daily_signals.py      # 三池信号系统（日常）
+│   ├── run_daily_signals.py      # 三池信号系统（日常，自动午盘/日终）
+│   ├── scan_intraday.py          # 午盘扫描（腾讯实时行情）
 │   ├── screen_bull.py            # 牛股筛选器
 │   ├── bt_yaogu.py               # 妖股规则回测
 │   ├── bt_backtest.py            # 涨停回测引擎
@@ -223,6 +238,14 @@ quant/
 ---
 
 ## 变更记录
+
+### v7.2 — 午盘扫描 + 时间门控自动模式 (2026-06-17)
+- **自动模式**：`run_daily_signals.py` 根据当前时间自动选午盘/日终，无需 `--intraday`/`--now`
+- **午盘扫描**：腾讯实时行情 + DB 历史日线，24s 出三池信号
+- **`scan_intraday.py`**：独立午盘扫描（涨停/跌停/板块热度）
+- **三池全量展示**：涨停池+妖股池全量输出，不再截断
+- **涨停∩妖股交集**：详情展示（妖股评分+涨停强度+连板+一字板）
+- 审计修复：7 处涨停阈值统一 + 板别感知
 
 ### v7.1 — 三池信号系统 + 每日邮件 (2026-06-16)
 - **三池信号系统**：`run_daily_signals.py` 涨停+妖股+牛股并行扫描

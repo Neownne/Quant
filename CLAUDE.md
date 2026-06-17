@@ -61,11 +61,16 @@
 ## 三池信号速查
 
 ```
-每日运行: python scripts/run_daily_signals.py --exclude-gem-star --send-email
+每日运行: python scripts/run_daily_signals.py --send-email
+  → 自动判断: <11:30等午盘 / 11:30-15:00午盘扫描 / >15:00日终扫描
 
-涨停池: 4条件(市值30-500亿 + 股价5-63 + MA5>MA10 + 20日>1涨停)
+午盘扫描: python scripts/scan_intraday.py
+  → 腾讯实时行情，9s拉5000只，涨停/跌停/板块热度
+
+涨停池: 4条件(市值30-500亿 + 股价5-63 + MA5>MA10 + 20日>1涨停) → 全量展示
 妖股池: 6规则(一字板+3 + 低振幅+2 + 缩量板+1 + 非量能极值+1 + 连板≥2+1 + 缩量整理+1) → ≥3入选
 牛股池: 5条件(市值5-50亿 + <MA40 + 缩量 + 波动<3% + 60日无涨停) → 评分0-100
+三池交集: 涨停∩妖股重点展示详情（评分+强度+连板）
 ```
 
 ## 妖股规则速查
@@ -112,8 +117,8 @@ from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 
 ```bash
 # ── 每日 ──
-python scripts/run_daily_paper_auto.py                           # 数据同步+模拟盘
-python scripts/run_daily_signals.py --exclude-gem-star --send-email  # 三池信号+邮件
+python scripts/run_daily_signals.py --send-email        # 自动午盘/日终 + 邮件
+python scripts/scan_intraday.py                         # 午盘快速扫描（腾讯实时行情）
 
 # ── 牛股筛选 ──
 python scripts/screen_bull.py --exclude-gem-star --ths   # 输出+同花顺导入

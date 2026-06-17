@@ -106,8 +106,8 @@ EMAIL_TO=接收报告的邮箱@qq.com
 ## 6. 试运行验证
 
 ```powershell
-# 跳过同步，直接扫描信号（如果数据库已有数据）
-.venv\Scripts\python scripts\run_daily_signals.py --dry-run --now --no-sync
+# 试运行（不写文件、不发邮件）
+.venv\Scripts\python scripts\run_daily_signals.py --dry-run
 ```
 
 如果正常输出三池信号（涨停池/妖股池/牛股池），说明一切 OK。
@@ -116,29 +116,34 @@ EMAIL_TO=接收报告的邮箱@qq.com
 
 ## 7. 日常使用
 
-### 收盘后自动跑
+### 一条命令搞定
 
 ```powershell
-# 完整流程：同步 → 信号 → 邮件
 .venv\Scripts\python scripts\run_daily_signals.py --send-email
 ```
 
-脚本会自动等到 15:00 后才执行。如果想立即跑（盘中调试）：
-```powershell
-.venv\Scripts\python scripts\run_daily_signals.py --now --send-email
-```
+程序会根据当前时间自动判断：
+
+| 运行时间 | 自动行为 |
+|----------|----------|
+| < 11:30 | 等到上午收盘 → 午盘扫描（腾讯实时行情）→ 发邮件 |
+| 11:30 – 15:00 | 立即午盘扫描 → 发邮件 |
+| > 15:00 | 日终模式（同步数据 + 日线信号）→ 发邮件 |
 
 ### 其他常用命令
 
 ```powershell
-# 只看信号不发邮件
-.venv\Scripts\python scripts\run_daily_signals.py --now
+# 午盘快速扫描（不跑全流程）
+.venv\Scripts\python scripts\scan_intraday.py
+
+# 试运行，看信号不发邮件
+.venv\Scripts\python scripts\run_daily_signals.py --dry-run
 
 # 指定日期回测
-.venv\Scripts\python scripts\run_daily_signals.py --date 2026-06-13 --now
+.venv\Scripts\python scripts\run_daily_signals.py --date 2026-06-13
 
 # 排除创业板+科创板
-.venv\Scripts\python scripts\run_daily_signals.py --now --exclude-gem-star
+.venv\Scripts\python scripts\run_daily_signals.py --exclude-gem-star --send-email
 
 # 武器库面板（实时行情热力图）
 .venv\Scripts\python scripts\run_arsenal.py
@@ -162,7 +167,7 @@ EMAIL_TO=接收报告的邮箱@qq.com
 打开 PowerShell 管理员：
 
 ```powershell
-# 每个交易日 15:30 自动跑（周一~周五）
+# 每个交易日 15:30 自动跑（此时 >15:00，自动走日终模式）
 $action = New-ScheduledTaskAction -Execute "D:\Quant\.venv\Scripts\python.exe" `
     -Argument "D:\Quant\scripts\run_daily_signals.py --send-email" `
     -WorkingDirectory "D:\Quant"
@@ -173,9 +178,10 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -RunLevel Limite
 
 Register-ScheduledTask -TaskName "QuantDailySignal" `
     -Action $action -Trigger $trigger -Principal $principal `
-    -Description "量化每日信号扫描"
+    -Description "量化每日信号扫描（自动午盘/日终）"
 ```
 
+> 也可以加一个 11:35 的定时任务跑午盘：`-At 11:35`，脚本跑 `scan_intraday.py`。
 > 把路径里的 `D:\Quant` 替换成你的实际项目路径。
 
 ---
@@ -211,7 +217,8 @@ Claude Code 会读取 CLAUDE.md 中的铁律和速查命令，自动找到正确
 ```
 Quant/
 ├── scripts/
-│   ├── run_daily_signals.py    ★ 每日信号（主入口）
+│   ├── run_daily_signals.py    ★ 每日信号（主入口，自动午盘/日终）
+│   ├── scan_intraday.py        午盘扫描（腾讯实时行情）
 │   ├── bt_yaogu.py             妖股回测
 │   ├── bt_small_cap.py         小市值反转回测
 │   ├── run_arsenal.py          武器库面板

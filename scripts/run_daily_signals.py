@@ -1,27 +1,33 @@
 #!/usr/bin/env python
-"""每日自动化信号系统 —— 数据同步 → 质量验证 → 三池扫描 → 邮件推送。
+"""每日自动化信号系统 —— 根据当前时间自动选午盘/日终模式。
 
-6阶段流水线:
-  Phase 0: 时间门控（交易日判断 + 收盘后等待）
+自动模式:
+    python scripts/run_daily_signals.py --send-email
+    → < 11:30: 等到上午收盘 → 午盘扫描（腾讯实时行情 + 邮件）
+    → 11:30–15:00: 午盘扫描（腾讯实时行情 + 邮件）
+    → > 15:00: 日终扫描（数据同步 + 日线信号 + 邮件）
+
+手动覆盖:
+    python scripts/run_daily_signals.py --now            # 立即执行，跳过等待
+    python scripts/run_daily_signals.py --intraday       # 强制午盘模式
+    python scripts/run_daily_signals.py --date 2026-06-13 # 指定日期回测
+    python scripts/run_daily_signals.py --dry-run         # 试运行，不写文件/不发邮件
+    python scripts/run_daily_signals.py --no-sync         # 跳过数据同步
+    python scripts/run_daily_signals.py --exclude-gem-star # 排除创业/科创板
+
+6阶段流水线（日终模式）:
+  Phase 0: 时间门控 + 模式判断
   Phase 1: 同步前数据质量检查
   Phase 2: 增量数据同步（指数 + 日线 + 市值 + 腾讯补漏）
   Phase 3: 同步后数据质量验证
   Phase 4: 一次性数据加载 + 公共因子预计算
   Phase 5: 三池信号扫描（涨停池 / 妖股池 / 牛股池）
   Phase 6: 输出 & 推送（报告 + JSON + 同花顺导入 + 邮件）
-
-用法:
-    python scripts/run_daily_signals.py                  # 完整流程（等到收盘后执行）
-    python scripts/run_daily_signals.py --now             # 立即执行（不等待收盘）
-    python scripts/run_daily_signals.py --dry-run         # 试运行（不写文件不发邮件）
-    python scripts/run_daily_signals.py --no-sync         # 跳过数据同步
-    python scripts/run_daily_signals.py --date 2026-06-13 # 指定日期
-    python scripts/run_daily_signals.py --send-email      # 强制发送邮件
 """
 
 from __future__ import annotations
 
-import argparse, os, sys, json, csv, smtplib, time
+import argparse, os, sys, json, csv, smtplib, time, urllib.request
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -54,7 +60,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 # 常量
 # ═══════════════════════════════════════════════════════════════
 
-TARGET_STOCK_COUNT = 4500   # 同步后至少要有这么多只股票
+TARGET_STOCK_COUNT = 4000   # 同步后至少要有这么多只股票
 MAX_SYNC_RETRIES = 3        # 同步失败重试次数
 SYNC_RETRY_INTERVAL = 30    # 重试间隔(秒)
 
@@ -103,6 +109,23 @@ def _is_after_market_close() -> bool:
     """判断当前时间是否已过 15:00 收盘。"""
     now = datetime.now()
     return now.hour >= 15
+
+
+def _is_after_morning_close() -> bool:
+    """判断当前时间是否已过 11:30 上午收盘。"""
+    now = datetime.now()
+    return now.hour > 11 or (now.hour == 11 and now.minute >= 30)
+
+
+def _wait_until_morning_close():
+    """等到当日 11:30 上午收盘。"""
+    now = datetime.now()
+    close_time = now.replace(hour=11, minute=30, second=0, microsecond=0)
+    if now >= close_time:
+        return
+    wait_seconds = (close_time - now).total_seconds()
+    logger.info(f"距上午收盘还有 {wait_seconds/60:.0f} 分钟，等待中...")
+    time.sleep(wait_seconds + 5)
 
 
 def _wait_until_close():
@@ -375,6 +398,219 @@ def load_and_precompute(engine, target_date: pd.Timestamp, exclude_gem_star: boo
 
 
 # ═══════════════════════════════════════════════════════════════
+# Phase 4b: 腾讯实时行情 + 日内数据加载（--intraday 模式）
+# ═══════════════════════════════════════════════════════════════
+
+def _fetch_tencent_quotes(codes: list[str], batch_size: int = 300) -> pd.DataFrame:
+    """通过腾讯 API 拉取实时行情。
+
+    返回: DataFrame[code, name, price, prev_close, open, high, low, volume]
+    时间戳存储在 df.attrs['timestamp'] 中。
+    """
+    # 按交易所分组
+    sh = [c for c in codes if c.startswith(('6', '9'))]
+    sz = [c for c in codes if c.startswith(('0', '3', '4', '8'))]
+
+    all_rows = []
+    timestamp = ""
+
+    for market, code_list in [('sh', sh), ('sz', sz)]:
+        for i in range(0, len(code_list), batch_size):
+            batch = code_list[i:i + batch_size]
+            ids = ','.join(f'{market}{c}' for c in batch)
+            url = f'http://qt.gtimg.cn/q={ids}'
+
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                resp = urllib.request.urlopen(req, timeout=15)
+                data = resp.read().decode('gbk')
+
+                for line in data.strip().split('\n'):
+                    if not line.strip() or '="' not in line:
+                        continue
+                    try:
+                        content = line.split('="')[1].rstrip('";\n')
+                        fields = content.split('~')
+                        if len(fields) < 35:
+                            continue
+                        code = fields[2]
+                        ts = fields[30] if len(fields) > 30 else ""
+                        if ts and not timestamp:
+                            timestamp = ts
+                        all_rows.append({
+                            'code': code,
+                            'name': fields[1],
+                            'price': float(fields[3]) if fields[3] and fields[3] != '0.00' else 0,
+                            'prev_close': float(fields[4]) if fields[4] else 0,
+                            'open': float(fields[5]) if fields[5] else 0,
+                            'volume': int(fields[6]) if fields[6] else 0,
+                            'high': float(fields[33]) if fields[33] else 0,
+                            'low': float(fields[34]) if fields[34] else 0,
+                        })
+                    except (ValueError, IndexError):
+                        continue
+
+            except Exception as e:
+                logger.warning(f"腾讯行情 {market} batch {i} 请求失败: {e}")
+
+            time.sleep(0.3)
+
+    df = pd.DataFrame(all_rows)
+    if not df.empty:
+        df['code'] = df['code'].astype(str).str.zfill(6)
+        df.attrs['timestamp'] = timestamp
+    return df
+
+
+def load_intraday_data(engine, target_date: pd.Timestamp, exclude_gem_star: bool = False):
+    """日内模式：DB 历史数据（≤T-1）+ 腾讯实时行情（T日当前）。
+
+    返回: (daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot, rt_ts)
+    """
+    t0 = time.time()
+
+    # ── 股票池 ──
+    min_list = target_date - timedelta(days=252)
+    with engine.connect() as conn:
+        codes_df = pd.read_sql(
+            text("SELECT code, name, industry FROM stock_basic "
+                 "WHERE is_st=FALSE AND list_date <= :ld"),
+            conn, params={"ld": min_list.strftime("%Y-%m-%d")})
+    codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)
+    name_map = dict(zip(codes_df['code'], codes_df['name']))
+    ind_map = dict(zip(codes_df['code'], codes_df['industry'].fillna('其他')))
+    codes = codes_df['code'].tolist()
+    logger.info(f"  股票池: {len(codes)} 只")
+
+    # ── 加载历史日线（到 T-1）──
+    pre_start = (target_date - timedelta(days=120)).strftime("%Y-%m-%d")
+    # T-1 日期
+    yesterday = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    daily = load_daily_data(engine, codes, pre_start, yesterday,
+                            cols=['open', 'high', 'low', 'close', 'volume', 'turnover'])
+    daily['code'] = daily['code'].astype(str).str.zfill(6)
+    daily['trade_date'] = pd.to_datetime(daily['trade_date'])
+    daily = daily.sort_values(['code', 'trade_date'])
+
+    # 市值
+    extra = load_mcap_data(engine, codes, pre_start, yesterday, use_proxy=True)
+    if not extra.empty:
+        extra['code'] = extra['code'].astype(str).str.zfill(6)
+        extra['trade_date'] = pd.to_datetime(extra['trade_date'])
+
+    logger.info(f"  历史日线: {len(daily)} 行 | 市值: {len(extra)} 行")
+
+    # ── 市值 T-1 前填到 T 日（实时行情无市值，用最近一日近似）──
+    if not extra.empty:
+        latest_extra = extra.sort_values(['code', 'trade_date']).groupby('code').tail(1).copy()
+        latest_extra['trade_date'] = target_date
+        extra = pd.concat([extra, latest_extra], ignore_index=True)
+
+    # ── 拉取腾讯实时行情 ──
+    logger.info("  拉取腾讯实时行情...")
+    rt = _fetch_tencent_quotes(codes)
+    rt_ts = rt.attrs.get('timestamp', '')
+    if rt_ts:
+        ts_str = f"{rt_ts[:4]}-{rt_ts[4:6]}-{rt_ts[6:8]} {rt_ts[8:10]}:{rt_ts[10:12]}:{rt_ts[12:14]}"
+        logger.info(f"  实时行情时间戳: {ts_str}")
+    logger.info(f"  实时行情: {len(rt)} 只")
+
+    if rt.empty:
+        logger.error("  腾讯实时行情无数据！")
+        return None
+
+    # ── 把实时行情构造为 T 日伪日线 ──
+    rt_rows = []
+    for _, r in rt.iterrows():
+        if r['price'] <= 0 or r['prev_close'] <= 0:
+            continue
+        rt_rows.append({
+            'code': str(r['code']).zfill(6),
+            'trade_date': target_date,
+            'open': r['open'] if r['open'] > 0 else r['price'],
+            'high': r['high'] if r['high'] > 0 else r['price'],
+            'low': r['low'] if r['low'] > 0 else r['price'],
+            'close': r['price'],
+            'volume': r['volume'],
+            'turnover': np.nan,
+        })
+    rt_df = pd.DataFrame(rt_rows)
+
+    # ── 拼到历史日线末尾 ──
+    daily = pd.concat([daily, rt_df], ignore_index=True)
+    daily = daily.sort_values(['code', 'trade_date'])
+
+    # ── 确定 T 日前一个交易日 ──
+    all_dates = sorted(daily['trade_date'].unique())
+    td_idx = all_dates.index(target_date)
+    prev_td = all_dates[td_idx - 1] if td_idx > 0 else target_date
+    logger.info(f"  T={target_date.date()} (实时), 前日={prev_td.date()}")
+
+    # ── 公共因子预计算（和 load_and_precompute 一致）──
+    daily['ret'] = daily.groupby('code')['close'].pct_change()
+    daily['prev_close'] = daily.groupby('code')['close'].shift(1)
+
+    daily['is_lu'] = daily.apply(
+        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0,
+        axis=1,
+    )
+
+    daily['ma5'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(5, min_periods=3).mean())
+    daily['ma10'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(10, min_periods=5).mean())
+    daily['ma20'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(20, min_periods=5).mean())
+    daily['ma40'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(40, min_periods=20).mean())
+
+    daily['vol_ma20'] = daily.groupby('code')['volume'].transform(lambda x: x.rolling(20, min_periods=5).mean())
+    daily['vol_ma40'] = daily.groupby('code')['volume'].transform(lambda x: x.rolling(40, min_periods=20).mean())
+    daily['vol_std20'] = daily.groupby('code')['volume'].transform(lambda x: x.rolling(20, min_periods=5).std())
+
+    if 'turnover' in daily.columns:
+        daily['to_ma20'] = daily.groupby('code')['turnover'].transform(lambda x: x.rolling(20, min_periods=5).mean())
+
+    daily['lu_20d'] = daily.groupby('code')['is_lu'].transform(lambda x: x.rolling(20, min_periods=1).sum())
+    daily['lu_60d'] = daily.groupby('code')['is_lu'].transform(lambda x: x.rolling(60, min_periods=30).sum())
+
+    def _calc_streak(s):
+        cnt, res = 0, []
+        for v in s:
+            cnt = cnt + 1 if v else 0
+            res.append(cnt)
+        return pd.Series(res, index=s.index)
+    daily['lu_streak'] = daily.groupby('code')['is_lu'].transform(_calc_streak)
+
+    daily['ret_vol_20'] = daily.groupby('code')['ret'].transform(lambda x: x.rolling(20, min_periods=10).std())
+
+    daily['hl_range'] = daily['high'] - daily['low']
+    daily['seal_quality'] = np.where(
+        daily['is_lu'] == 1, daily['close'] / daily['high'].replace(0, np.nan), np.nan)
+    daily['amplitude'] = np.where(
+        daily['is_lu'] == 1,
+        daily['hl_range'] / daily['prev_close'].replace(0, np.nan), np.nan)
+
+    # CSI1000（用最近一个历史日）
+    csi_snapshot = {}
+    csi = pd.read_sql(
+        text("SELECT trade_date, close FROM index_daily WHERE code='000852' "
+             "AND trade_date BETWEEN :s AND :e ORDER BY trade_date"),
+        engine, params={"s": pre_start, "e": yesterday})
+    if not csi.empty:
+        csi['trade_date'] = pd.to_datetime(csi['trade_date'])
+        csi['ma60'] = csi['close'].rolling(60, min_periods=30).mean()
+        latest_csi = csi.iloc[-1]
+        csi_snapshot = {
+            'value': float(latest_csi['close']),
+            'ma60': float(latest_csi['ma60']) if pd.notna(latest_csi['ma60']) else 0,
+            'trend': '上升' if float(latest_csi['close']) > float(latest_csi['ma60']) else '下降',
+        }
+
+    elapsed = time.time() - t0
+    logger.info(f"  日内数据加载完成 ({elapsed:.0f}s)")
+
+    return daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot, rt_ts
+
+
+# ═══════════════════════════════════════════════════════════════
 # Phase 5.1: 涨停池
 # ═══════════════════════════════════════════════════════════════
 
@@ -540,9 +776,15 @@ def build_market_snapshot(daily, target_date, csi_snapshot):
 # ═══════════════════════════════════════════════════════════════
 
 def find_intersections(limit_up_df, yaogu_df, bull_df):
-    """找三池交集。"""
+    """找三池交集。
+
+    返回每个交集的信息 dict，含:
+      - codes: 交集代码集合
+      - lu_details: 涨停池侧详情 (code → {name, ret, ...})
+      - yg_details: 妖股池侧详情 (code → {name, score, ret, ...})
+      - bull_details: 牛股池侧详情 (code → {name, score, ...})
+    """
     intersections = {}
-    pools = {'涨停': limit_up_df, '妖股': yaogu_df, '牛股': bull_df}
 
     def _codes(df):
         if df is None or df.empty:
@@ -553,23 +795,78 @@ def find_intersections(limit_up_df, yaogu_df, bull_df):
             return set(df['code'].tolist())
         return set(df.index.tolist())
 
-    for name1, name2 in [('涨停', '妖股'), ('涨停', '牛股'), ('妖股', '牛股')]:
-        c1, c2 = _codes(pools[name1]), _codes(pools[name2])
-        common = c1 & c2
-        if common and not bull_df.empty:
-            overlap = bull_df[bull_df['代码'].isin(common)] if '代码' in bull_df.columns else bull_df[bull_df.index.isin(common)]
-        else:
-            overlap = pd.DataFrame()
-        intersections[f'{name1}∩{name2}'] = overlap
+    def _lu_detail(df, codes):
+        """从涨停池 DataFrame 提取指定代码的详情。"""
+        detail = {}
+        if df is None or df.empty or not codes:
+            return detail
+        for _, r in df.iterrows():
+            c = r.get('代码', r.get('code', ''))
+            if c in codes:
+                detail[c] = {
+                    'name': r.get('名称', r.get('name', '')),
+                    'ret': f"{r['涨停强度']:+.1f}%" if '涨停强度' in r else '',
+                    'industry': r.get('行业', r.get('industry', '')),
+                }
+        return detail
+
+    def _yg_detail(df, codes):
+        """从妖股池 DataFrame 提取指定代码的详情。"""
+        detail = {}
+        if df is None or df.empty or not codes:
+            return detail
+        for _, r in df.iterrows():
+            c = r.get('code', r.get('代码', ''))
+            if c in codes:
+                detail[c] = {
+                    'name': r.get('name', ''),
+                    'score': int(r.get('yaogu_score', 0)),
+                    'ret': f"{r.get('ret_today', 0):+.1f}%",
+                    'streak': int(r.get('streak', 0)),
+                    'yiziban': bool(r.get('yiziban', 0)),
+                }
+        return detail
+
+    def _bull_detail(df, codes):
+        """从牛股池 DataFrame 提取指定代码的详情。"""
+        detail = {}
+        if df is None or df.empty or not codes:
+            return detail
+        for _, r in df.iterrows():
+            c = r.get('代码', '')
+            if c in codes:
+                detail[c] = {
+                    'name': r.get('名称', ''),
+                    'score': float(r.get('牛股评分', 0)),
+                    'vs_ma40': f"{float(r.get('vsMA40(%)', 0)):+.0f}%",
+                    'vol_ratio': float(r.get('量比', 0)),
+                }
+        return detail
+
+    pairs = [
+        ('涨停∩妖股', limit_up_df, yaogu_df, [_lu_detail, _yg_detail]),
+        ('涨停∩牛股', limit_up_df, bull_df, [_lu_detail, _bull_detail]),
+        ('妖股∩牛股', yaogu_df, bull_df, [_yg_detail, _bull_detail]),
+    ]
+
+    for label, df_a, df_b, detail_fns in pairs:
+        codes_a, codes_b = _codes(df_a), _codes(df_b)
+        common = codes_a & codes_b
+        intersections[label] = {
+            'codes': common,
+            'detail_a': detail_fns[0](df_a, common),
+            'detail_b': detail_fns[1](df_b, common),
+        }
 
     # 三池交集
     c1, c2, c3 = _codes(limit_up_df), _codes(yaogu_df), _codes(bull_df)
     triple = c1 & c2 & c3
-    if triple and not bull_df.empty:
-        triple_df = bull_df[bull_df['代码'].isin(triple)] if '代码' in bull_df.columns else bull_df[bull_df.index.isin(triple)]
-    else:
-        triple_df = pd.DataFrame()
-    intersections['涨停∩妖股∩牛股'] = triple_df
+    intersections['涨停∩妖股∩牛股'] = {
+        'codes': triple,
+        'lu_detail': _lu_detail(limit_up_df, triple),
+        'yg_detail': _yg_detail(yaogu_df, triple),
+        'bull_detail': _bull_detail(bull_df, triple),
+    }
 
     return intersections
 
@@ -578,12 +875,17 @@ def find_intersections(limit_up_df, yaogu_df, bull_df):
 # Phase 6: 输出 & 推送
 # ═══════════════════════════════════════════════════════════════
 
-def build_report(snapshot, limit_up, yaogu, bull, intersections=None):
-    """生成文本报告。"""
+def build_report(snapshot, limit_up, yaogu, bull, intersections=None, tag="", rt_ts=""):
+    """生成文本报告。tag='intraday' 时为午盘报告。"""
+    is_intraday = tag == 'intraday'
+    title = "午盘信号速报" if is_intraday else "每日信号报告"
     lines = []
     lines.append("=" * 70)
-    lines.append(f"  策略武器库 · 每日信号报告")
+    lines.append(f"  策略武器库 · {title}")
     lines.append(f"  日期: {snapshot.get('date', 'N/A')}")
+    if rt_ts:
+        ts_str = f"{rt_ts[:4]}-{rt_ts[4:6]}-{rt_ts[6:8]} {rt_ts[8:10]}:{rt_ts[10:12]}:{rt_ts[12:14]}"
+        lines.append(f"  行情时间: {ts_str} (盘中实时)")
     lines.append("=" * 70)
     lines.append("")
 
@@ -597,20 +899,20 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None):
                  f"涨停: {snapshot.get('lu_count', 0)}只")
     lines.append("")
 
-    # 涨停池
+    # 涨停池（全量）
     lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件(市值30-500亿/股价5-63/MA5>MA10/20日>1涨停)")
     if not limit_up.empty:
-        for _, r in limit_up.head(10).iterrows():
+        for _, r in limit_up.iterrows():
             lines.append(f"  {r['代码']} {r['名称']:<8s} "
                          f"涨停{r['涨停强度']:+.1f}% | {r.get('行业', '')}")
     else:
         lines.append("  (今日无符合条件的涨停股)")
     lines.append("")
 
-    # 妖股池
+    # 妖股池（全量）
     lines.append(f"【妖股池】{len(yaogu)} 只 — 6规则评分 ≥ 3")
     if not yaogu.empty:
-        for _, r in yaogu.head(10).iterrows():
+        for _, r in yaogu.iterrows():
             tags = []
             if r.get('yiziban'): tags.append('一字板')
             if r.get('streak', 0) >= 2: tags.append(f"连板{int(r['streak'])}")
@@ -636,11 +938,41 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None):
     # 交集
     if intersections:
         lines.append("【三池交集】")
-        for key in ['涨停∩妖股', '涨停∩牛股', '妖股∩牛股', '涨停∩妖股∩牛股']:
-            inter = intersections.get(key, pd.DataFrame())
-            if not inter.empty:
-                codes = inter['代码'].tolist() if '代码' in inter.columns else inter.index.tolist()
-                lines.append(f"  {key}: {len(codes)}只 → {', '.join(str(c) for c in codes[:10])}")
+        # 涨停∩妖股 — 重点展示详情
+        lu_yg = intersections.get('涨停∩妖股', {})
+        lu_yg_codes = lu_yg.get('codes', set())
+        if lu_yg_codes:
+            yg_d = lu_yg.get('detail_b', {})
+            lu_d = lu_yg.get('detail_a', {})
+            lines.append(f"  ★ 涨停∩妖股: {len(lu_yg_codes)}只")
+            for c in sorted(lu_yg_codes):
+                yg = yg_d.get(c, {})
+                lu = lu_d.get(c, {})
+                yiziban_tag = ' [一字板]' if yg.get('yiziban') else ''
+                lines.append(f"    {c} {yg.get('name','?'):<8s} "
+                           f"妖股评分{yg.get('score','?'):} | "
+                           f"涨停{lu.get('ret','?')} | "
+                           f"连板{yg.get('streak',0)}{yiziban_tag}")
+            lines.append("")
+
+        # 其他两两交集
+        for key in ['涨停∩牛股', '妖股∩牛股']:
+            inter = intersections.get(key, {})
+            inter_codes = inter.get('codes', set())
+            if inter_codes:
+                lines.append(f"  {key}: {len(inter_codes)}只 → {', '.join(sorted(inter_codes))}")
+        lines.append("")
+
+        # 三池交集
+        triple = intersections.get('涨停∩妖股∩牛股', {})
+        triple_codes = triple.get('codes', set())
+        if triple_codes:
+            yg_d = triple.get('yg_detail', {})
+            lines.append(f"  ★★★ 涨停∩妖股∩牛股: {len(triple_codes)}只")
+            for c in sorted(triple_codes):
+                yg = yg_d.get(c, {})
+                lines.append(f"    {c} {yg.get('name','?')} 妖股评分{yg.get('score','?')}")
+            lines.append("")
         lines.append("")
 
     # 规则
@@ -688,20 +1020,22 @@ def send_email(subject, body):
         return False
 
 
-def save_outputs(snapshot, limit_up, yaogu, bull):
-    """保存报告、JSON、同花顺导入文件。"""
-    date_tag = snapshot['date'].replace('-', '')
+def save_outputs(snapshot, limit_up, yaogu, bull, tag=""):
+    """保存报告、JSON、同花顺导入文件。tag='intraday' 时文件名加 _intraday 后缀。"""
+    date_tag_val = snapshot['date'].replace('-', '')
+    suffix = f"_{tag}" if tag else ""
+    label = "午盘" if tag == 'intraday' else "日报"
 
     # 文本报告
-    report = build_report(snapshot, limit_up, yaogu, bull)
-    report_path = f"{OUT_DIR}/daily_report_{date_tag}.txt"
+    report = build_report(snapshot, limit_up, yaogu, bull, tag=tag)
+    report_path = f"{OUT_DIR}/daily_report_{date_tag_val}{suffix}.txt"
     with open(report_path, 'w') as f:
         f.write(report)
 
     # 各池 JSON
     for name, df in [('limit_up', limit_up), ('yaogu', yaogu), ('bull', bull)]:
         if not df.empty:
-            json_path = f"{OUT_DIR}/{name}_{date_tag}.json"
+            json_path = f"{OUT_DIR}/{name}_{date_tag_val}{suffix}.json"
             df_export = df.copy()
             if '代码' in df_export.columns:
                 df_export['code'] = df_export['代码']
@@ -713,12 +1047,12 @@ def save_outputs(snapshot, limit_up, yaogu, bull):
         if df is not None and not df.empty:
             codes = df['代码'].tolist() if '代码' in df.columns else df.index.tolist()
             all_codes.update(str(c).zfill(6) for c in codes)
-    ths_path = f"{OUT_DIR}/ths_import_{date_tag}.txt"
+    ths_path = f"{OUT_DIR}/ths_import_{date_tag_val}{suffix}.txt"
     with open(ths_path, 'w') as f:
         for c in sorted(all_codes):
             f.write(f"{c}\n")
 
-    print(f"\n  报告: {report_path}")
+    print(f"\n  {label}报告: {report_path}")
     print(f"  同花顺导入: {ths_path} ({len(all_codes)}只)")
     return report
 
@@ -736,6 +1070,7 @@ def main():
     p.add_argument("--send-email", action="store_true", help="强制发送邮件")
     p.add_argument("--exclude-gem-star", action="store_true", help="排除创业/科创板(300/301/688)")
     p.add_argument("--yaogu-min-score", type=int, default=3, help="妖股最低评分（默认3）")
+    p.add_argument("--intraday", action="store_true", help="日内模式：用腾讯实时行情（上午盘后可用）")
     args = p.parse_args()
 
     t_start = time.time()
@@ -746,23 +1081,66 @@ def main():
     engine = get_engine()
 
     try:
-        # ── Phase 0: 时间门控 ──
+        # ── Phase 0: 时间门控 + 模式判断 ──
         logger.info("═══ Phase 0: 时间门控 ═══")
+
+        is_intraday = False  # 是否日内模式
+
         if args.date:
+            # 指定日期 → 日终模式
             trade_date = pd.Timestamp(args.date)
-            logger.info(f"  指定日期: {trade_date.date()}")
-        else:
+            logger.info(f"  指定日期: {trade_date.date()} (日终模式)")
+        elif args.intraday:
+            # 强制日内模式
             if not _is_trading_day():
                 logger.warning("今天非交易日，退出")
                 return
-            if not args.now and not _is_after_market_close():
-                _wait_until_close()
+            is_intraday = True
+            if not args.now and not _is_after_morning_close():
+                _wait_until_morning_close()
             trade_date = pd.Timestamp(_latest_trading_day())
-            logger.info(f"  交易日: {trade_date.date()}")
+            logger.info(f"  交易日: {trade_date.date()} | 强制日内模式")
+        else:
+            # ── 自动模式：根据当前时间判断 ──
+            if not _is_trading_day():
+                logger.warning("今天非交易日，退出")
+                return
+
+            now = datetime.now()
+            if not args.now:
+                if now.hour < 11 or (now.hour == 11 and now.minute < 30):
+                    # 上午盘中 → 等到 11:30 → 午盘扫描
+                    logger.info("  当前上午盘交易中，等待 11:30 上午收盘...")
+                    _wait_until_morning_close()
+                    is_intraday = True
+                elif now.hour < 15:
+                    # 11:30–15:00 → 午盘扫描
+                    is_intraday = True
+                else:
+                    # 15:00 后 → 日终扫描
+                    is_intraday = False
+            else:
+                # --now: 跳过等待，根据时间自动选模式
+                is_intraday = (now.hour < 15)
+
+            trade_date = pd.Timestamp(_latest_trading_day())
+            mode_label = "午盘扫描（腾讯实时行情）" if is_intraday else "日终扫描（同步+日线）"
+            logger.info(f"  交易日: {trade_date.date()} | 自动 → {mode_label}")
 
         trade_date_str = trade_date.strftime("%Y-%m-%d")
 
-        if not args.no_sync:
+        rt_ts = None  # 日内时间戳（仅 intraday 模式）
+
+        if is_intraday:
+            # ── 日内模式：DB 历史 + 腾讯实时行情 ──
+            logger.info("═══ 日内模式（腾讯实时行情 + DB 历史上下文）═══")
+            result = load_intraday_data(engine, trade_date, exclude_gem_star=args.exclude_gem_star)
+            if result is None:
+                logger.error("日内数据加载失败，退出")
+                return
+            daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot, rt_ts = result
+
+        elif not args.no_sync:
             # ── Phase 1: 同步前质量检查 ──
             logger.info("═══ Phase 1: 同步前质量检查 ═══")
             pre_qr = check_data_quality(engine)
@@ -788,13 +1166,16 @@ def main():
             _print_quality_report(post_qr, "同步后")
             cnt = _check_today_coverage(engine, trade_date_str)
             logger.info(f"  T日覆盖: {cnt} 只 (目标 {TARGET_STOCK_COUNT})")
-        else:
-            logger.info("  --no-sync: 跳过数据同步")
 
-        # ── Phase 4: 数据加载 + 预计算 ──
-        logger.info("═══ Phase 4: 数据加载 & 公共因子预计算 ═══")
-        daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot = \
-            load_and_precompute(engine, trade_date, exclude_gem_star=args.exclude_gem_star)
+            # ── Phase 4: 数据加载 + 预计算 ──
+            logger.info("═══ Phase 4: 数据加载 & 公共因子预计算 ═══")
+            daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot = \
+                load_and_precompute(engine, trade_date, exclude_gem_star=args.exclude_gem_star)
+        else:
+            # ── Phase 4: 数据加载 + 预计算（跳过同步）──
+            logger.info("═══ Phase 4: 数据加载 & 公共因子预计算 ═══")
+            daily, extra, name_map, ind_map, target_date, prev_td, csi_snapshot = \
+                load_and_precompute(engine, trade_date, exclude_gem_star=args.exclude_gem_star)
 
         # ── Phase 5: 三池扫描 ──
         logger.info("═══ Phase 5: 三池信号扫描 ═══")
@@ -832,20 +1213,25 @@ def main():
         # ── Phase 6: 输出 & 推送 ──
         logger.info("═══ Phase 6: 输出 & 推送 ═══")
 
+        phase6_tag = "intraday" if is_intraday else ""
+
         if args.dry_run:
-            report = build_report(snapshot, limit_up, yaogu, bull, intersections)
+            report = build_report(snapshot, limit_up, yaogu, bull, intersections,
+                                  tag=phase6_tag, rt_ts=rt_ts or "")
             print("\n" + report)
             logger.info("  --dry-run: 已跳过文件写入和邮件发送")
         else:
-            report = save_outputs(snapshot, limit_up, yaogu, bull)
+            report = save_outputs(snapshot, limit_up, yaogu, bull, tag=phase6_tag)
             print("\n" + report)
 
             # 邮件
             should_email = args.send_email or bool(EMAIL_CONFIG['user'])
             if should_email:
-                subject = (f"量化信号日报 {snapshot['date']} | "
+                prefix = "午盘速报" if is_intraday else "日报"
+                subject = (f"量化信号{prefix} {snapshot['date']} | "
                           f"涨停{len(limit_up)} 妖股{len(yaogu)} 牛股{len(bull)}")
-                full_report = build_report(snapshot, limit_up, yaogu, bull, intersections)
+                full_report = build_report(snapshot, limit_up, yaogu, bull, intersections,
+                                          tag=phase6_tag, rt_ts=rt_ts or "")
                 send_email(subject, full_report)
 
         elapsed = time.time() - t_start
