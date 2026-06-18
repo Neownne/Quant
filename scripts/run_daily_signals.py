@@ -125,6 +125,49 @@ def _wait_until_morning_close():
         return
     wait_seconds = (close_time - now).total_seconds()
     logger.info(f"距上午收盘还有 {wait_seconds/60:.0f} 分钟，等待中...")
+
+
+def _expected_latest_data_date() -> date:
+    """预期 DB 中应该有的最新交易日。
+
+    15:00 前 → 昨天（今天日线还没出）
+    15:00 后 → 今天
+    """
+    today = date.today()
+    calendar = _get_trading_calendar()
+    if calendar and str(today) in calendar and _is_after_market_close():
+        return today
+    # 找今天之前的最近交易日
+    d = today - timedelta(days=1)
+    for _ in range(10):
+        if calendar:
+            if str(d) in calendar:
+                return d
+        elif d.weekday() < 5:
+            return d
+        d -= timedelta(days=1)
+    return today
+
+
+def _is_data_stale(engine) -> bool:
+    """检查 DB 是否缺预期交易日数据（昨晚没跑日终 → 数据滞后）。"""
+    with engine.connect() as conn:
+        latest_db = conn.execute(
+            text("SELECT MAX(trade_date) FROM stock_daily")
+        ).scalar()
+    if latest_db is None:
+        return True
+    latest_db = pd.Timestamp(latest_db).date()
+    expected = _expected_latest_data_date()
+    return latest_db < expected
+
+
+def _is_eod_report_missing() -> bool:
+    """检查预期交易日是否还没出过日终报告。"""
+    expected = _expected_latest_data_date()
+    date_tag = expected.strftime("%Y%m%d")
+    report_path = f"{OUT_DIR}/daily_report_{date_tag}.txt"
+    return not os.path.exists(report_path)
     time.sleep(wait_seconds + 5)
 
 
@@ -634,13 +677,12 @@ def screen_limit_up(daily, extra, target_date, prev_td, name_map, ind_map):
     today['prev_close'] = prev['close']
     today['ret_calc'] = today['close'] / today['prev_close'] - 1
 
-    # 4条件筛选
+    # 4条件筛选（不要求当日涨停，只要近20日涨停2-4次）
     mask = (
-        (today['is_lu'] == 1) &
         (today['mcap'].between(30, 500)) &
-        (today['close'].between(5, 63)) &
+        (today['close'].between(5, 100)) &
         (today['ma5'] > today['ma10']) &
-        (today['lu_20d'] > 1) &
+        (today['lu_20d'] >= 2) & (today['lu_20d'] <= 4) &
         (today['close'] > 0)
     )
     lu = today[mask].copy()
@@ -649,12 +691,13 @@ def screen_limit_up(daily, extra, target_date, prev_td, name_map, ind_map):
 
     lu['name'] = lu.index.map(name_map)
     lu['industry'] = lu.index.map(ind_map)
-    lu['limit_up_pct'] = (lu['ret_calc'] * 100).round(1)
+    lu['ret_pct'] = (lu['ret_calc'] * 100).round(1)
+    lu['lu_20d_count'] = lu['lu_20d'].astype(int)
 
-    result = lu.nlargest(30, 'ret_calc')[
-        ['name', 'industry', 'close', 'mcap', 'limit_up_pct']
+    result = lu.nlargest(100, 'ret_calc')[
+        ['name', 'industry', 'close', 'mcap', 'ret_pct', 'lu_20d_count']
     ].copy()
-    result.columns = ['名称', '行业', '收盘价', '市值(亿)', '涨停强度']
+    result.columns = ['名称', '行业', '收盘价', '市值(亿)', '今日涨幅', '近20日涨停']
     result['代码'] = result.index
     return result
 
@@ -805,7 +848,7 @@ def find_intersections(limit_up_df, yaogu_df, bull_df):
             if c in codes:
                 detail[c] = {
                     'name': r.get('名称', r.get('name', '')),
-                    'ret': f"{r['涨停强度']:+.1f}%" if '涨停强度' in r else '',
+                    'ret': f"{r.get('今日涨幅', 0):+.1f}%",
                     'industry': r.get('行业', r.get('industry', '')),
                 }
         return detail
@@ -900,11 +943,13 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None, tag="", rt
     lines.append("")
 
     # 涨停池（全量）
-    lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件(市值30-500亿/股价5-63/MA5>MA10/20日>1涨停)")
+    lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件(市值30-500亿/股价5-100/MA5>MA10/20日涨停2-4次)")
     if not limit_up.empty:
         for _, r in limit_up.iterrows():
+            lu_tag = f" [涨停]" if r.get('今日涨幅', 0) >= 9.5 else ""
             lines.append(f"  {r['代码']} {r['名称']:<8s} "
-                         f"涨停{r['涨停强度']:+.1f}% | {r.get('行业', '')}")
+                         f"涨幅{r.get('今日涨幅', 0):+.1f}% | "
+                         f"20日涨停{int(r.get('近20日涨停', 0))}次{lu_tag} | {r.get('行业', '')}")
     else:
         lines.append("  (今日无符合条件的涨停股)")
     lines.append("")
@@ -977,7 +1022,7 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None, tag="", rt
 
     # 规则
     lines.append("【各池规则】")
-    lines.append("  涨停池: 4条件(市值30-500亿+股价5-63+MA5>MA10+20日>1涨停) → 按涨停强度排序")
+    lines.append("  涨停池: 4条件(市值30-500亿+股价5-100+MA5>MA10+20日涨停2-4次) → 按今日涨幅排序")
     lines.append("  妖股池: 一字板(+3) + 低振幅<8%(+2) + 缩量板(+1) + 非量能极值(+1)")
     lines.append("          + 连板≥2(+1) + 缩量整理≥1天(+1) → 评分≥3入选")
     lines.append("  牛股池: 市值5-50亿 + 收盘<MA40 + 缩量 + 20日波动<3% + 60日无涨停")
@@ -1101,31 +1146,39 @@ def main():
             trade_date = pd.Timestamp(_latest_trading_day())
             logger.info(f"  交易日: {trade_date.date()} | 强制日内模式")
         else:
-            # ── 自动模式：根据当前时间判断 ──
+            # ── 自动模式：根据当前时间 + 数据新鲜度判断 ──
             if not _is_trading_day():
                 logger.warning("今天非交易日，退出")
                 return
 
             now = datetime.now()
-            if not args.now:
+            data_stale = _is_data_stale(engine)
+            report_missing = _is_eod_report_missing()  # 最新交易日还没出过报告
+
+            if data_stale or report_missing:
+                # 昨晚没跑 / 跑了但挂了 → 优先日终模式
+                if data_stale:
+                    logger.info("  检测到数据滞后（昨晚未跑日终），优先日终同步")
+                else:
+                    logger.info("  数据已同步但日终报告缺失，跳过同步直接出报告")
+                    args.no_sync = True  # 数据已有，跳过同步加速
+                is_intraday = False
+            elif not args.now:
                 if now.hour < 11 or (now.hour == 11 and now.minute < 30):
-                    # 上午盘中 → 等到 11:30 → 午盘扫描
                     logger.info("  当前上午盘交易中，等待 11:30 上午收盘...")
                     _wait_until_morning_close()
                     is_intraday = True
                 elif now.hour < 15:
-                    # 11:30–15:00 → 午盘扫描
                     is_intraday = True
                 else:
-                    # 15:00 后 → 日终扫描
                     is_intraday = False
             else:
-                # --now: 跳过等待，根据时间自动选模式
                 is_intraday = (now.hour < 15)
 
             trade_date = pd.Timestamp(_latest_trading_day())
             mode_label = "午盘扫描（腾讯实时行情）" if is_intraday else "日终扫描（同步+日线）"
-            logger.info(f"  交易日: {trade_date.date()} | 自动 → {mode_label}")
+            stale_tag = " (补昨日数据)" if data_stale else (" (补报告)" if report_missing else "")
+            logger.info(f"  交易日: {trade_date.date()} | 自动 → {mode_label}{stale_tag}")
 
         trade_date_str = trade_date.strftime("%Y-%m-%d")
 

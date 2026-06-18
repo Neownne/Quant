@@ -241,6 +241,27 @@ CREATE TABLE IF NOT EXISTS stock_industry (
 );
 """
 
+DDL_CONCEPT_BOARD = """
+CREATE TABLE IF NOT EXISTS concept_board (
+    code               VARCHAR(20) PRIMARY KEY,
+    name               VARCHAR(100),
+    type               VARCHAR(20),
+    stock_count        INTEGER,
+    updated_date       DATE DEFAULT CURRENT_DATE
+);
+"""
+
+DDL_CONCEPT_STOCK = """
+CREATE TABLE IF NOT EXISTS concept_stock (
+    board_code         VARCHAR(20),
+    stock_code         VARCHAR(10),
+    weight             FLOAT,
+    in_date            DATE,
+    out_date           DATE,
+    PRIMARY KEY (board_code, stock_code)
+);
+"""
+
 # DDL —— 模拟盘账户
 DDL_PAPER_ACCOUNT = """
 CREATE TABLE IF NOT EXISTS paper_account (
@@ -849,6 +870,8 @@ def init_db() -> None:
         conn.execute(text(DDL_STOCK_FINANCIAL))
         conn.execute(text(DDL_STOCK_FINANCIAL_V2))
         conn.execute(text(DDL_STOCK_INDUSTRY))
+        conn.execute(text(DDL_CONCEPT_BOARD))
+        conn.execute(text(DDL_CONCEPT_STOCK))
         conn.execute(text(DDL_STOCK_PLEDGE))
         conn.execute(text(DDL_PAPER_ACCOUNT))
         conn.execute(text(DDL_PAPER_ORDERS))
@@ -931,6 +954,7 @@ def upsert_df(df: pd.DataFrame, table: str, engine: Engine | None = None) -> int
             "stock_basic": "code",
             "etf_basic": "code",
             "fund_basic": "code",
+            "concept_board": "code",
         }
         if table in pk_map:
             pk = pk_map[table]
@@ -944,6 +968,8 @@ def upsert_df(df: pd.DataFrame, table: str, engine: Engine | None = None) -> int
             pk = "code, report_date"
         elif "industry" in table:
             pk = "code"
+        elif "concept_stock" in table:
+            pk = "board_code, stock_code"
         elif "fund_nav" in table:
             pk = "code, nav_date"
         else:

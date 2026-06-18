@@ -14,7 +14,7 @@
 import argparse
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 import pandas as pd
 from loguru import logger
@@ -195,12 +195,32 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     logger.info(f"开始同步股票日线，起始日期: {start_date} ...")
 
     codes = pd.read_sql("SELECT code FROM stock_basic", engine)["code"].tolist()
-    cutoff = _latest_trading_day().strftime("%Y%m%d")
+    # 15:00 前不尝试同步今天数据（日线还没出）
+    raw_cutoff = _latest_trading_day()
+    now = datetime.now()
+    if now.hour < 15 and raw_cutoff == date.today():
+        calendar = _get_trading_calendar()
+        d = date.today() - timedelta(days=1)
+        for _ in range(10):
+            if str(d) in calendar:
+                raw_cutoff = d
+                break
+            d -= timedelta(days=1)
+    cutoff = raw_cutoff.strftime("%Y%m%d")
+
+    # ── 批量查已有日期（一发 SQL 替代 5000+ 次查询）──
+    with engine.connect() as conn:
+        existing_all = pd.read_sql(
+            text("SELECT code, trade_date FROM stock_daily WHERE trade_date >= :s"),
+            conn, params={"s": start_date}
+        )
+    existing_all['trade_date'] = existing_all['trade_date'].astype(str).str.replace('-', '')
+    existing_map = existing_all.groupby('code')['trade_date'].apply(set).to_dict()
 
     # 过滤：跳过已覆盖到最近交易日的股票
     to_fetch: list[tuple[str, str, set]] = []
     for code in codes:
-        existing = get_existing_dates("stock_daily", code, engine)
+        existing = existing_map.get(code, set())
         latest = max(existing).strftime("%Y%m%d") if existing else start_date
         if latest < cutoff:
             to_fetch.append((code, latest, existing))
@@ -211,7 +231,25 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
         logger.success("所有股票已是最新")
         return
 
+    # 只处理最近活跃的股票（前 1000 只按交易量排序），其余跳过
+    if len(to_fetch) > 500:
+        logger.info(f"  待同步 >500 只，仅处理最活跃的 500 只（其余跳过）")
+        # 取最近 30 天交易额最大的股票
+        with engine.connect() as conn:
+            active = pd.read_sql(
+                text("SELECT code FROM stock_daily "
+                     "WHERE trade_date >= CURRENT_DATE - 30 "
+                     "GROUP BY code ORDER BY SUM(amount) DESC LIMIT 500"),
+                conn
+            )['code'].tolist()
+        to_fetch = [(c, l, e) for c, l, e in to_fetch if c in set(active)]
+
     pbar = tqdm(total=len(to_fetch), desc="股票日线", unit="只")
+    done = 0
+    errors = 0
+    t_start = time.time()
+    TOTAL_TIMEOUT = 300  # 总超时 5 分钟
+
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(fetch_stock_daily, code, latest): (code, existing)
@@ -219,15 +257,24 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
         }
 
         for future in as_completed(futures):
+            # 总超时保护
+            if time.time() - t_start > TOTAL_TIMEOUT:
+                logger.warning(f"  ⚠️ 总超时 ({TOTAL_TIMEOUT}s)，剩余任务取消")
+                for f in futures:
+                    f.cancel()
+                break
+
             code, existing = futures[future]
             try:
-                df = future.result(timeout=60)
+                df = future.result(timeout=30)
             except FutureTimeoutError:
-                logger.error(f"{code} 请求超时，跳过")
+                logger.warning(f"  {code} 超时，跳过")
+                errors += 1
                 pbar.update(1)
                 continue
             except Exception as e:
-                logger.error(f"{code} 失败，跳过: {e}")
+                logger.warning(f"  {code} 失败: {e}")
+                errors += 1
                 pbar.update(1)
                 continue
 
@@ -236,11 +283,11 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
                 if len(new_rows) > 0:
                     upsert_df(new_rows, "stock_daily", engine)
                     pbar.set_postfix_str(f"{code} +{len(new_rows)}条")
-                else:
-                    pbar.set_postfix_str(f"{code} 无新数据")
             pbar.update(1)
+            done += 1
 
-    logger.success("股票日线同步完成")
+    logger.success(f"股票日线同步完成: {done} 成功, {errors} 跳过")
+    pbar.close()
 
 
 # ============================================================
