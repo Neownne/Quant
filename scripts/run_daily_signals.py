@@ -64,17 +64,22 @@ TARGET_STOCK_COUNT = 4000   # 同步后至少要有这么多只股票
 MAX_SYNC_RETRIES = 3        # 同步失败重试次数
 SYNC_RETRY_INTERVAL = 30    # 重试间隔(秒)
 
-# 涨停阈值（板别感知 —— 与 factors/limit_up.py、config/settings.py 保持一致）
-_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
-_DEFAULT_LIMIT = 0.10
+# 涨停阈值（板别感知，四舍五入 —— 与 config/settings.py 保持一致）
+_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
+_DEFAULT_MULT = 1.10
 
 
-def _get_limit(code: str) -> float:
-    """板别感知涨停阈值。"""
-    for prefix, limit in _LIMIT_MAP.items():
+def _is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
+    """A股涨停价四舍五入判断。tolerance<1.0 时放宽到近涨停区。"""
+    if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
+        return False
+    mult = _DEFAULT_MULT
+    for prefix, m in _LIMIT_MULT.items():
         if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+            mult = m
+            break
+    limit_price = round(prev_close * mult, 2)
+    return close >= limit_price * tolerance
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -373,7 +378,7 @@ def load_and_precompute(engine, target_date: pd.Timestamp, exclude_gem_star: boo
     # ── 公共因子预计算 ──
     # 板别感知涨停标记
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0,
+        lambda r: 1 if _is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
         axis=1,
     )
 
@@ -595,7 +600,7 @@ def load_intraday_data(engine, target_date: pd.Timestamp, exclude_gem_star: bool
     daily['prev_close'] = daily.groupby('code')['close'].shift(1)
 
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0,
+        lambda r: 1 if _is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
         axis=1,
     )
 

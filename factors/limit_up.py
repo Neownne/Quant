@@ -20,40 +20,57 @@ import numpy as np
 import pandas as pd
 from factors._scaling import w
 
-# ── 涨跌停阈值（板别感知）──
-_LIMIT_MAP = {
-    "688": 0.20,  # 科创板 ±20%
-    "8": 0.30,    # 北交所 ±30%
-    "4": 0.30,    # 北交所 ±30%
-    "300": 0.20,  # 创业板 ±20%
-    "301": 0.20,  # 创业板 ±20%
+# ── 涨跌停阈值（板别感知，四舍五入）──
+_LIMIT_MULT = {
+    "688": 1.20,  # 科创板 ±20%
+    "8": 1.30,    # 北交所 ±30%
+    "4": 1.30,    # 北交所 ±30%
+    "300": 1.20,  # 创业板 ±20%
+    "301": 1.20,  # 创业板 ±20%
 }
-_DEFAULT_LIMIT = 0.10  # 主板 ±10%
+_DEFAULT_MULT = 1.10  # 主板 ±10%
 
 
-def _get_limit(code: str) -> float:
-    """根据股票代码前缀返回涨跌停阈值。"""
-    for prefix, limit in _LIMIT_MAP.items():
+def _get_multiplier(code: str) -> float:
+    """根据股票代码前缀返回涨停乘数。"""
+    for prefix, mult in _LIMIT_MULT.items():
         if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+            return mult
+    return _DEFAULT_MULT
+
+
+def is_at_limit_up(close: float, prev_close: float, code: str) -> bool:
+    """A股涨停价四舍五入判断。与 TradingConfig 保持一致。"""
+    import math
+    if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
+        return False
+    mult = _get_multiplier(str(code))
+    limit_price = round(prev_close * mult, 2)
+    return close >= limit_price
+
+
+def is_at_limit_down(close: float, prev_close: float, code: str) -> bool:
+    """A股跌停价四舍五入判断。"""
+    if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
+        return False
+    mult = _get_multiplier(str(code))
+    limit_price = round(prev_close * (2 - mult), 2)
+    return close <= limit_price
 
 
 def _is_limit_up(df: pd.DataFrame) -> pd.Series:
-    """检测每日是否涨停（板别感知）。
+    """检测每日是否涨停（板别感知，四舍五入）。
 
-    前提: df 需有 'ret' 列（日收益率），否则用 close.pct_change() 计算。
+    前提: df 需有 'close', 'prev_close', 'code' 列。
     返回: bool Series，涨停为 True。
     """
-    if "ret" in df.columns:
-        ret = df["ret"]
-    else:
-        ret = df["close"].pct_change()
+    if "prev_close" not in df.columns:
+        df = df.copy()
+        df["prev_close"] = df.groupby("code")["close"].shift(1)
 
     code = df["code"].iloc[0] if "code" in df.columns else ""
-    limit = _get_limit(code)
-    # 允许微小误差 (limit * 0.98)
-    return ret >= limit * 0.98
+    mult = _get_multiplier(str(code))
+    return df["close"] >= round(df["prev_close"] * mult, 2)
 
 
 # ══════════════════════════════════════════════════════════════════════

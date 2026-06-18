@@ -22,8 +22,8 @@ from data.loader import load_daily_data, load_mcap_data
 OUT_DIR = "data/arsenal"
 
 # ── 涨停阈值（板别感知）──
-_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
-_DEFAULT_LIMIT = 0.10
+_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
+_DEFAULT_MULT = 1.10
 
 def _get_limit(code: str) -> float:
     for prefix, limit in _LIMIT_MAP.items():
