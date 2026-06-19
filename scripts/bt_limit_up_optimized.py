@@ -44,7 +44,7 @@ def parse_args():
 
 def _load_name_map(engine, min_list_date):
     df = pd.read_sql(
-        text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :d"),
+        text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :d AND code !~ '^(300|301|688|[48])'"),
         engine, params={"d": min_list_date.strftime("%Y-%m-%d")})
     df["code"] = df["code"].astype(str).str.zfill(6)
     return dict(zip(df["code"], df["name"]))

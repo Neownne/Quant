@@ -35,12 +35,13 @@ DEFAULTS = {
     "portfolio_dd_stop": 0.25, # 组合回撤熔断
     "min_listed_days": 252,    # 上市满一年
     "exclude_star": True,      # 排除科创板（688）
-    "exclude_gem": False,      # 是否排除创业板
+    "exclude_gem": True,       # 排除创业板（300/301）
+    "exclude_bse": True,       # 排除北交所（4/8）
 }
 
 
 def load_universe(engine, trade_date, min_listed_days=252):
-    """加载候选池：非 ST、上市满 N 天、排除科创板。"""
+    """加载候选池：非 ST、上市满 N 天、仅主板。"""
     min_list = trade_date - timedelta(days=min_listed_days)
     df = pd.read_sql(text("""
         SELECT code, name FROM stock_basic
@@ -48,9 +49,16 @@ def load_universe(engine, trade_date, min_listed_days=252):
     """), engine, params={"ld": min_list.strftime("%Y-%m-%d")})
     codes = df["code"].tolist()
     name_map = dict(zip(df["code"], df["name"]))
-    # 排除 688 开头
+    # 只保留主板：排除科创板(688)、创业板(300/301)、北交所(4/8)
+    EXCLUDE_PREFIXES = []
     if DEFAULTS["exclude_star"]:
-        codes = [c for c in codes if not str(c).startswith("688")]
+        EXCLUDE_PREFIXES.append("688")
+    if DEFAULTS["exclude_gem"]:
+        EXCLUDE_PREFIXES.extend(["300", "301"])
+    if DEFAULTS["exclude_bse"]:
+        EXCLUDE_PREFIXES.extend(["4", "8"])
+    if EXCLUDE_PREFIXES:
+        codes = [c for c in codes if not str(c).startswith(tuple(EXCLUDE_PREFIXES))]
     return codes, name_map
 
 

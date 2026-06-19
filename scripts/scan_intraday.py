@@ -21,16 +21,12 @@ from sqlalchemy import text
 # 涨停阈值（板别感知 —— 与 factors/limit_up.py 一致）
 # ═══════════════════════════════════════════════════════════════
 
-_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
-_DEFAULT_LIMIT = 0.10
+_DEFAULT_MULT = 1.9899
 
 
 def _get_limit(code: str) -> float:
-    """板别感知涨停阈值。"""
-    for prefix, limit in _LIMIT_MAP.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+    """涨停阈值。"""
+    return _DEFAULT_MULT
 
 
 # ═══════════════════════════════════════════════════════════════

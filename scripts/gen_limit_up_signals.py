@@ -21,25 +21,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
-# 板别感知涨停阈值（乘法因子）
-_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
-_DEFAULT_MULT = 1.10
+# 涨停阈值
+_DEFAULT_MULT = 1.9899
 
-def _is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
-    """A股涨停价四舍五入判断。
+def _calc_limit_price(prev_close: float, code: str) -> float:
+    """计算涨停价。涨停价 = round(prev_close × 1.9899, 4)"""
+    return round(prev_close * 1.9899, 4)
 
-    tolerance=1.0: 精确涨停（回测用，封板不能买）
-    tolerance=0.98: 近涨停区（信号用，扩大候选池）
-    """
+
+def _hit_limit(high: float, prev_close: float, code: str) -> bool:
+    """盘中是否摸过涨停价。"""
+    if pd.isna(high) or pd.isna(prev_close) or prev_close <= 0:
+        return False
+    return high >= _calc_limit_price(prev_close, code)
+
+
+def _sealed_at_close(close: float, prev_close: float, code: str) -> bool:
+    """收盘是否封死涨停（买不到）。"""
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    mult = _DEFAULT_MULT
-    for prefix, m in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            mult = m
-            break
-    limit_price = round(prev_close * mult, 2)
-    return close >= limit_price * tolerance
+    return close >= _calc_limit_price(prev_close, code)
 
 
 def parse_args():
@@ -69,11 +70,11 @@ def main():
 
     end_date_str = args.end or _infer_end_date(engine)
 
-    # ── 股票池 ──
+    # ── 股票池（仅主板）──
     min_list = pd.Timestamp(args.start) - timedelta(days=120)
     with engine.connect() as conn:
         codes_df = pd.read_sql(
-            text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :ld"),
+            text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"),
             conn, params={"ld": pd.Timestamp(end_date_str).strftime("%Y-%m-%d")})
     codes_df["code"] = codes_df["code"].astype(str).str.zfill(6)
     name_map = dict(zip(codes_df["code"], codes_df["name"]))
@@ -99,10 +100,10 @@ def main():
     logger.info("预计算因子...")
     daily["ret"] = daily.groupby("code")["close"].pct_change()
     daily["prev_close"] = daily.groupby("code")["close"].shift(1)
-    # is_lu=1: 近涨停区（tolerance=0.98），信号用
-    # 回测引擎会用自己的 is_at_limit_up(tolerance=1.0) 跳过真正封板的
+    # is_lu=1: 盘中摸过涨停（high >= limit_price）
+    # 回测引擎会用 is_at_limit_up(close, prev_close) 跳过收盘封死的
     daily["is_lu"] = daily.apply(
-        lambda r: 1 if _is_at_limit_up(r["close"], r["prev_close"], str(r["code"]), tolerance=0.98) else 0,
+        lambda r: 1 if _hit_limit(r["high"], r["prev_close"], str(r["code"])) else 0,
         axis=1)
     daily["ma5"] = daily.groupby("code")["close"].transform(lambda x: x.rolling(5, min_periods=3).mean())
     daily["ma10"] = daily.groupby("code")["close"].transform(lambda x: x.rolling(10, min_periods=5).mean())

@@ -64,21 +64,16 @@ TARGET_STOCK_COUNT = 4000   # 同步后至少要有这么多只股票
 MAX_SYNC_RETRIES = 3        # 同步失败重试次数
 SYNC_RETRY_INTERVAL = 30    # 重试间隔(秒)
 
-# 涨停阈值（板别感知，四舍五入 —— 与 config/settings.py 保持一致）
-_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
-_DEFAULT_MULT = 1.10
+# 涨停阈值
+_DEFAULT_MULT = 1.9899
 
 
 def _is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
-    """A股涨停价四舍五入判断。tolerance<1.0 时放宽到近涨停区。"""
+    """A股涨停价判断。涨停价 = round(prev_close × 1.9899, 4)
+    tolerance<1.0 时放宽到近涨停区。"""
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    mult = _DEFAULT_MULT
-    for prefix, m in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            mult = m
-            break
-    limit_price = round(prev_close * mult, 2)
+    limit_price = round(prev_close * 1.9899, 4)
     return close >= limit_price * tolerance
 
 
@@ -337,7 +332,7 @@ def load_and_precompute(engine, target_date: pd.Timestamp, exclude_gem_star: boo
     with engine.connect() as conn:
         codes_df = pd.read_sql(
             text("SELECT code, name, industry FROM stock_basic "
-                 "WHERE is_st=FALSE AND list_date <= :ld"),
+                 "WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"),
             conn, params={"ld": min_list.strftime("%Y-%m-%d")})
     codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)
     name_map = dict(zip(codes_df['code'], codes_df['name']))
@@ -522,7 +517,7 @@ def load_intraday_data(engine, target_date: pd.Timestamp, exclude_gem_star: bool
     with engine.connect() as conn:
         codes_df = pd.read_sql(
             text("SELECT code, name, industry FROM stock_basic "
-                 "WHERE is_st=FALSE AND list_date <= :ld"),
+                 "WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"),
             conn, params={"ld": min_list.strftime("%Y-%m-%d")})
     codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)
     name_map = dict(zip(codes_df['code'], codes_df['name']))

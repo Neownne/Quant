@@ -27,15 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
-# ── 涨停阈值（板别感知）──
-_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
-_DEFAULT_LIMIT = 0.10
+# ── 涨停阈值 ──
+_DEFAULT_MULT = 1.9899
 
 def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MAP.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+    return _DEFAULT_MULT
 
 
 def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
@@ -71,7 +67,7 @@ def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
         with engine.connect() as conn:
             codes_df = pd.read_sql(
                 text("SELECT code, name, industry FROM stock_basic "
-                     "WHERE is_st=FALSE AND list_date <= :ld"
+                     "WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"
                 ), conn, params={"ld": min_list.strftime("%Y-%m-%d")}
             )
         codes_df['code'] = codes_df['code'].astype(str).str.zfill(6)

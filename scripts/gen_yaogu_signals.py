@@ -21,18 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data
 
-# 板别感知涨停（四舍五入）
-_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
-_DEFAULT_MULT = 1.10
+# 涨停阈值
+_DEFAULT_MULT = 1.9899
 
 def _is_at_limit_up(close, prev_close, code):
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    mult = _DEFAULT_MULT
-    for prefix, m in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            mult = m; break
-    return close >= round(prev_close * mult, 2)
+    return close >= round(prev_close * 1.9899, 4)
 
 
 def parse_args():
@@ -63,11 +58,11 @@ def main():
 
     end_date_str = args.end or _infer_end_date(engine)
 
-    # ── 股票池 ──
+    # ── 股票池（仅主板）──
     min_list = pd.Timestamp(args.start) - timedelta(days=120)
     with engine.connect() as conn:
         codes_df = pd.read_sql(
-            text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :ld"),
+            text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"),
             conn, params={"ld": pd.Timestamp(end_date_str).strftime("%Y-%m-%d")})
     codes_df["code"] = codes_df["code"].astype(str).str.zfill(6)
     name_map = dict(zip(codes_df["code"], codes_df["name"]))

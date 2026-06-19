@@ -42,7 +42,7 @@ def parse_args():
 
 def _load_name_map(engine, min_list_date):
     df = pd.read_sql(
-        text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :d"),
+        text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :d AND code !~ '^(300|301|688|[48])'"),
         engine, params={"d": min_list_date.strftime("%Y-%m-%d")})
     df["code"] = df["code"].astype(str).str.zfill(6)
     return dict(zip(df["code"], df["name"]))
@@ -62,7 +62,9 @@ def run_backtest(args):
 
     # 过滤评分阈值
     sig_df = sig_df[sig_df["score"] >= args.min_score]
-    logger.info(f"信号: {len(sig_df)}条 (score≥{args.min_score})")
+    # 仅主板（安全过滤，信号生成时已过滤）
+    sig_df = sig_df[~sig_df["code"].str.startswith(('300', '301', '688', '4', '8'))]
+    logger.info(f"信号: {len(sig_df)}条 (score≥{args.min_score}, 仅主板)")
 
     # ── 日期范围 ──
     if args.start:

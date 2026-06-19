@@ -20,15 +20,11 @@ from data.db import get_engine
 
 OUT_DIR = "data/arsenal"
 
-# ── 涨停阈值（板别感知）──
-_LIMIT_MAP = {"688": 0.20, "8": 0.30, "4": 0.30, "300": 0.20, "301": 0.20}
-_DEFAULT_LIMIT = 0.10
+# ── 涨停阈值 ──
+_DEFAULT_MULT = 1.9899
 
 def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MAP.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+    return _DEFAULT_MULT
 os.makedirs(OUT_DIR, exist_ok=True)
 
 

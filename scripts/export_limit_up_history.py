@@ -21,15 +21,11 @@ from data.loader import load_daily_data, load_mcap_data
 
 OUT_DIR = "data/arsenal"
 
-# ── 涨停阈值（板别感知）──
-_LIMIT_MULT = {"688": 1.20, "8": 1.30, "4": 1.30, "300": 1.20, "301": 1.20}
-_DEFAULT_MULT = 1.10
+# ── 涨停阈值 ──
+_DEFAULT_MULT = 1.9899
 
 def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MAP.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_LIMIT
+    return _DEFAULT_MULT
 
 
 def export_history(start_date: str = "2026-01-01", end_date: str = "2026-06-17"):
