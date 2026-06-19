@@ -221,28 +221,19 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     to_fetch: list[tuple[str, str, set]] = []
     for code in codes:
         existing = existing_map.get(code, set())
-        latest = max(existing).strftime("%Y%m%d") if existing else start_date
-        if latest < cutoff:
-            to_fetch.append((code, latest, existing))
+        if not existing:
+            # 没有任何 >= start_date 的数据，需要全量拉取
+            to_fetch.append((code, start_date, set()))
+        else:
+            latest = max(existing)  # 已是 YYYYMMDD 字符串
+            if latest < cutoff:
+                to_fetch.append((code, latest, existing))
 
     logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
 
     if not to_fetch:
         logger.success("所有股票已是最新")
         return
-
-    # 只处理最近活跃的股票（前 1000 只按交易量排序），其余跳过
-    if len(to_fetch) > 500:
-        logger.info(f"  待同步 >500 只，仅处理最活跃的 500 只（其余跳过）")
-        # 取最近 30 天交易额最大的股票
-        with engine.connect() as conn:
-            active = pd.read_sql(
-                text("SELECT code FROM stock_daily "
-                     "WHERE trade_date >= CURRENT_DATE - 30 "
-                     "GROUP BY code ORDER BY SUM(amount) DESC LIMIT 500"),
-                conn
-            )['code'].tolist()
-        to_fetch = [(c, l, e) for c, l, e in to_fetch if c in set(active)]
 
     pbar = tqdm(total=len(to_fetch), desc="股票日线", unit="只")
     done = 0
