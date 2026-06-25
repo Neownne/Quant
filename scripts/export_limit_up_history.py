@@ -18,18 +18,9 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
+from config.settings import TradingConfig
 
 OUT_DIR = "data/arsenal"
-
-# ── 涨停阈值 ──
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_MULT
 
 
 def export_history(start_date: str = "2026-01-01", end_date: str = "2026-06-17"):
@@ -74,7 +65,9 @@ def export_history(start_date: str = "2026-01-01", end_date: str = "2026-06-17")
     daily['prev_close'] = daily.groupby('code')['close'].shift(1)
 
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0,
+        lambda r: 1 if (pd.notna(r.get('prev_close')) and r['prev_close'] > 0
+                        and TradingConfig.is_at_limit_up(
+                            r['close'], r['prev_close'], str(r['code']), tolerance=0.98)) else 0,
         axis=1,
     )
 
