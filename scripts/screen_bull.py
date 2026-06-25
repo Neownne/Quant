@@ -26,16 +26,7 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
-
-# ── 涨停阈值 ──
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_MULT
+from config.settings import TradingConfig
 
 
 def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
@@ -96,6 +87,7 @@ def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
         daily['trade_date'] = pd.to_datetime(daily['trade_date'])
         daily = daily.sort_values(['code','trade_date'])
         daily['ret'] = daily.groupby('code')['close'].pct_change()
+        daily['prev_close'] = daily.groupby('code')['close'].shift(1)
 
         extra = load_mcap_data(engine, codes, pre_start, end_str, use_proxy=True)
         extra['code'] = extra['code'].astype(str).str.zfill(6)
@@ -107,9 +99,11 @@ def screen(date_str=None, exclude_gem_star=False, daily_df=None, extra_df=None,
     daily['ma40'] = daily.groupby('code')['close'].transform(lambda x: x.rolling(40,min_periods=20).mean())
     daily['vol_ma40'] = daily.groupby('code')['volume'].transform(lambda x: x.rolling(40,min_periods=20).mean())
     daily['ret_vol_20'] = daily.groupby('code')['ret'].transform(lambda x: x.rolling(20,min_periods=10).std())
-    # 板别感知涨停标记
+    # 涨停标记（统一入口，tolerance=0.98 近涨停区）
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0, axis=1
+        lambda r: 1 if pd.notna(r.get('prev_close')) and r['prev_close'] > 0
+                  and TradingConfig.is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98)
+                  else 0, axis=1
     )
     daily['lu_60d'] = daily.groupby('code')['is_lu'].transform(lambda x: x.rolling(60,min_periods=30).sum())
     daily['low60'] = daily.groupby('code')['low'].transform(lambda x: x.rolling(60,min_periods=30).min())
