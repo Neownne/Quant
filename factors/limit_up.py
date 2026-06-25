@@ -68,9 +68,8 @@ def _is_limit_up(df: pd.DataFrame) -> pd.Series:
         df = df.copy()
         df["prev_close"] = df.groupby("code")["close"].shift(1)
 
-    code = df["code"].iloc[0] if "code" in df.columns else ""
-    mult = _get_multiplier(str(code))
-    return df["close"] >= round(df["prev_close"] * mult, 2)
+    mults = df["code"].astype(str).apply(_get_multiplier) if "code" in df.columns else _DEFAULT_MULT
+    return df["close"] >= round(df["prev_close"] * mults, 2)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -539,7 +538,8 @@ def compute_sector_lu_factors(
         df["ret"] = (df["close"] - df["prev_close"]) / df["prev_close"]
 
     df["is_lu"] = df.apply(
-        lambda r: r["ret"] >= _get_limit(str(r["code"])) * 0.98
+        lambda r: (pd.notna(r.get("prev_close")) and r["prev_close"] > 0
+                   and r["close"] >= round(r["prev_close"] * _get_multiplier(str(r["code"])), 4) * 0.98)
         if pd.notna(r["ret"]) else False, axis=1
     )
 
@@ -587,7 +587,8 @@ def compute_market_lu_extra(daily: pd.DataFrame) -> pd.DataFrame:
         df["ret"] = (df["close"] - df["prev_close"]) / df["prev_close"]
 
     df["is_lu"] = df.apply(
-        lambda r: r["ret"] >= _get_limit(str(r["code"])) * 0.98
+        lambda r: (pd.notna(r.get("prev_close")) and r["prev_close"] > 0
+                   and r["close"] >= round(r["prev_close"] * _get_multiplier(str(r["code"])), 4) * 0.98)
         if pd.notna(r["ret"]) else False, axis=1
     )
 
