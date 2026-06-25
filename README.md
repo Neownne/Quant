@@ -1,6 +1,6 @@
 # Quant — A 股量化交易系统
 
-> 最后更新：2026-06-17 (v7.2 午盘扫描 + 时间门控自动模式)  
+> 最后更新：2026-06-25 (v7.6 hotpoint OCR + 自进化因子挖掘 + 标签烙印策略)  
 > GitHub：[Neownne/Quant](https://github.com/Neownne/Quant)
 
 ---
@@ -11,9 +11,11 @@
 |------|------|------|------|
 | 小市值反转 | `bt_small_cap.py` | **主力** | 2025年+87% |
 | 三池信号系统 | `run_daily_signals.py` | **日常** | 涨停+妖股+牛股，每日邮件推送 |
+| 涨停复盘分析 | `analyze_hotpoint.py` | **日常** | OCR 图片→集中冒出关键词→再启动发现 |
 | 牛股筛选器 | `screen_bull.py` | **日常** | 缩量筑底小票，同花顺可导入 |
-| 涨停 Top-N | `run_backtest_pipeline.py` | 维护中 | -99.9%，Sharpe -1.06 |
 | 妖股规则 | `bt_yaogu.py` | 卫星 | 6规则评分≥6，大涨率33.7% |
+| 标签烙印 | `bt_label_ocr.py` | **实验** | OCR关键词稳定度选股（需更长数据） |
+| 因子进化 | `evolve_factors.py` | **实验** | 自进化因子挖掘（WQ alpha 本地化） |
 
 ---
 
@@ -46,6 +48,35 @@ python -m uvicorn web.main:app --host 0.0.0.0 --port 8899
 ```
 
 ---
+
+## 涨停复盘分析（hotpoint OCR）
+
+Surya VLM 识别每日涨停复盘图片，提取关键词、板块、板数等结构化数据，自动发现：
+
+- **集中冒出**：前 10 日从未出现、近 2 日集中的新概念（附上涨空间评估）
+- **个股再启动**：首板 + 间隔久 + 涨停池入选的"标签烙印型"股票
+- **潜在龙头**：概念板块 + 近期涨停交叉筛选
+
+```bash
+# 批量 OCR（首次 ~3h，后续增量 ~2min/张）
+HF_ENDPOINT=https://hf-mirror.com python scripts/bulk_ocr.py
+
+# 生成分析报告
+python scripts/analyze_hotpoint.py --min-count 1
+open data/arsenal/hotpoint/report_20260623.html
+```
+
+数据覆盖：2026-01-16 ~ 至今，102 张图，6800+ 条记录。
+
+## 自进化因子挖掘
+
+本地化 WorldQuant alpha research 流程：模板生成 → 滚动 IC 验证 → 去重 → 规则提取 → 下一轮进化。
+
+```bash
+python scripts/evolve_factors.py --rounds 3     # 3 轮进化
+python scripts/evolve_factors.py --status        # 因子 DB 统计
+python scripts/evolve_factors.py --top 10        # 最佳因子
+```
 
 ## 三池信号系统
 
@@ -246,6 +277,29 @@ quant/
 - **三池全量展示**：涨停池+妖股池全量输出，不再截断
 - **涨停∩妖股交集**：详情展示（妖股评分+涨停强度+连板+一字板）
 - 审计修复：7 处涨停阈值统一 + 板别感知
+
+### v7.6 — hotpoint OCR + 自进化因子 + 标签烙印 (2026-06-25)
+- **涨停复盘分析**：Surya VLM OCR 102 张图片，名称准确率 99%
+- **集中冒出关键词**：前 10 日零出现 → 近 2 日集中，附上涨空间评估
+- **个股再启动发现**：首板 + 间隔久 + 涨停池过滤 + 评分排序
+- **自进化因子挖掘**：WQ alpha 本地化，模板生成 + IC 验证 + 规则提取
+- **标签烙印策略**：OCR 关键词跨期稳定度选股（实验阶段）
+- **数据目录重组**：`arsenal/{hotpoint,pools,reports,ths_import,daban}/`
+- **PE 数据同步脚本**：`sync_pe_data.py` tushare PE TTM 批量导入
+
+### v7.5 — 涨停公式统一 + 主板过滤 + 板块轮动方案 (2026-06-20)
+- 涨停价公式统一 `round(prev_close × 1.09899, 4)`
+- 数据同步全市场，策略执行仅主板 `code !~ '^(300|301|688|[48])'`
+- 板块轮动方案：两层架构（宏观大类 + 微观细分）
+
+### v7.4 — 三策略管线统一 (2026-06-18)
+- 涨停四舍五入 + 近涨停优化
+
+### v7.3 — 涨停规则优化 + 同步修复 (2026-06-17)
+- 数据同步修复 + 历史导出
+
+### v7.2 — 午盘扫描 + 时间门控 (2026-06-17)
+- 腾讯实时行情午盘扫描，自动模式时间门控
 
 ### v7.1 — 三池信号系统 + 每日邮件 (2026-06-16)
 - **三池信号系统**：`run_daily_signals.py` 涨停+妖股+牛股并行扫描
