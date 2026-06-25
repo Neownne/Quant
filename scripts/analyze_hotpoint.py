@@ -702,7 +702,7 @@ def sector_freq(master_df, window_dates):
     """板块出现频次（按股票计数），排除"其他"，升序排列（低频优先）。"""
     df = master_df[master_df["date"].isin(window_dates)]
     df = df[df["sector"] != "其他"]
-    freq = df.groupby("sector")["code"].count().sort_values(ascending=True)
+    freq = df.groupby("sector")["code"].count().sort_values(ascending=False)
     return freq
 
 
@@ -722,7 +722,7 @@ def keyword_freq(master_df, window_dates):
     if not rows:
         return pd.Series(dtype=int)
     kw_df = pd.DataFrame(rows)
-    freq = kw_df.groupby("keyword")["code"].count().sort_values(ascending=True)
+    freq = kw_df.groupby("keyword")["code"].count().sort_values(ascending=False)
     return freq
 
 
@@ -1274,74 +1274,73 @@ def _setup_chinese_font():
 
 
 def generate_charts(master_df, output_path=None):
-    """生成板块 & 关键词 TOP15 频次图（近10日/近5日）。"""
+    """生成板块 & 关键词频次图（近10日/近5日，细柱多展示）。"""
     _setup_chinese_font()
 
     all_dates = sorted(master_df["date"].unique())
     dates_10d = all_dates[-10:] if len(all_dates) >= 10 else all_dates
     dates_5d = all_dates[-5:] if len(all_dates) >= 5 else all_dates
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 18))
+    fig, axes = plt.subplots(2, 2, figsize=(20, 22))
     fig.suptitle(f"涨停复盘分析 — {all_dates[0]} ~ {all_dates[-1]} ({len(all_dates)}个交易日)",
                  fontsize=16, fontweight="bold", y=0.98)
 
-    # ── 左上：板块 TOP15（近10日）──
+    # ── 左上：板块 TOP25（近10日）──
     ax = axes[0, 0]
-    sf_10 = sector_freq(master_df, dates_10d).head(15)
+    sf_10 = sector_freq(master_df, dates_10d).head(25)
     colors_10 = ["#2196F3" if i < 5 else "#90CAF9" for i in range(len(sf_10))]
-    ax.barh(range(len(sf_10)), sf_10.values, color=colors_10)
+    ax.barh(range(len(sf_10)), sf_10.values, height=0.6, color=colors_10)
     ax.set_yticks(range(len(sf_10)))
-    ax.set_yticklabels(sf_10.index)
+    ax.set_yticklabels(sf_10.index, fontsize=9)
     ax.invert_yaxis()
-    ax.set_title(f"板块频次（升序·近{len(dates_10d)}日）", fontsize=13)
+    ax.set_title(f"板块频次 TOP25（近{len(dates_10d)}日）", fontsize=13)
     ax.set_xlabel("涨停股票数")
     for i, v in enumerate(sf_10.values):
-        ax.text(v + 0.3, i, str(v), va="center", fontsize=10)
+        ax.text(v + 0.3, i, str(v), va="center", fontsize=8)
 
-    # ── 右上：板块 TOP15（近5日）──
+    # ── 右上：板块 TOP25（近5日）──
     ax = axes[0, 1]
-    sf_5 = sector_freq(master_df, dates_5d).head(15)
+    sf_5 = sector_freq(master_df, dates_5d).head(25)
     colors_5 = ["#FF5722" if i < 5 else "#FFAB91" for i in range(len(sf_5))]
-    ax.barh(range(len(sf_5)), sf_5.values, color=colors_5)
+    ax.barh(range(len(sf_5)), sf_5.values, height=0.6, color=colors_5)
     ax.set_yticks(range(len(sf_5)))
-    ax.set_yticklabels(sf_5.index)
+    ax.set_yticklabels(sf_5.index, fontsize=9)
     ax.invert_yaxis()
-    ax.set_title(f"板块频次（升序·近{len(dates_5d)}日）", fontsize=13)
+    ax.set_title(f"板块频次 TOP25（近{len(dates_5d)}日）", fontsize=13)
     ax.set_xlabel("涨停股票数")
     for i, v in enumerate(sf_5.values):
-        ax.text(v + 0.3, i, str(v), va="center", fontsize=10)
+        ax.text(v + 0.3, i, str(v), va="center", fontsize=8)
 
-    # ── 左下：关键词 TOP15（近10日）──
+    # ── 左下：关键词 TOP30（近10日）──
     ax = axes[1, 0]
     kf_10 = keyword_freq(master_df, dates_10d)
-    kf_10 = kf_10.head(15) if not kf_10.empty else pd.Series(dtype=int)
+    kf_10 = kf_10.head(30) if not kf_10.empty else pd.Series(dtype=int)
     if not kf_10.empty:
-        ax.barh(range(len(kf_10)), kf_10.values, color="#4CAF50")
+        ax.barh(range(len(kf_10)), kf_10.values, height=0.6, color="#4CAF50")
         ax.set_yticks(range(len(kf_10)))
-        ax.set_yticklabels(kf_10.index)
+        ax.set_yticklabels(kf_10.index, fontsize=9)
         ax.invert_yaxis()
         for i, v in enumerate(kf_10.values):
-            ax.text(v + 0.3, i, str(v), va="center", fontsize=10)
-    ax.set_title(f"关键词频次（升序·近{len(dates_10d)}日）", fontsize=13)
+            ax.text(v + 0.3, i, str(v), va="center", fontsize=8)
+    ax.set_title(f"关键词频次 TOP30（近{len(dates_10d)}日）", fontsize=13)
     ax.set_xlabel("出现次数")
 
-    # ── 右下：关键词 TOP15（近5日）──
+    # ── 右下：关键词 TOP30（近5日）──
     ax = axes[1, 1]
     kf_5 = keyword_freq(master_df, dates_5d)
-    kf_5 = kf_5.head(15) if not kf_5.empty else pd.Series(dtype=int)
+    kf_5 = kf_5.head(30) if not kf_5.empty else pd.Series(dtype=int)
     if not kf_5.empty:
-        ax.barh(range(len(kf_5)), kf_5.values, color="#E91E63")
+        ax.barh(range(len(kf_5)), kf_5.values, height=0.6, color="#E91E63")
         ax.set_yticks(range(len(kf_5)))
-        ax.set_yticklabels(kf_5.index)
+        ax.set_yticklabels(kf_5.index, fontsize=9)
         ax.invert_yaxis()
         for i, v in enumerate(kf_5.values):
-            ax.text(v + 0.3, i, str(v), va="center", fontsize=10)
-    ax.set_title(f"关键词频次（升序·近{len(dates_5d)}日）", fontsize=13)
+            ax.text(v + 0.3, i, str(v), va="center", fontsize=8)
+    ax.set_title(f"关键词频次 TOP30（近{len(dates_5d)}日）", fontsize=13)
     ax.set_xlabel("出现次数")
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-    # 转 base64
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -1363,39 +1362,223 @@ def generate_charts(master_df, output_path=None):
 # Phase 9: HTML 报告
 # ══════════════════════════════════════════════════════════════════════
 
-def _build_relaunch_table(relaunch_stocks):
-    """构建再启动个股 HTML 表格。"""
-    if not relaunch_stocks:
-        return '<p style="color:#999;text-align:center;padding:20px;">暂无符合条件的再启动个股</p>'
+def _get_limit_pool_codes(codes, target_date):
+    """批量检查哪些股票满足涨停池 4 条件。返回 {code: True/False}。"""
+    if not codes: return {}
+    try:
+        from data.db import get_engine
+        from data.loader import load_daily_data
+        from sqlalchemy import text
 
+        engine = get_engine()
+        str_codes = [str(c).zfill(6) for c in codes]
+        td_str = str(target_date)
+        pre = (pd.Timestamp(td_str) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
+        daily = load_daily_data(engine, str_codes, pre, td_str,
+                                cols=["high","low","close","volume"])
+        daily["code"] = daily["code"].astype(str).str.zfill(6)
+        daily["trade_date"] = pd.to_datetime(daily["trade_date"])
+        daily = daily.sort_values(["code","trade_date"])
+
+        with engine.connect() as conn:
+            extra = pd.read_sql(text(
+                "SELECT code, market_cap FROM stock_daily_extra WHERE code=ANY(:c) AND trade_date=:d"),
+                conn, params={"c": str_codes, "d": td_str})
+        extra["code"] = extra["code"].astype(str).str.zfill(6)
+
+        daily["prev_close"] = daily.groupby("code")["close"].shift(1)
+        daily["limit_price"] = daily.apply(
+            lambda r: round(r["prev_close"] * 1.09899, 4)
+            if pd.notna(r["prev_close"]) and r["prev_close"] > 0 else 0, axis=1)
+        daily["is_lu"] = (daily["close"] >= daily["limit_price"]).astype(int)
+        daily["ma5"] = daily.groupby("code")["close"].transform(lambda x: x.rolling(5,min_periods=3).mean())
+        daily["ma10"] = daily.groupby("code")["close"].transform(lambda x: x.rolling(10,min_periods=5).mean())
+        daily["lu_20d"] = daily.groupby("code")["is_lu"].transform(lambda x: x.rolling(20,min_periods=1).sum())
+
+        td_mask = daily["trade_date"] == pd.Timestamp(td_str)
+        today = daily[td_mask].set_index("code")
+        extra_map = dict(zip(extra["code"], extra["market_cap"]))
+
+        result = {}
+        for code in str_codes:
+            if code not in today.index:
+                result[code] = False; continue
+            r = today.loc[code]
+            mcap = extra_map.get(code, 0)
+            result[code] = bool(30 <= mcap <= 500 and 5 <= r["close"] <= 100 and
+                               r["ma5"] > r["ma10"] and 2 <= r["lu_20d"] <= 4)
+
+        engine.dispose()
+        return result
+    except Exception as e:
+        logger.warning(f"涨停池批量检查失败 ({len(codes)}只): {e}")
+        return {c: False for c in codes}
+
+
+def _build_recommendation_table(master_df, anomalies, target_date=None):
+    """构建 标签烙印型推荐 表格 — 综合标签稳定度 + 涨停池过滤。"""
+    from collections import defaultdict
+
+    all_dates = sorted([d for d in master_df["date"].unique() if str(d)[:2] == '20' and len(str(d)) == 8])
+    # 支持指定日期（YYYY-MM-DD 或 YYYYMMDD）
+    if target_date:
+        target_clean = str(target_date).replace('-', '')
+        if target_clean in [str(d) for d in all_dates]:
+            latest = target_clean
+        else:
+            latest = str(all_dates[-1])
+    else:
+        latest = str(all_dates[-1])
+    # 统一转字符串避免 pd.Timestamp(int) 解析为纳秒
+    latest_str = str(latest)
+    all_dates_str = [str(d) for d in all_dates]
+    
+    # Build keyword history
+    kw_hist = defaultdict(list)
+    for (code, date), grp in master_df.groupby(['code', 'date']):
+        kws = set()
+        for kw_str in grp['keywords']:
+            if pd.notna(kw_str) and str(kw_str) != 'nan':
+                kws.update(str(kw_str).split('|'))
+        kw_hist[(code, date)] = kws
+    
+    def tag_stab(code, today_str):
+        tags_by_date = []
+        for (c, d), kws in kw_hist.items():
+            if c == code and str(d) <= str(today_str):
+                tags_by_date.append((str(d), kws))
+        tags_by_date.sort()
+        if len(tags_by_date) < 2: return 0.0, len(tags_by_date), 0
+        latest_kws = tags_by_date[-1][1]
+        earlier = set()
+        for _, tags in tags_by_date[:-1]:
+            earlier.update(tags)
+        if not earlier or not latest_kws: return 0.0, len(tags_by_date), 0
+        inter = latest_kws & earlier
+        union = latest_kws | earlier
+        stab = round(len(inter)/len(union), 3) if union else 0.0
+        d1, d2 = tags_by_date[-1][0], tags_by_date[-2][0]
+        gap = (pd.Timestamp(d1) - pd.Timestamp(d2)).days if len(tags_by_date) >= 2 else 0
+        return stab, len(tags_by_date), gap
+    
+    # Score all stocks on latest date
+    latest_df = master_df[master_df["date"] == latest]
+    scored = []
+    # 扩候选池：近5天内出现过的首板 + 所有历史出现≥2次的
+    recent_5d = [d for d in all_dates_str if 0 <= (pd.Timestamp(latest_str) - pd.Timestamp(d)).days <= 5]
+    master_df["_date_str"] = master_df["date"].astype(str)
+    active_stocks = set(master_df[master_df["_date_str"].isin(recent_5d)]["code"].unique())
+
+    # 批量检查涨停池（转纯 Python str）
+    active_list = [str(c).zfill(6) for c in active_stocks]
+    logger.info(f"  涨停池检查 {len(active_list)} 只候选...")
+    pool_ok = _get_limit_pool_codes(active_list, str(latest))
+    in_pool = {c for c, ok in pool_ok.items() if ok}
+    logger.info(f"  通过涨停池: {len(in_pool)} 只")
+
+    n_total = n_no_recent = n_not_first = n_low_stab = n_low_appear = n_scored = 0
+    # 对每只活跃股票取最新一次出现信息
+    for code in active_stocks:
+        code_df = master_df[master_df["code"] == code].sort_values("date")
+        # 取最近5天内的出现（不是全历史最后一次）
+        recent_appearances = code_df[code_df["date"].astype(str).isin(recent_5d)]
+        n_total += 1
+        if recent_appearances.empty:
+            n_no_recent += 1
+            continue
+        last_row = recent_appearances.iloc[-1]
+        if int(last_row["board_count"]) != 1:
+            n_not_first += 1
+            continue
+
+        stab, n_appear, gap = tag_stab(code, latest)
+        if n_appear < 2:
+            n_low_appear += 1
+            continue
+        if stab < 0.3:
+            n_low_stab += 1
+            continue
+
+        # 涨停池过滤
+        if code not in in_pool:
+            continue
+
+        kws_short = "|".join(str(last_row.get("keywords", "")).split("|")[:4])
+
+        # 新评分：稳定度(35%) + 历史验证(30%) + 间隔收益(35%)
+        # 稳定度按样本量折权：2次出现→打7折，3次→8.5折，4次+→满分
+        sample_weight = min(1.0, 0.7 + n_appear * 0.075) if n_appear >= 2 else 0.5
+        weighted_stab = stab * sample_weight
+
+        if n_appear >= 5 and stab >= 0.5:
+            history_score = 30  # 强验证：多次出现+标签稳定
+        elif n_appear >= 3 and stab >= 0.5:
+            history_score = 25
+        elif n_appear >= 2 and stab >= 0.4:
+            history_score = 18  # 正在形成模式
+        else:
+            history_score = 10
+
+        # 间隔评分：5-15天活跃轮动(0.6) / 15-60天理想(0.6→1.0) / >60天遗忘(0.7)
+        if 5 <= gap <= 15:
+            gap_bonus = 0.6
+        elif 15 < gap <= 60:
+            gap_bonus = 0.6 + (gap - 15) / 45 * 0.4  # 0.6 → 1.0
+        else:
+            gap_bonus = 0.7  # 极短或极长
+
+        score = round(weighted_stab * 35 + history_score + gap_bonus * 35, 1)
+
+        if score >= 55:
+            level = "🎯推荐"
+        elif score >= 40:
+            level = "👀关注"
+        else:
+            level = "📋观察"
+
+        n_scored += 1
+        scored.append({
+            "code": code, "name": last_row["name"], "sector": last_row["sector"],
+            "keywords": kws_short, "stability": stab, "appearances": n_appear,
+            "gap_days": gap, "score": score, "level": level,
+            "last_date": last_row["date"],
+        })
+    
+    logger.info(f"  过滤: total={n_total} no_recent={n_no_recent} not_first={n_not_first} "
+                f"low_appear={n_low_appear} low_stab={n_low_stab} scored={n_scored}")
+    logger.info(f"  评分完成: {len(scored)} 只进入推荐")
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    if not scored:
+        return '<p style="color:#999;text-align:center;padding:20px;">暂无符合条件的标签烙印型股票</p>'
+    
     rows = ""
-    for i, r in enumerate(relaunch_stocks[:30]):
-        kws_short = "|".join(str(r.get('keywords', '')).split('|')[:3])
-        score = r['relaunch_score']
-        score_color = "#4CAF50" if score >= 70 else ("#FF9800" if score >= 50 else "#999")
-        stage_badge = {"🎯强信号": "background:#4CAF50;color:white", "👀关注": "background:#FF9800;color:white", "📋观察": "background:#999;color:white"}.get(r['stage'], '')
-
-        yg_str = f"妖股{r['yaogu_score']}分" if r['yaogu_score'] >= 3 else ""
+    for i, r in enumerate(scored[:20]):
+        sc = r["score"]
+        sc_color = "#4CAF50" if sc >= 40 else ("#FF9800" if sc >= 30 else "#999")
+        lv_badge = {"🎯推荐": "background:#4CAF50;color:white", "👀关注": "background:#FF9800;color:white", "📋观察": "background:#999;color:white"}.get(r["level"], "")
         rows += f"""
         <tr>
-            <td>{i + 1}</td>
+            <td>{i+1}</td>
             <td><b>{r['code']}</b></td>
             <td>{r['name']}</td>
             <td style="font-size:11px;">{r['sector']}</td>
-            <td style="font-size:11px;">{kws_short}</td>
+            <td style="font-size:11px;">{r['keywords']}</td>
+            <td style="text-align:center;">{r['stability']:.2f}</td>
+            <td style="text-align:center;">{r['appearances']}次</td>
             <td style="text-align:center;">{r['gap_days']}天</td>
-            <td style="text-align:center;">{r['total_appearances']}次</td>
-            <td style="font-size:11px;">{yg_str}</td>
-            <td style="text-align:center;font-weight:bold;font-size:16px;color:{score_color};">{score}</td>
-            <td><span style="{stage_badge};padding:2px 8px;border-radius:3px;font-size:11px;">{r['stage']}</span></td>
+            <td style="text-align:center;font-weight:bold;font-size:16px;color:{sc_color};">{sc:.0f}</td>
+            <td><span style="{lv_badge};padding:2px 8px;border-radius:3px;font-size:11px;">{r['level']}</span></td>
         </tr>"""
-    strong = sum(1 for r in relaunch_stocks if '强信号' in r['stage'])
-    watch = sum(1 for r in relaunch_stocks if '关注' in r['stage'])
+    
+    rec = sum(1 for r in scored if '推荐' in r['level'])
+    watch = sum(1 for r in scored if '关注' in r['level'])
     return f"""
-    <p style="color:#888;">🎯强信号 {strong}只 | 👀关注 {watch}只 | 📋观察 {len(relaunch_stocks) - strong - watch}只</p>
+    <p style="color:#888;">🎯推荐 {rec}只 | 👀关注 {watch}只 | 📋观察 {len(scored)-rec-watch}只
+    | 评分=标签稳定(40%)+间隔收益(30%)+稀缺性(30%)</p>
     <table>
     <thead><tr>
-        <th>#</th><th>代码</th><th>名称</th><th>板块</th><th>关键词</th><th>间隔</th><th>历史次数</th><th>妖股</th><th>评分</th><th>阶段</th>
+        <th>#</th><th>代码</th><th>名称</th><th>板块</th><th>关键词</th><th>稳定度</th><th>出现</th><th>间隔</th><th>评分</th><th>推荐</th>
     </tr></thead>
     <tbody>{rows}</tbody>
     </table>"""
@@ -1403,91 +1586,40 @@ def _build_relaunch_table(relaunch_stocks):
 
 def generate_html(anomalies, leaders, strategy_results, relaunch_stocks,
                   chart_b64, master_df, target_date, min_count=1):
-    """生成完整 HTML 报告。"""
+    """生成完整 HTML 报告 — 聚焦推荐榜单。"""
     all_dates = sorted(master_df["date"].unique())
-
-    # 统计概览
     total_records = len(master_df)
     total_dates = len(all_dates)
     total_stocks = master_df["code"].nunique()
-    total_sectors = master_df["sector"].nunique()
 
     # 近2日
     recent_2 = all_dates[-2:] if len(all_dates) >= 2 else all_dates
 
-    # 异动表（集中冒出的关键词）
+    # 集中冒出关键词表
     anomaly_rows = ""
-    for i, a in enumerate(anomalies):
-        codes_str = ", ".join(a["stock_codes"][:8])
-        if len(a["stock_codes"]) > 8:
-            codes_str += f" ... (+{len(a['stock_codes']) - 8})"
-        names_str = ", ".join(a["stock_names"][:8])
-        if len(a["stock_names"]) > 8:
+    for i, a in enumerate(anomalies[:25]):
+        codes_str = ", ".join(a["stock_codes"][:6])
+        if len(a["stock_codes"]) > 6:
+            codes_str += f" ... (+{len(a['stock_codes'])-6})"
+        names_str = ", ".join(a["stock_names"][:6])
+        if len(a["stock_names"]) > 6:
             names_str += " ..."
-        sectors_str = ", ".join(a["sectors"][:5])
-        if len(a["sectors"]) > 5:
-            sectors_str += " ..."
 
-        stage_icon = {"🌱萌芽": "🌱", "🔥扩散": "🔥", "🏔️高峰": "🏔️"}.get(a.get('stage', ''), '')
+        stage_icon = a.get('stage', '🆕')
         anomaly_rows += f"""
         <tr>
-            <td>{i + 1}</td>
-            <td style="font-weight:bold;font-size:15px;">{a['keyword']}</td>
-            <td style="text-align:center;font-size:18px;font-weight:bold;color:#FF5722;">{a['count_recent']}</td>
-            <td style="text-align:center;color:#999;">{a['count_prior']}</td>
-            <td style="font-weight:bold;">{a.get('stage', '🆕集中冒出')}</td>
+            <td>{i+1}</td>
+            <td style="font-weight:bold;font-size:14px;">{a['keyword']}</td>
+            <td style="text-align:center;font-size:16px;font-weight:bold;color:#FF5722;">{a['count_recent']}</td>
+            <td style="font-weight:bold;">{a.get('stage', '🆕')}</td>
             <td style="font-size:11px;color:#888;">{a.get('stage_note', '')}</td>
             <td style="font-size:11px;">{codes_str}</td>
             <td style="font-size:11px;">{names_str}</td>
         </tr>"""
 
-    # 龙头表
-    leader_rows = ""
-    for i, l in enumerate(leaders[:50]):
-        lu_badge = f"<span style='background:#c62828;color:white;padding:2px 6px;border-radius:3px;font-size:11px;'>涨停×{l['lu_count_5d']}</span>"
-        streak_badge = ""
-        if l["streak"] >= 2:
-            streak_badge = f"<span style='background:#FF5722;color:white;padding:2px 6px;border-radius:3px;font-size:11px;'>连板{l['streak']}</span>"
+    # 推荐表格
+    rec_table = _build_recommendation_table(master_df, anomalies, target_date)
 
-        leader_rows += f"""
-        <tr>
-            <td>{i + 1}</td>
-            <td>{l['code']}</td>
-            <td>{l['name']}</td>
-            <td style="font-size:11px;">{l.get('industry', '')}</td>
-            <td style="font-weight:bold;color:#1565C0;">{l['keyword']}</td>
-            <td>{lu_badge} {streak_badge}</td>
-        </tr>"""
-
-    # 策略关联表
-    strategy_rows = ""
-    startup_count = 0
-    for r in strategy_results:
-        if "启动阶段" in r["startup_label"]:
-            startup_count += 1
-
-        strategies_badges = ""
-        for s in r["matched_strategies"].split("|"):
-            if s == "涨停池":
-                strategies_badges += "<span style='background:#E91E63;color:white;padding:2px 6px;border-radius:3px;font-size:11px;margin:1px;'>涨停池</span> "
-            elif s == "妖股池":
-                strategies_badges += "<span style='background:#9C27B0;color:white;padding:2px 6px;border-radius:3px;font-size:11px;margin:1px;'>妖股池</span> "
-            elif s == "牛股池":
-                strategies_badges += "<span style='background:#2196F3;color:white;padding:2px 6px;border-radius:3px;font-size:11px;margin:1px;'>牛股池</span> "
-
-        startup_color = "#4CAF50" if "启动阶段" in r["startup_label"] else ("#FF9800" if "观察中" in r["startup_label"] else "#999")
-
-        strategy_rows += f"""
-        <tr>
-            <td style="font-weight:bold;">{r['keyword']}</td>
-            <td>{r['code']}</td>
-            <td>{r['name']}</td>
-            <td style="font-size:11px;">{r['sector']}</td>
-            <td>{strategies_badges if strategies_badges else '—'}</td>
-            <td style="color:{startup_color};font-weight:bold;">{r['startup_label']}</td>
-        </tr>"""
-
-    # 组装 HTML
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1497,15 +1629,14 @@ def generate_html(anomalies, leaders, strategy_results, relaunch_stocks,
 <style>
     body {{ font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #fafafa; color: #333; }}
     h2 {{ border-bottom: 3px solid #E91E63; padding-bottom: 8px; }}
-    h3 {{ color: #555; margin-top: 32px; }}
     .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }}
     .summary-card {{ background: white; border-radius: 8px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
     .summary-card .num {{ font-size: 28px; font-weight: bold; color: #E91E63; }}
     .summary-card .label {{ font-size: 13px; color: #888; margin-top: 4px; }}
     .chart-container {{ text-align: center; margin: 20px 0; background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
     .chart-container img {{ max-width: 100%; height: auto; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 13px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-    th {{ background: #f5f5f5; padding: 10px 8px; text-align: left; font-size: 12px; text-transform: uppercase; color: #666; border-bottom: 2px solid #e0e0e0; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 24px; }}
+    th {{ background: #f5f5f5; padding: 10px 8px; text-align: left; font-size: 12px; color: #666; border-bottom: 2px solid #e0e0e0; }}
     td {{ padding: 8px; border-bottom: 1px solid #f0f0f0; }}
     tr:hover {{ background: #fafafa; }}
     .footer {{ color: #aaa; font-size: 11px; text-align: center; margin-top: 32px; padding-top: 16px; border-top: 1px solid #eee; }}
@@ -1513,88 +1644,42 @@ def generate_html(anomalies, leaders, strategy_results, relaunch_stocks,
 </head>
 <body>
 
-<h1 style="color:#E91E63;">🔥 涨停复盘 · 异动分析报告</h1>
-<p style="color:#888;">分析日期: {target_date} | 数据范围: {all_dates[0]} ~ {all_dates[-1]} | 共 {total_dates} 个交易日</p>
+<h1 style="color:#E91E63;">🔬 涨停复盘 · 标签烙印推荐</h1>
+<p style="color:#888;">分析日期: {target_date} | 数据: {all_dates[0]} ~ {all_dates[-1]} | {total_dates}天 · {total_records}条 · {total_stocks}只</p>
 
 <div class="summary">
-    <div class="summary-card">
-        <div class="num">{total_records}</div>
-        <div class="label">涨停记录</div>
-    </div>
-    <div class="summary-card">
-        <div class="num">{total_stocks}</div>
-        <div class="label">涉及股票</div>
-    </div>
-    <div class="summary-card">
-        <div class="num">{total_sectors}</div>
-        <div class="label">板块分类</div>
-    </div>
-    <div class="summary-card">
-        <div class="num">{len(anomalies)}</div>
-        <div class="label">异动关键词</div>
-    </div>
+    <div class="summary-card"><div class="num">{total_stocks}</div><div class="label">涉及股票</div></div>
+    <div class="summary-card"><div class="num">{total_dates}</div><div class="label">交易日</div></div>
+    <div class="summary-card"><div class="num">{len(anomalies)}</div><div class="label">集中冒出</div></div>
+    <div class="summary-card"><div class="num">{total_records}</div><div class="label">涨停记录</div></div>
+</div>
+
+<h2>🎯 标签烙印型推荐</h2>
+<p style="color:#888;">规则：近5天首板 + 标签跨期稳定(交集/并集) + 历史≥2次 |
+    评分 = 稳定度(35%) + 历史验证(30%) + 间隔(35%)</p>
+{rec_table}
+
+<div class="chart-container">
+    <img src="data:image/png;base64,{chart_b64}" alt="热力图">
 </div>
 
 <h2>🆕 集中冒出的关键词</h2>
-<p style="color:#888;">定义：前10日（{",".join(anomalies[0]['prior_dates']) if anomalies else '—'}）从未出现，
-   近2日（{",".join(recent_2)}）集中出现 ≥ {min_count} 次</p>
-
+<p style="color:#888;">前10日零出现（{all_dates[-12] if len(all_dates)>=12 else '—'} ~ {all_dates[-4] if len(all_dates)>=4 else '—'}），
+   近2日（{recent_2[0]} ~ {recent_2[-1]}）突然出现 ≥ {min_count}次</p>
 <table>
 <thead><tr>
-    <th>#</th><th>关键词</th><th>近2日</th><th>前10日</th><th>阶段</th><th>上涨空间</th>
-    <th>关联代码</th><th>关联名称</th>
+    <th>#</th><th>关键词</th><th>近2日</th><th>阶段</th><th>上涨空间</th><th>关联代码</th><th>关联名称</th>
 </tr></thead>
-<tbody>{anomaly_rows if anomaly_rows else '<tr><td colspan="8" style="text-align:center;color:#999;padding:20px;">✨ 近2日暂无集中冒出的新关键词</td></tr>'}</tbody>
+<tbody>{anomaly_rows if anomaly_rows else '<tr><td colspan="7" style="text-align:center;color:#999;padding:20px;">✨ 暂无集中冒出的新关键词</td></tr>'}</tbody>
 </table>
-
-<div class="chart-container">
-    <img src="data:image/png;base64,{chart_b64}" alt="统计分析图表">
-</div>
-
-<h2>🏆 潜在龙头股（概念板块 × 近期涨停）</h2>
-<table>
-<thead><tr>
-    <th>#</th><th>代码</th><th>名称</th><th>行业</th><th>关联关键词</th><th>强度</th>
-</tr></thead>
-<tbody>{leader_rows if leader_rows else '<tr><td colspan="6" style="text-align:center;color:#999;padding:20px;">暂无潜在龙头</td></tr>'}</tbody>
-</table>
-
-<h2>🎯 策略关联与启动阶段</h2>
-<p style="color:#888;">启动阶段: 近5日首次出现涨停且此前20日无连板记录 |
-   匹配池: <span style="background:#E91E63;color:white;padding:2px 6px;border-radius:3px;font-size:11px;">涨停池</span>
-   <span style="background:#9C27B0;color:white;padding:2px 6px;border-radius:3px;font-size:11px;">妖股池</span>
-   <span style="background:#2196F3;color:white;padding:2px 6px;border-radius:3px;font-size:11px;">牛股池</span>
-</p>
-<table>
-<thead><tr>
-    <th>关键词</th><th>代码</th><th>名称</th><th>板块</th><th>匹配策略</th><th>启动判定</th>
-</tr></thead>
-<tbody>{strategy_rows if strategy_rows else '<tr><td colspan="6" style="text-align:center;color:#999;padding:20px;">暂无策略匹配</td></tr>'}</tbody>
-</table>
-
-<p style="margin-top:20px;color:#888;">
-    ✅ 启动阶段: {startup_count} 只 |
-    📊 策略匹配: {sum(1 for r in strategy_results if r['matched_count'] > 0)} 只
-</p>
-
-<h2>🚀 个股再启动信号</h2>
-<p style="color:#888;">规则：首板 + 上次涨停间隔≥10天 + 涨停池入选 |
-   评分 = 间隔(40%) + 妖股质量(30%) + 稀缺性(30%)</p>
-{_build_relaunch_table(relaunch_stocks)}
 
 <div class="footer">
-    <p>Quant 项目 · 涨停复盘异动分析 · 自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-    <p>数据来源: hotpoint/ 涨停复盘图片 + DB 概念板块数据 | 仅供参考，不构成投资建议</p>
+    <p>Quant 项目 · 涨停复盘异动分析 · 自动生成于 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}</p>
+    <p>数据来源: hotpoint/ 涨停复盘图片 | 仅供参考，不构成投资建议</p>
 </div>
 
 </body>
 </html>"""
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Phase 10: 邮件发送
-# ══════════════════════════════════════════════════════════════════════
-
 def send_html_email(html_body, subject):
     """发送 HTML 格式邮件，复用项目 SMTP 配置。"""
     try:
