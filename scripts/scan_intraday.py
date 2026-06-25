@@ -15,23 +15,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
+from config.settings import TradingConfig
 from sqlalchemy import text
-
-# ═══════════════════════════════════════════════════════════════
-# 涨停阈值（板别感知 —— 与 factors/limit_up.py 一致）
-# ═══════════════════════════════════════════════════════════════
-
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-
-def _get_limit(code: str) -> float:
-    """板别感知涨停阈值。"""
-    for prefix, limit in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_MULT
-
 
 # ═══════════════════════════════════════════════════════════════
 # 腾讯实时行情
@@ -102,9 +87,10 @@ def fetch_tencent_quotes(codes: list[str], batch_size: int = 300) -> pd.DataFram
         df['prev_close'] > 0, 0
     ) * 100
 
-    # 板别感知涨停标记
+    # 涨停标记：走 TradingConfig 统一公式
     df['is_lu'] = df.apply(
-        lambda r: 1 if r['ret'] >= _get_limit(r['code']) * 98 else 0, axis=1
+        lambda r: 1 if r['prev_close'] > 0 and TradingConfig.is_at_limit_up(
+            r['price'], r['prev_close'], r['code'], tolerance=0.98) else 0, axis=1
     )
 
     # 附加属性
