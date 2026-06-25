@@ -362,7 +362,7 @@ def main():
                 if prev_c and TradingConfig.is_at_limit_up(s["close"], prev_c, code):
                     continue
                 px = s["close"]
-                shares = int(args.cash / args.top_n / px / 100) * 100
+                shares = int(cash / max(available, 1) / px / 100) * 100
                 if shares <= 0:
                     continue
                 cost = shares * px * BUY_COST
