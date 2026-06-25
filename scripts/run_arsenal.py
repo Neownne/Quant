@@ -17,18 +17,10 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
+from config.settings import TradingConfig
 
 OUT_DIR = "data/arsenal"
 
-# ── 涨停阈值 ──
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-def _get_limit(code: str) -> float:
-    for prefix, limit in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            return limit
-    return _DEFAULT_MULT
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
@@ -70,7 +62,9 @@ def today_sector_heatmap():
     df['ret'] = (df['close'] - df['prev_close']) / df['prev_close']
     # 板别感知涨停标记
     df['is_lu'] = df.apply(
-        lambda r: 1 if pd.notna(r['ret']) and r['ret'] >= _get_limit(str(r['code'])) * 0.98 else 0, axis=1
+        lambda r: 1 if pd.notna(r.get('prev_close')) and r['prev_close'] > 0
+                  and TradingConfig.is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98)
+                  else 0, axis=1
     )
 
     sector = df.groupby('industry').agg(
@@ -131,14 +125,16 @@ def today_yaogu_signals(min_score=6):
         r = today_row.iloc[-1]
 
         # 涨停检测（板别感知）
-        limit = _get_limit(code)
-        is_lu = r['ret'] >= limit * 0.98 if pd.notna(r['ret']) else False
+        is_lu = (pd.notna(r.get('prev_close')) and r['prev_close'] > 0
+                 and TradingConfig.is_at_limit_up(r['close'], r['prev_close'], code, tolerance=0.98))
 
         if not is_lu:
             continue
 
         # 因子计算
-        is_lu_series = (cdata['ret'] >= limit * 0.98)
+        mult = TradingConfig.get_limit_multiplier(code)
+        limit_pxs = (cdata['prev_close'] * mult).round(4)
+        is_lu_series = cdata['close'] >= limit_pxs * 0.98
         streak = 0
         for v in is_lu_series[::-1]:
             if v: streak += 1
