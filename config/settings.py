@@ -101,12 +101,12 @@ class TradingConfig:
         return round(prev_close * (mult if is_up else (2 - mult)), 4)
 
     @staticmethod
-    def is_at_limit_up(close: float, prev_close: float, code: str) -> bool:
-        """判断是否涨停封板（无法买入）。"""
+    def is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
+        """判断是否涨停封板（无法买入）。tolerance<1.0 放宽到近涨停区，如 0.98=涨9.7%+即算。"""
         if prev_close <= 0 or close <= 0:
             return False
         limit_price = TradingConfig.calc_limit_price(prev_close, code, is_up=True)
-        return close >= limit_price
+        return close >= limit_price * tolerance
 
     @staticmethod
     def is_at_limit_down(close: float, prev_close: float, code: str) -> bool:
