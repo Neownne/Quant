@@ -96,6 +96,7 @@ def run_backtest(args):
     trade_log = []
     trade_count = 0
     frozen = False              # 组合熔断标记
+    frozen_days = 0             # 冻结天数计数器
 
     NET_SELL = 1.0 - TradingConfig.SLIPPAGE - TradingConfig.COMMISSION - TradingConfig.STAMP_DUTY
     BUY_COST = 1.0 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE
@@ -122,11 +123,14 @@ def run_backtest(args):
         if total > peak_value:
             peak_value = total
         dd = (peak_value - total) / peak_value if peak_value > 0 else 0
-        if dd > args.portfolio_dd_stop:
-            frozen = True
+        if dd > args.portfolio_dd_stop and not frozen:
+            frozen, frozen_days = True, 0
             logger.info(f"  [{td.strftime('%Y-%m-%d')}] 组合回撤 {dd:.1%} > {args.portfolio_dd_stop:.0%}，熔断")
-        if dd < args.portfolio_dd_stop * 0.8:
-            frozen = False
+        if frozen:
+            frozen_days += 1
+        if frozen and frozen_days > 60:
+            frozen, peak_value = False, total
+            logger.info(f"  [{td.strftime('%Y-%m-%d')}] 熔断 60 天期满，解除")
 
         # ── 个股止损 ──
         for code, pos in list(positions.items()):
