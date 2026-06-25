@@ -22,9 +22,13 @@ from data.loader import load_daily_data, load_mcap_data
 OUT_DIR = "data/arsenal"
 
 # ── 涨停阈值 ──
-_DEFAULT_MULT = 1.9899
+_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
+_DEFAULT_MULT = 1.09899
 
 def _get_limit(code: str) -> float:
+    for prefix, limit in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            return limit
     return _DEFAULT_MULT
 
 

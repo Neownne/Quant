@@ -21,11 +21,15 @@ from sqlalchemy import text
 # 涨停阈值（板别感知 —— 与 factors/limit_up.py 一致）
 # ═══════════════════════════════════════════════════════════════
 
-_DEFAULT_MULT = 1.9899
+_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
+_DEFAULT_MULT = 1.09899
 
 
 def _get_limit(code: str) -> float:
-    """涨停阈值。"""
+    """板别感知涨停阈值。"""
+    for prefix, limit in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            return limit
     return _DEFAULT_MULT
 
 

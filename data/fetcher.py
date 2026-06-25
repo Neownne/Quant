@@ -133,7 +133,7 @@ def fetch_stock_daily(
 ) -> pd.DataFrame:
     """
     下载单只股票的日线行情（前复权）。
-    数据源：腾讯财经。
+    数据源：新浪财经。注意：逐只请求，量大易限流，请用 workers=1~2。
 
     参数
     ----
@@ -148,6 +148,10 @@ def fetch_stock_daily(
     """
     end = end_date or date.today().strftime("%Y%m%d")
     tx_symbol = _to_tencent_symbol(symbol)
+
+    # 请求前小延迟（避免触发新浪限流）
+    import random
+    time.sleep(random.uniform(0.1, 0.3))
 
     raw = ak.stock_zh_a_daily(
         symbol=tx_symbol,

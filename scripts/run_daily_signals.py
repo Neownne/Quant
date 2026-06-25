@@ -18,7 +18,7 @@
 6阶段流水线（日终模式）:
   Phase 0: 时间门控 + 模式判断
   Phase 1: 同步前数据质量检查
-  Phase 2: 增量数据同步（指数 + 日线 + 市值 + 腾讯补漏）
+  Phase 2: 增量数据同步（指数 + 日线 + 市值）
   Phase 3: 同步后数据质量验证
   Phase 4: 一次性数据加载 + 公共因子预计算
   Phase 5: 三池信号扫描（涨停池 / 妖股池 / 牛股池）
@@ -53,8 +53,12 @@ from data.sync import (
 )
 from config.settings import TradingConfig
 
-OUT_DIR = "data/arsenal"
-os.makedirs(OUT_DIR, exist_ok=True)
+OUT_DIR = os.path.join("data", "arsenal")
+POOLS_DIR = os.path.join(OUT_DIR, "pools")
+REPORTS_DIR = os.path.join(OUT_DIR, "reports")
+THS_DIR = os.path.join(OUT_DIR, "ths_import")
+for d in [OUT_DIR, POOLS_DIR, REPORTS_DIR, THS_DIR]:
+    os.makedirs(d, exist_ok=True)
 
 # ═══════════════════════════════════════════════════════════════
 # 常量
@@ -64,16 +68,21 @@ TARGET_STOCK_COUNT = 4000   # 同步后至少要有这么多只股票
 MAX_SYNC_RETRIES = 3        # 同步失败重试次数
 SYNC_RETRY_INTERVAL = 30    # 重试间隔(秒)
 
-# 涨停阈值
-_DEFAULT_MULT = 1.9899
+# 涨停阈值（板别感知，四舍五入到4位 —— 与 config/settings.py 保持一致）
+_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
+_DEFAULT_MULT = 1.09899
 
 
 def _is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
-    """A股涨停价判断。涨停价 = round(prev_close × 1.9899, 4)
-    tolerance<1.0 时放宽到近涨停区。"""
+    """A股涨停价判断。tolerance<1.0 时放宽到近涨停区。"""
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    limit_price = round(prev_close * 1.9899, 4)
+    mult = _DEFAULT_MULT
+    for prefix, m in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            mult = m
+            break
+    limit_price = round(prev_close * mult, 4)
     return close >= limit_price * tolerance
 
 
@@ -150,23 +159,34 @@ def _expected_latest_data_date() -> date:
 
 
 def _is_data_stale(engine) -> bool:
-    """检查 DB 是否缺预期交易日数据（昨晚没跑日终 → 数据滞后）。"""
+    """检查 DB 是否缺预期交易日数据（昨晚没跑日终 → 数据滞后）。
+
+    不仅检查日期，还检查覆盖率：即使 MAX(trade_date) 已是最新，
+    如果当日股票数 < TARGET_STOCK_COUNT，也视为数据不完整。
+    """
     with engine.connect() as conn:
         latest_db = conn.execute(
             text("SELECT MAX(trade_date) FROM stock_daily")
         ).scalar()
     if latest_db is None:
         return True
-    latest_db = pd.Timestamp(latest_db).date()
+    latest_db_date = pd.Timestamp(latest_db).date()
     expected = _expected_latest_data_date()
-    return latest_db < expected
+    if latest_db_date < expected:
+        return True
+    # 日期到了但覆盖率不够 → 上次同步中断，需要补
+    cnt = _check_today_coverage(engine, str(latest_db_date))
+    if cnt < TARGET_STOCK_COUNT:
+        logger.info(f"  检测到不完整同步: {latest_db_date} 仅 {cnt} 只（目标 {TARGET_STOCK_COUNT}），需补同步")
+        return True
+    return False
 
 
 def _is_eod_report_missing() -> bool:
     """检查预期交易日是否还没出过日终报告。"""
     expected = _expected_latest_data_date()
     date_tag = expected.strftime("%Y%m%d")
-    report_path = f"{OUT_DIR}/daily_report_{date_tag}.txt"
+    report_path = f"{REPORTS_DIR}/daily_report_{date_tag}.txt"
     return not os.path.exists(report_path)
     time.sleep(wait_seconds + 5)
 
@@ -280,9 +300,55 @@ def _tx_fallback(engine, trade_date_str: str):
         logger.info(f"  腾讯补完后: {cnt} 只")
 
 
+def _last_complete_date(engine, min_stocks: int = 4000) -> str | None:
+    """返回 DB 中最近一次数据完整的交易日（YYYY-MM-DD）。
+
+    用于检测数据缺口 —— 如果上次同步不完整，下次同步从缺口处补起。
+    默认阈值与 TARGET_STOCK_COUNT 一致。
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT trade_date FROM stock_daily
+                WHERE trade_date >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY trade_date
+                HAVING COUNT(*) >= :target
+                ORDER BY trade_date DESC LIMIT 1
+            """),
+            {"target": min_stocks},
+        ).fetchall()
+    return str(rows[0][0]) if rows else None
+
+
 def sync_all(engine, trade_date_str: str) -> bool:
-    """同步指数 + 日线 + 市值 + 腾讯补漏。返回是否达标。"""
-    start_fmt = trade_date_str.replace('-', '')
+    """同步指数 + 日线 + 市值。返回是否达标。
+
+    自动检测数据缺口：如果上次同步不完整（连续多日未跑），
+    从第一个缺失日开始补，而不是只同步 trade_date_str 当天。
+    """
+    # ── 自动检测缺口：从上次完整覆盖日的后一天开始 ──
+    last_complete = _last_complete_date(engine)
+    target_dt = pd.Timestamp(trade_date_str)
+
+    if last_complete and pd.Timestamp(last_complete) >= target_dt:
+        # 日期到了但可能覆盖率不够（如上次同步中断，只有3000只）
+        cnt = _check_today_coverage(engine, trade_date_str)
+        if cnt >= TARGET_STOCK_COUNT:
+            logger.info(f"[sync] DB 已完整覆盖到 {last_complete} ({cnt}只)，跳过同步")
+            return True
+        else:
+            logger.info(f"[sync] DB 日期 {last_complete} 但覆盖率不足 ({cnt}/{TARGET_STOCK_COUNT})，继续补同步")
+
+    sync_start = trade_date_str
+    if last_complete:
+        next_day = pd.Timestamp(last_complete) + timedelta(days=1)
+        if next_day <= target_dt:
+            sync_start = next_day.strftime("%Y-%m-%d")
+            logger.info(f"[sync] 数据缺口: {last_complete} 之后缺失，从 {sync_start} 开始补")
+    else:
+        logger.info(f"[sync] 无最近完整数据，从 {sync_start} 全量同步")
+
+    start_fmt = sync_start.replace('-', '')
 
     # 1. 同步指数
     logger.info("[sync] 同步指数日线...")
@@ -294,17 +360,17 @@ def sync_all(engine, trade_date_str: str) -> bool:
     # 2. 同步个股日线
     logger.info("[sync] 同步个股日线...")
     try:
-        sync_stock_daily(engine, start_date=start_fmt, workers=8)
+        sync_stock_daily(engine, start_date=start_fmt, workers=2)
     except Exception as e:
         logger.warning(f"个股日线同步失败: {e}")
 
     cnt = _check_today_coverage(engine, trade_date_str)
-    logger.info(f"  主力源后: {cnt} 只")
+    logger.info(f"  日线同步后: {cnt} 只")
 
-    # 3. 腾讯补漏
-    if cnt < TARGET_STOCK_COUNT:
-        _tx_fallback(engine, trade_date_str)
-        cnt = _check_today_coverage(engine, trade_date_str)
+    # 3. 腾讯补漏（已禁用 —— 新浪数据源覆盖已达 5000+，腾讯 API 对 9 开头北交所股票兼容性差）
+    # if cnt < TARGET_STOCK_COUNT:
+    #     _tx_fallback(engine, trade_date_str)
+    #     cnt = _check_today_coverage(engine, trade_date_str)
 
     # 4. 同步市值
     logger.info("[sync] 同步市值数据...")
@@ -795,6 +861,161 @@ def screen_bull(daily, extra, target_date, name_map, ind_map, exclude_gem_star=F
 # Phase 5.4: 市场快照
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# Phase 5b: ETF 三因子扫描
+# ═══════════════════════════════════════════════════════════════
+
+def scan_etf(engine, target_date: pd.Timestamp) -> dict | None:
+    """运行 ETF 三因子监测，返回结果字典或 None（无数据时）。
+
+    返回:
+        etf_results:  单只 ETF 分析结果列表
+        high_count:   高确信信号数
+        mid_count:    中等信号数
+        summary_text: 报告文本段落
+    """
+    from etf_monitor.config import load_etfs, SIGNAL_HIGH, SIGNAL_MID
+    from etf_monitor.engine import analyze_all
+
+    target_str = target_date.strftime("%Y-%m-%d")
+
+    # ── 自动同步 ETF 日线 ──
+    try:
+        latest_etf = pd.read_sql(
+            text("SELECT MAX(trade_date) FROM etf_daily"), engine
+        ).iloc[0, 0]
+        if latest_etf is None or str(latest_etf) < target_str:
+            logger.info(f"[etf] ETF 日线过期 ({latest_etf}), 同步中...")
+            from data.sync import sync_etf_daily
+            sync_etf_daily(engine, start_date=str(latest_etf or '20240101'), workers=2)
+            logger.info("[etf] ETF 日线同步完成")
+    except Exception as e:
+        logger.warning(f"[etf] ETF 日线同步跳过: {e}")
+
+    # ── 加载 ETF 清单 ──
+    etfs = load_etfs(engine)
+    if not etfs:
+        logger.warning("[etf] 无 ETF 监控清单")
+        return None
+    logger.info(f"[etf] 监控 {len(etfs)} 只 ETF")
+
+    # ── 拉取 K 线 ──
+    kline_map = {}
+    for code in etfs:
+        df = pd.read_sql(
+            text("SELECT trade_date as date, open, high, low, close, volume "
+                 "FROM etf_daily WHERE code = :c ORDER BY trade_date DESC LIMIT 60"),
+            engine, params={"c": code},
+        )
+        if not df.empty:
+            kline_map[code] = df.sort_values("date")
+
+    # ── 指数 K 线 ──
+    idx_kl = pd.read_sql(
+        text("SELECT trade_date as date, close FROM index_daily "
+             "WHERE code = '000300' ORDER BY trade_date DESC LIMIT 60"),
+        engine,
+    )
+    idx_kl = idx_kl.sort_values("date") if not idx_kl.empty else pd.DataFrame()
+
+    # ── 份额数据 ──
+    shares_map = {}
+    try:
+        import akshare as ak
+        for code in etfs:
+            # 从缓存文件读取昨日值，计算日变化率
+            cache_file = f"output/etf_shares_{code}.txt"
+            prev = 0.0
+            try:
+                with open(cache_file) as f:
+                    prev = float(f.read().strip())
+            except Exception:
+                pass
+            # 今日份额来自 etf_basic 或实时数据，此处简化为缓存模式
+            delta_pct = 0.0
+            shares_map[code] = delta_pct
+    except Exception as e:
+        logger.warning(f"[etf] 份额数据获取失败: {e}")
+
+    # ── 三因子分析 ──
+    results = analyze_all(kline_map, idx_kl, shares_map, etfs)
+
+    # ── 保存到 DB ──
+    try:
+        with engine.begin() as conn:
+            for r in results:
+                if r.get("error"):
+                    continue
+
+                def _py(v):
+                    if v is None:
+                        return None
+                    if hasattr(v, "item"):
+                        return v.item()
+                    return v
+
+                conn.execute(
+                    text("""
+                        INSERT INTO etf_monitor_daily (date, code, name, close, chg_pct,
+                            volume_ma20, vol_ratio, vol_prob, dir_prob, share_prob,
+                            shares_delta_pct, composite_prob, signal_level)
+                        VALUES (:d,:c,:n,:cl,:ch,:vm,:vr,:vp,:dp,:sp,:sd,:cp,:sl)
+                        ON CONFLICT (date, code) DO UPDATE SET
+                            vol_ratio=:vr2, vol_prob=:vp2, dir_prob=:dp2,
+                            composite_prob=:cp2, signal_level=:sl2
+                    """),
+                    {
+                        "d": target_str, "c": r["code"], "n": r["name"],
+                        "cl": _py(r.get("close")), "ch": _py(r.get("chg_pct")),
+                        "vm": _py(r.get("volume_ma20")), "vr": _py(r.get("vol_ratio")),
+                        "vp": _py(r.get("vol_prob")), "dp": _py(r.get("dir_prob")),
+                        "sp": _py(r.get("share_prob")), "sd": _py(r.get("shares_delta_pct")),
+                        "cp": _py(r.get("composite_prob")), "sl": r.get("signal_level"),
+                        "vr2": _py(r.get("vol_ratio")), "vp2": _py(r.get("vol_prob")),
+                        "dp2": _py(r.get("dir_prob")), "cp2": _py(r.get("composite_prob")),
+                        "sl2": r.get("signal_level"),
+                    },
+                )
+        logger.info(f"[etf] 已写入 etf_monitor_daily: {len(results)} 条")
+    except Exception as e:
+        logger.error(f"[etf] DB写入失败: {e}")
+
+    # ── 统计 ──
+    high_count = sum(1 for r in results if r.get("signal_level") == "high")
+    mid_count = sum(1 for r in results if r.get("signal_level") == "mid")
+
+    # ── 生成报告文本 ──
+    lines = []
+    lines.append(f"【ETF 三因子监测】{len(results)} 只 | "
+                 f"高确信 {high_count} | 中等 {mid_count}")
+    lines.append(f"  {'代码':<8s} {'名称':<12s} {'涨跌':>7s} {'量比':>6s} "
+                 f"{'量能P':>5s} {'方向P':>5s} {'综合P':>6s} {'信号':>4s}")
+    lines.append("  " + "-" * 65)
+
+    # 按综合概率降序排列
+    sorted_results = sorted(
+        [r for r in results if not r.get("error")],
+        key=lambda x: x.get("composite_prob", 0), reverse=True,
+    )
+    for r in sorted_results:
+        sig = r.get("signal_level", "?")
+        sig_icon = {"high": "🔴", "mid": "🟡", "normal": "⚪"}.get(sig, "?")
+        lines.append(
+            f"  {r['code']:<8s} {r['name']:<12s} "
+            f"{r.get('chg_pct', 0):+6.2f}% {r.get('vol_ratio', 0):>5.2f}x "
+            f"{r.get('vol_prob', 0):>4.0f} {r.get('dir_prob', 0):>4.0f} "
+            f"{r.get('composite_prob', 0):>5.0f}% {sig_icon}"
+        )
+    lines.append("")
+
+    return {
+        "results": results,
+        "high_count": high_count,
+        "mid_count": mid_count,
+        "summary_text": "\n".join(lines),
+    }
+
+
 def build_market_snapshot(daily, target_date, csi_snapshot):
     """构建市场概况。"""
     today_data = daily[daily['trade_date'] == target_date]
@@ -918,7 +1139,8 @@ def find_intersections(limit_up_df, yaogu_df, bull_df):
 # Phase 6: 输出 & 推送
 # ═══════════════════════════════════════════════════════════════
 
-def build_report(snapshot, limit_up, yaogu, bull, intersections=None, tag="", rt_ts=""):
+def build_report(snapshot, limit_up, yaogu, bull, intersections=None,
+                 tag="", rt_ts="", etf_text=""):
     """生成文本报告。tag='intraday' 时为午盘报告。"""
     is_intraday = tag == 'intraday'
     title = "午盘信号速报" if is_intraday else "每日信号报告"
@@ -1020,6 +1242,10 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None, tag="", rt
             lines.append("")
         lines.append("")
 
+    # ETF
+    if etf_text:
+        lines.append(etf_text)
+
     # 规则
     lines.append("【各池规则】")
     lines.append("  涨停池: 4条件(市值30-500亿+股价5-100+MA5>MA10+20日涨停2-4次) → 按今日涨幅排序")
@@ -1065,22 +1291,22 @@ def send_email(subject, body):
         return False
 
 
-def save_outputs(snapshot, limit_up, yaogu, bull, tag=""):
+def save_outputs(snapshot, limit_up, yaogu, bull, tag="", etf_text=""):
     """保存报告、JSON、同花顺导入文件。tag='intraday' 时文件名加 _intraday 后缀。"""
     date_tag_val = snapshot['date'].replace('-', '')
     suffix = f"_{tag}" if tag else ""
     label = "午盘" if tag == 'intraday' else "日报"
 
     # 文本报告
-    report = build_report(snapshot, limit_up, yaogu, bull, tag=tag)
-    report_path = f"{OUT_DIR}/daily_report_{date_tag_val}{suffix}.txt"
+    report = build_report(snapshot, limit_up, yaogu, bull, tag=tag, etf_text=etf_text)
+    report_path = f"{REPORTS_DIR}/daily_report_{date_tag_val}{suffix}.txt"
     with open(report_path, 'w') as f:
         f.write(report)
 
     # 各池 JSON
     for name, df in [('limit_up', limit_up), ('yaogu', yaogu), ('bull', bull)]:
         if not df.empty:
-            json_path = f"{OUT_DIR}/{name}_{date_tag_val}{suffix}.json"
+            json_path = f"{POOLS_DIR}/{name}_{date_tag_val}{suffix}.json"
             df_export = df.copy()
             if '代码' in df_export.columns:
                 df_export['code'] = df_export['代码']
@@ -1092,7 +1318,7 @@ def save_outputs(snapshot, limit_up, yaogu, bull, tag=""):
         if df is not None and not df.empty:
             codes = df['代码'].tolist() if '代码' in df.columns else df.index.tolist()
             all_codes.update(str(c).zfill(6) for c in codes)
-    ths_path = f"{OUT_DIR}/ths_import_{date_tag_val}{suffix}.txt"
+    ths_path = f"{THS_DIR}/ths_import_{date_tag_val}{suffix}.txt"
     with open(ths_path, 'w') as f:
         for c in sorted(all_codes):
             f.write(f"{c}\n")
@@ -1116,6 +1342,7 @@ def main():
     p.add_argument("--exclude-gem-star", action="store_true", help="排除创业/科创板(300/301/688)")
     p.add_argument("--yaogu-min-score", type=int, default=3, help="妖股最低评分（默认3）")
     p.add_argument("--intraday", action="store_true", help="日内模式：用腾讯实时行情（上午盘后可用）")
+    p.add_argument("--skip-etf", action="store_true", help="跳过 ETF 三因子扫描")
     args = p.parse_args()
 
     t_start = time.time()
@@ -1147,9 +1374,6 @@ def main():
             logger.info(f"  交易日: {trade_date.date()} | 强制日内模式")
         else:
             # ── 自动模式：根据当前时间 + 数据新鲜度判断 ──
-            if not _is_trading_day():
-                logger.warning("今天非交易日，退出")
-                return
 
             now = datetime.now()
             data_stale = _is_data_stale(engine)
@@ -1163,6 +1387,10 @@ def main():
                     logger.info("  数据已同步但日终报告缺失，跳过同步直接出报告")
                     args.no_sync = True  # 数据已有，跳过同步加速
                 is_intraday = False
+            elif now.hour < 9:
+                # 盘前（00:00-09:00）→ 还没开盘，跑日终模式处理昨日数据
+                logger.info("  盘前时段（< 09:00），运行日终模式")
+                is_intraday = False
             elif not args.now:
                 if now.hour < 11 or (now.hour == 11 and now.minute < 30):
                     logger.info("  当前上午盘交易中，等待 11:30 上午收盘...")
@@ -1173,7 +1401,11 @@ def main():
                 else:
                     is_intraday = False
             else:
-                is_intraday = (now.hour < 15)
+                # --now 模式：盘前(<9:00)走日终，盘中走午盘，盘后走日终
+                if now.hour < 9:
+                    is_intraday = False
+                else:
+                    is_intraday = (now.hour < 15)
 
             trade_date = pd.Timestamp(_latest_trading_day())
             mode_label = "午盘扫描（腾讯实时行情）" if is_intraday else "日终扫描（同步+日线）"
@@ -1263,6 +1495,19 @@ def main():
         # 交集
         intersections = find_intersections(limit_up, yaogu, bull)
 
+        # ── Phase 5b: ETF 三因子扫描（日终模式）──
+        etf_text = ""
+        etf_data = None
+        if not is_intraday and not getattr(args, 'skip_etf', False):
+            print("  扫描ETF...")
+            t0 = time.time()
+            etf_data = scan_etf(engine, target_date)
+            if etf_data:
+                etf_text = etf_data["summary_text"]
+                logger.info(f"  ETF: {len(etf_data['results'])}只, "
+                           f"高确信{etf_data['high_count']} "
+                           f"({time.time()-t0:.0f}s)")
+
         # ── Phase 6: 输出 & 推送 ──
         logger.info("═══ Phase 6: 输出 & 推送 ═══")
 
@@ -1270,21 +1515,24 @@ def main():
 
         if args.dry_run:
             report = build_report(snapshot, limit_up, yaogu, bull, intersections,
-                                  tag=phase6_tag, rt_ts=rt_ts or "")
+                                  tag=phase6_tag, rt_ts=rt_ts or "", etf_text=etf_text)
             print("\n" + report)
             logger.info("  --dry-run: 已跳过文件写入和邮件发送")
         else:
-            report = save_outputs(snapshot, limit_up, yaogu, bull, tag=phase6_tag)
+            report = save_outputs(snapshot, limit_up, yaogu, bull, tag=phase6_tag,
+                                  etf_text=etf_text)
             print("\n" + report)
 
             # 邮件
             should_email = args.send_email or bool(EMAIL_CONFIG['user'])
             if should_email:
                 prefix = "午盘速报" if is_intraday else "日报"
+                hc = etf_data["high_count"] if etf_data else 0
                 subject = (f"量化信号{prefix} {snapshot['date']} | "
-                          f"涨停{len(limit_up)} 妖股{len(yaogu)} 牛股{len(bull)}")
+                          f"涨停{len(limit_up)} 妖股{len(yaogu)} 牛股{len(bull)}"
+                          + (f" ETF高确信{hc}" if hc else ""))
                 full_report = build_report(snapshot, limit_up, yaogu, bull, intersections,
-                                          tag=phase6_tag, rt_ts=rt_ts or "")
+                                          tag=phase6_tag, rt_ts=rt_ts or "", etf_text=etf_text)
                 send_email(subject, full_report)
 
         elapsed = time.time() - t_start

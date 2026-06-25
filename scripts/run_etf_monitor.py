@@ -19,7 +19,44 @@ from sqlalchemy import text
 from data.db import get_engine
 from etf_monitor.config import load_etfs, SIGNAL_HIGH, SIGNAL_MID
 from etf_monitor.engine import analyze_all
-from notify import send_report
+
+
+def _send_etf_email(html_body: str, subject: str) -> bool:
+    """复用项目 SMTP 配置发送邮件。"""
+    import smtplib, os
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
+    user = os.getenv("SMTP_USER", "")
+    to = os.getenv("SMTP_TO", "")
+    if not user or not to:
+        print("邮箱未配置，跳过发送")
+        return False
+
+    msg = MIMEMultipart()
+    msg["From"] = os.getenv("SMTP_FROM", user)
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        host = os.getenv("SMTP_HOST", "smtp.qq.com")
+        port = int(os.getenv("SMTP_PORT", "465"))
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=15)
+        else:
+            server = smtplib.SMTP(host, port, timeout=15)
+            server.starttls()
+        server.login(user, os.getenv("SMTP_PASSWORD", ""))
+        server.sendmail(user, [r.strip() for r in to.split(",") if r.strip()], msg.as_string())
+        server.quit()
+        print(f"邮件已发送到 {to}")
+        return True
+    except Exception as e:
+        print(f"邮件发送失败: {e}")
+        return False
 
 
 def fetch_kline(engine, code, limit=60):
@@ -238,7 +275,7 @@ def main():
     if args.send:
         hc = sum(1 for r in results if r.get("signal_level") == "high")
         if hc > 0:
-            send_report(html, subject=f"ETF 三因子监测 {target_date} — {hc}只高确信")
+            _send_etf_email(html, subject=f"ETF 三因子监测 {target_date} — {hc}只高确信")
         else:
             logger.info("无高确信信号，跳过邮件发送")
 

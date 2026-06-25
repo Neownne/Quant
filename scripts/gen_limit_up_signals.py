@@ -21,12 +21,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
-# 涨停阈值
-_DEFAULT_MULT = 1.9899
+# 涨停阈值（板别感知）
+_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
+_DEFAULT_MULT = 1.09899
 
 def _calc_limit_price(prev_close: float, code: str) -> float:
-    """计算涨停价。涨停价 = round(prev_close × 1.9899, 4)"""
-    return round(prev_close * 1.9899, 4)
+    """计算涨停价。涨停价 = round(prev_close × multiplier, 4)"""
+    mult = _DEFAULT_MULT
+    for prefix, m in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            mult = m
+            break
+    return round(prev_close * mult, 4)
 
 
 def _hit_limit(high: float, prev_close: float, code: str) -> bool:

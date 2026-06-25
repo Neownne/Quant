@@ -61,7 +61,7 @@
 | 策略 | 脚本 | 状态 | 定位 |
 |------|------|------|------|
 | 小市值反转 | `bt_small_cap.py` | **主力** | 底仓，2025年+87% |
-| 三池信号 | `run_daily_signals.py` | **日常** | 涨停+妖股+牛股，邮件推送 |
+| 三池信号 | `run_daily_signals.py` | **日常** | 涨停+妖股+牛股+ETF监测，一键邮件推送 |
 | 牛股筛选 | `screen_bull.py` | **日常** | 缩量筑底，同花顺可导入 |
 | 妖股规则 | `bt_yaogu.py` | 卫星 | 6规则评分≥6，大涨率33.7% |
 | 板块轮动 | `bt_sector_rotation.py` | **规划中** | 两层架构(宏观大类+微观细分)，7月实现 |
@@ -73,6 +73,7 @@
 ```
 每日运行: python scripts/run_daily_signals.py --send-email
   → 自动判断: <11:30等午盘 / 11:30-15:00午盘扫描 / >15:00日终扫描
+  → 日终模式包含: 数据同步 + 三池信号 + ETF三因子监测 + 邮件推送
 
 午盘扫描: python scripts/scan_intraday.py
   → 腾讯实时行情，9s拉5000只，涨停/跌停/板块热度
@@ -81,6 +82,7 @@
 妖股池: 6规则(一字板+3 + 低振幅+2 + 缩量板+1 + 非量能极值+1 + 连板≥2+1 + 缩量整理+1) → ≥3入选
 牛股池: 5条件(市值5-50亿 + <MA40 + 缩量 + 波动<3% + 60日无涨停) → 评分0-100
 三池交集: 涨停∩妖股重点展示详情（评分+强度+连板）
+ETF监测: 三因子(量能50%+方向20%+份额30%) → 50只活跃ETF，高确信/中等/正常分级
 ```
 
 ## 板块轮动设计
@@ -141,18 +143,58 @@ from factors.monitor import compute_rank_ic, compute_ic_series, compute_ic_summa
 from factors.screening import filter_factors_by_ic, select_orthogonal_factors
 ```
 
+## 涨停复盘分析（hotpoint OCR）
+
+| # | 规则 | 原因 |
+|---|------|------|
+| — | **OCR 用 Surya VLM** `python scripts/bulk_ocr.py` | 102 张图，100 天数据，名称准确率 99% vs Tesseract 70% |
+| — | **分析用** `python scripts/analyze_hotpoint.py` | 集中冒出关键词 + 个股再启动 + 潜在龙头 |
+| — | **数据在** `data/arsenal/hotpoint/master.csv` | 101 天 × 6800+ 条记录 |
+| — | **Surya 需 HF 镜像** `HF_ENDPOINT=https://hf-mirror.com` | 模型 ~2GB，首次下载后缓存 |
+
+## 标签烙印型再启动策略（实验阶段）
+
+> 发现：圣阳股份/剑桥科技等 OCR 关键词跨期稳定的票，首板后间隔 20+ 天再启动胜率高
+> 状态：OCR 数据仅 101 天，回测样本不足。需更长历史或 concept_board 替代方案
+
+## 自进化因子挖掘
+
+```bash
+python scripts/evolve_factors.py --rounds 3        # 3 轮进化
+python scripts/evolve_factors.py --status           # DB 统计
+python scripts/evolve_factors.py --top 10           # 最佳因子
+```
+
+| # | 规则 | 原因 |
+|---|------|------|
+| — | **因子 DB** 在 `data/factor_db.json` | 追踪每轮生成/验证/淘汰 |
+| — | **规则文件** 在 `data/factor_rules.md` | 自动从 DB 提取统计规律 |
+| — | **WQ alpha 参考** `/tmp/wq-alpha-research` | WorldQuant BRAIN 技能包（需账号） |
+
+## 数据目录结构
+
+```
+data/arsenal/
+  hotpoint/       ← OCR缓存 + 报告 + 图表
+  pools/          ← 三池JSON (bull/yaogu/limit_up)
+  reports/        ← 每日文本报告
+  ths_import/     ← 同花顺导入
+  daban/          ← 打板分析
+```
+
 ## ML 探索结论
 
 1. **纯日线 OHLCV 技术因子对 A 股中期收益预测力有限**，IC 天花板 ≈ -0.10
 2. **妖股规则是唯一有效产出**：不是预测收益率，而是从涨停股中筛选高质量形态
 3. **ML 不能替代 alpha 来源**：XGBoost分类PR-AUC=0.19、回归R²=0.04
 4. **板块级信号比个股级更可靠**：155只涨停的板块 vs 单只涨停股，前者更有信息量
+5. **OCR 另类数据有 alpha 潜力**：标签烙印（跨期关键词稳定度）是 WQ 没有的信号源
 
 ## 快速参考
 
 ```bash
 # ── 每日 ──
-python scripts/run_daily_signals.py --send-email        # 自动午盘/日终 + 邮件
+python scripts/run_daily_signals.py --send-email        # 数据同步 + 三池信号 + ETF监测 + 邮件（一键）
 python scripts/scan_intraday.py                         # 午盘快速扫描（腾讯实时行情）
 
 # ── 牛股筛选 ──
@@ -178,6 +220,15 @@ python scripts/train_signal_quality.py --start 2020-01-01
 
 # ── 武器库 ──
 python scripts/run_arsenal.py
+
+# ── 涨停复盘分析 ──
+python scripts/bulk_ocr.py                               # 批量 OCR hotpoint/ 图片
+python scripts/analyze_hotpoint.py                       # 分析报告（集中冒出+再启动）
+
+# ── 自进化因子挖掘 ──
+python scripts/evolve_factors.py --rounds 1              # 一轮进化
+python scripts/evolve_factors.py --status                # 因子DB统计
+python scripts/evolve_factors.py --top 10                # 最佳因子
 
 # ── Web ──
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8899

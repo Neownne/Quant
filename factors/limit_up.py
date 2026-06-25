@@ -20,21 +20,32 @@ import numpy as np
 import pandas as pd
 from factors._scaling import w
 
-# ── 涨停阈值 ──
-_DEFAULT_MULT = 1.9899
+# ── 涨跌停阈值（板别感知，四舍五入到4位）──
+_LIMIT_MULT = {
+    "688": 1.19899,  # 科创板 ±20%
+    "8": 1.29899,    # 北交所 ±30%
+    "4": 1.29899,    # 北交所 ±30%
+    "300": 1.19899,  # 创业板 ±20%
+    "301": 1.19899,  # 创业板 ±20%
+}
+_DEFAULT_MULT = 1.09899  # 主板 ±10%
 
 
 def _get_multiplier(code: str) -> float:
-    """返回涨停乘数。"""
+    """根据股票代码前缀返回涨停乘数。"""
+    for prefix, mult in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            return mult
     return _DEFAULT_MULT
 
 
 def is_at_limit_up(close: float, prev_close: float, code: str) -> bool:
-    """A股涨停价判断。涨停价 = round(prev_close × 1.9899, 4)"""
+    """A股涨停价判断。涨停价 = round(prev_close × multiplier, 4)"""
     import math
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    limit_price = round(prev_close * 1.9899, 4)
+    mult = _get_multiplier(str(code))
+    limit_price = round(prev_close * mult, 4)
     return close >= limit_price
 
 
@@ -42,7 +53,8 @@ def is_at_limit_down(close: float, prev_close: float, code: str) -> bool:
     """A股跌停价判断。"""
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    limit_price = round(prev_close * (2 - 1.9899), 2)
+    mult = _get_multiplier(str(code))
+    limit_price = round(prev_close * (2 - mult), 4)
     return close <= limit_price
 
 

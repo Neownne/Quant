@@ -1,0 +1,50 @@
+{
+  "date_range": "2020-01-01 ~ 2026-06-18",
+  "total_candidates": 108257,
+  "unique_stocks": 3290,
+  "trading_days": 1564,
+  "avg_per_day": 69.2,
+  "regime_distribution": {
+    "sideways": 34625,
+    "weak_bull": 33462,
+    "slow_bear": 19127,
+    "strong_bull": 14619,
+    "fast_bear": 6424
+  },
+  "hp_A": {
+    "label": "T+1开盘卖",
+    "n": 107970,
+    "win_rate": 0.4923,
+    "avg_return": -0.0033,
+    "median_return": -0.0008,
+    "profit_factor": 0.88,
+    "adj_return": -0.0002
+  },
+  "hp_B": {
+    "label": "T+1收盘/续持",
+    "n": 107970,
+    "win_rate": 0.4382,
+    "avg_return": 0.0033,
+    "median_return": -0.0093,
+    "profit_factor": 1.43,
+    "adj_return": 0.0004
+  },
+  "hp_C": {
+    "label": "持有3天(-3%止损)",
+    "n": 108005,
+    "win_rate": 0.2468,
+    "avg_return": 0.006,
+    "median_return": -0.03,
+    "profit_factor": 3.88,
+    "adj_return": 0.0006
+  },
+  "hp_D": {
+    "label": "持有5天(移动止盈5%)",
+    "n": 108024,
+    "win_rate": 0.453,
+    "avg_return": 0.0055,
+    "median_return": -0.0071,
+    "profit_factor": 1.55,
+    "adj_return": 0.0005
+  }
+}

@@ -75,14 +75,25 @@ class TradingConfig:
 
     @staticmethod
     def get_limit_multiplier(code: str) -> float:
-        """返回涨停乘数。"""
-        return 1.9899
+        """根据股票代码返回涨停乘数。
+
+        主板(0xxxxx/6xxxxx):   1.09899
+        科创板(688xxx):        1.19899
+        创业板(300xxx/301xxx): 1.19899
+        北交所(4xxxxx/8xxxxx): 1.29899
+        """
+        code = str(code).zfill(6)
+        if code.startswith(("688", "300", "301")):
+            return 1.19899  # 20% 涨跌停
+        if code.startswith(("4", "8")):
+            return 1.29899  # 30% 涨跌停
+        return 1.09899       # 10% 涨跌停
 
     @staticmethod
     def calc_limit_price(prev_close: float, code: str, is_up: bool = True) -> float:
         """计算实际涨跌停价格。
 
-        涨停价 = round(prev_close × 1.9899, 4)
+        涨停价 = round(prev_close × multiplier, 4)
         """
         if prev_close <= 0:
             return 0.0

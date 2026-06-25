@@ -60,11 +60,21 @@ def _get_trading_calendar() -> set[str]:
 
 
 def _latest_trading_day() -> date:
-    """最近的 A 股交易日（使用真实交易日历）。"""
+    """最近的 A 股交易日（使用真实交易日历）。
+
+    盘前（< 09:00）或盘中（< 15:00）时，即使今天是交易日，
+    日线数据也还没出，应返回上一个交易日。
+    """
+    now = datetime.now()
     today = date.today()
     calendar = _get_trading_calendar()
-    # 回退最多 10 天找最近交易日
-    for offset in range(10):
+
+    # 如果今天是交易日但还在盘前/盘中（< 15:00），从昨天开始往回找
+    start_offset = 0
+    if str(today) in calendar and now.hour < 15:
+        start_offset = 1
+
+    for offset in range(start_offset, start_offset + 10):
         d = today - timedelta(days=offset)
         if str(d) in calendar:
             return d
@@ -218,6 +228,7 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     existing_map = existing_all.groupby('code')['trade_date'].apply(set).to_dict()
 
     # 过滤：跳过已覆盖到最近交易日的股票
+    # 同时检测数据缺口 —— 如果 start_date 到最早 existing 之间有缺日，从 start_date 补起
     to_fetch: list[tuple[str, str, set]] = []
     for code in codes:
         existing = existing_map.get(code, set())
@@ -226,10 +237,22 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
             to_fetch.append((code, start_date, set()))
         else:
             latest = max(existing)  # 已是 YYYYMMDD 字符串
-            if latest < cutoff:
+            earliest = min(existing)
+            if earliest > start_date:
+                # 前端有缺口（如 DB 有 06-23 但缺 06-19/06-22）
+                # → 从 start_date 从头拉，upsert 不会重复已有数据
+                to_fetch.append((code, start_date, existing))
+            elif latest < cutoff:
+                # 正常增量：尾部差几天
                 to_fetch.append((code, latest, existing))
 
-    logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票")
+    # 汇总待补日期范围
+    missing_dates = set()
+    for _, latest, _ in to_fetch:
+        missing_dates.add(str(latest))
+    sorted_dates = sorted(missing_dates)
+    date_range = f"{start_date} ~ {cutoff}" if len(sorted_dates) > 5 else ", ".join(sorted_dates[:8])
+    logger.info(f"待同步: {len(to_fetch)}/{len(codes)} 只股票，日期: {date_range}")
 
     if not to_fetch:
         logger.success("所有股票已是最新")
@@ -239,7 +262,7 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
     done = 0
     errors = 0
     t_start = time.time()
-    TOTAL_TIMEOUT = 300  # 总超时 5 分钟
+    TOTAL_TIMEOUT = 3600  # 总超时 1 小时（逐只同步 5000+ 只至少需要 30-40 分钟）
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
@@ -273,7 +296,9 @@ def sync_stock_daily(engine: Engine, start_date: str, workers: int = 4) -> None:
                 new_rows = df[~df["trade_date"].isin(existing)]
                 if len(new_rows) > 0:
                     upsert_df(new_rows, "stock_daily", engine)
-                    pbar.set_postfix_str(f"{code} +{len(new_rows)}条")
+                    synced_dates = sorted(new_rows["trade_date"].astype(str).unique())
+                    date_str = ",".join(d[-5:] for d in synced_dates)  # MM-DD
+                    pbar.set_postfix_str(f"{code} +{len(new_rows)}条 [{date_str}]")
             pbar.update(1)
             done += 1
 

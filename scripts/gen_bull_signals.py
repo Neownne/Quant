@@ -21,13 +21,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
 
-# 涨停阈值
-_DEFAULT_MULT = 1.9899
+# 涨停阈值（板别感知，四舍五入到4位）
+_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
+_DEFAULT_MULT = 1.09899
 
 def _is_at_limit_up(close, prev_close, code):
     if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
         return False
-    return close >= round(prev_close * 1.9899, 4)
+    mult = _DEFAULT_MULT
+    for prefix, m in _LIMIT_MULT.items():
+        if str(code).startswith(prefix):
+            mult = m; break
+    return close >= round(prev_close * mult, 4)
 
 
 def parse_args():
