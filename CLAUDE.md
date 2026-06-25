@@ -53,6 +53,7 @@
 | 16 | 遵循规范，不破坏架构 | 策略脚本放 `scripts/`，公共逻辑放 `strategies/` |
 | 17 | 承认无知，不假装理解 | 不确定的参数查 `config/settings.py` |
 | 18 | 谨慎重构，不盲目修改 | 改 bt_backtest.py 前确认是真正的 bug |
+| 19 | **涨停判断唯一入口** `TradingConfig.is_at_limit_up(close, prev_close, code)` | 禁止手写 `ret >= mult`/`ret >= _get_limit()`、禁止自建 `_LIMIT_MULT` 字典 |
 
 ---
 
