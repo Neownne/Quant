@@ -134,6 +134,7 @@ def _wait_until_morning_close():
         return
     wait_seconds = (close_time - now).total_seconds()
     logger.info(f"距上午收盘还有 {wait_seconds/60:.0f} 分钟，等待中...")
+    time.sleep(wait_seconds + 5)
 
 
 def _expected_latest_data_date() -> date:
@@ -188,7 +189,6 @@ def _is_eod_report_missing() -> bool:
     date_tag = expected.strftime("%Y%m%d")
     report_path = f"{REPORTS_DIR}/daily_report_{date_tag}.txt"
     return not os.path.exists(report_path)
-    time.sleep(wait_seconds + 5)
 
 
 def _wait_until_close():
