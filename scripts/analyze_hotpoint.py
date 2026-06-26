@@ -1187,13 +1187,13 @@ def find_relaunch_stocks(master_df, limit_up_pool, yaogu_pool, min_gap_days=10):
 
     relaunch = []
     for _, r in latest.iterrows():
-        code = r["code"]
-        code_dates = sorted(master_df[master_df["code"] == code]["date"].values)
+        code = str(r["code"]).zfill(6)
+        code_dates = sorted(master_df[master_df["code"].apply(lambda x: str(x).zfill(6)) == code]["date"].values)
 
         # 首次出现也纳入（之前没涨停过）
         if len(code_dates) >= 2:
             prev_date = code_dates[-2]
-            gap = (pd.Timestamp(latest_date) - pd.Timestamp(prev_date)).days
+            gap = (pd.Timestamp(str(latest_date)) - pd.Timestamp(str(prev_date))).days
         else:
             gap = 999  # 首次出现
 
