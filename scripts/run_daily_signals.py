@@ -68,23 +68,6 @@ TARGET_STOCK_COUNT = 4000   # 同步后至少要有这么多只股票
 MAX_SYNC_RETRIES = 3        # 同步失败重试次数
 SYNC_RETRY_INTERVAL = 30    # 重试间隔(秒)
 
-# 涨停阈值（板别感知，四舍五入到4位 —— 与 config/settings.py 保持一致）
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-
-def _is_at_limit_up(close: float, prev_close: float, code: str, tolerance: float = 1.0) -> bool:
-    """A股涨停价判断。tolerance<1.0 时放宽到近涨停区。"""
-    if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
-        return False
-    mult = _DEFAULT_MULT
-    for prefix, m in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            mult = m
-            break
-    limit_price = round(prev_close * mult, 4)
-    return close >= limit_price * tolerance
-
 
 # ═══════════════════════════════════════════════════════════════
 # 邮箱配置
@@ -439,7 +422,7 @@ def load_and_precompute(engine, target_date: pd.Timestamp, exclude_gem_star: boo
     # ── 公共因子预计算 ──
     # 板别感知涨停标记
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if _is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
+        lambda r: 1 if TradingConfig.is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
         axis=1,
     )
 
@@ -661,7 +644,7 @@ def load_intraday_data(engine, target_date: pd.Timestamp, exclude_gem_star: bool
     daily['prev_close'] = daily.groupby('code')['close'].shift(1)
 
     daily['is_lu'] = daily.apply(
-        lambda r: 1 if _is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
+        lambda r: 1 if TradingConfig.is_at_limit_up(r['close'], r['prev_close'], str(r['code']), tolerance=0.98) else 0,
         axis=1,
     )
 
@@ -790,13 +773,13 @@ def screen_yaogu(daily, target_date, prev_td, name_map, ind_map, min_score: int 
     # 预计算 low_vol_streak（连续缩量天数）
     low_vol_streak_map = {}
     for code in lu_today.index:
-        # 取该股近20日数据
+        # 取该股近20日数据（不含涨停当日，涨停日量能不适合判缩量）
         code_mask = (daily['code'] == code) & (daily['trade_date'] <= target_date)
-        code_data = daily[code_mask].tail(20)
+        code_data = daily[code_mask].tail(21)
         streak = 0
         if len(code_data) >= 5:
             vol_mean = code_data['vol_ma20'].mean() if 'vol_ma20' in code_data.columns else code_data['volume'].mean()
-            for _, row in code_data.iterrows():
+            for _, row in code_data.iloc[:-1].iterrows():  # 排除涨停日
                 if row['volume'] < vol_mean * 0.7:
                     streak += 1
                 else:

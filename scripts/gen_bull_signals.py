@@ -20,19 +20,7 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
 from data.loader import load_daily_data, load_mcap_data
-
-# 涨停阈值（板别感知，四舍五入到4位）
-_LIMIT_MULT = {"688": 1.19899, "8": 1.29899, "4": 1.29899, "300": 1.19899, "301": 1.19899}
-_DEFAULT_MULT = 1.09899
-
-def _is_at_limit_up(close, prev_close, code):
-    if pd.isna(close) or pd.isna(prev_close) or prev_close <= 0:
-        return False
-    mult = _DEFAULT_MULT
-    for prefix, m in _LIMIT_MULT.items():
-        if str(code).startswith(prefix):
-            mult = m; break
-    return close >= round(prev_close * mult, 4)
+from config.settings import TradingConfig
 
 
 def parse_args():
@@ -62,12 +50,12 @@ def main():
 
     end_date_str = args.end or _infer_end_date(engine)
 
-    # ── 股票池（仅主板）──
-    min_list = pd.Timestamp(args.start) - timedelta(days=120)
+    # ── 股票池（仅主板，上市≥120天）──
+    min_list = (pd.Timestamp(args.start) - timedelta(days=120)).strftime("%Y-%m-%d")
     with engine.connect() as conn:
         codes_df = pd.read_sql(
             text("SELECT code, name FROM stock_basic WHERE is_st=FALSE AND list_date <= :ld AND code !~ '^(300|301|688|[48])'"),
-            conn, params={"ld": pd.Timestamp(end_date_str).strftime("%Y-%m-%d")})
+            conn, params={"ld": min_list})
     codes_df["code"] = codes_df["code"].astype(str).str.zfill(6)
     name_map = dict(zip(codes_df["code"], codes_df["name"]))
     code_set = set(codes_df["code"].tolist())
@@ -91,11 +79,12 @@ def main():
     # ── 因子预计算 ──
     logger.info("预计算因子...")
     daily["ret"] = daily.groupby("code")["close"].pct_change()
+    daily["prev_close"] = daily.groupby("code")["close"].shift(1)
     daily["ma40"] = daily.groupby("code")["close"].transform(lambda x: x.rolling(40, min_periods=20).mean())
     daily["vol_ma40"] = daily.groupby("code")["volume"].transform(lambda x: x.rolling(40, min_periods=20).mean())
     daily["ret_vol_20"] = daily.groupby("code")["ret"].transform(lambda x: x.rolling(20, min_periods=10).std())
     daily["is_lu"] = daily.apply(
-        lambda r: 1 if _is_at_limit_up(r["close"], r["prev_close"], str(r["code"])) else 0,
+        lambda r: 1 if TradingConfig.is_at_limit_up(r["close"], r["prev_close"], str(r["code"]), tolerance=0.98) else 0,
         axis=1)
     daily["lu_60d"] = daily.groupby("code")["is_lu"].transform(lambda x: x.rolling(60, min_periods=30).sum())
 
