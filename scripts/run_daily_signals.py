@@ -1262,18 +1262,24 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None,
     return "\n".join(lines)
 
 
-def send_email(subject, body):
-    """发送邮件。"""
+def send_email(subject, body, html_body=None):
+    """发送邮件，支持纯文本+HTML多段。
+
+    html_body 非空时，邮件客户端会优先渲染 HTML 版本，
+    不支持的客户端回退到纯文本。
+    """
     if not EMAIL_CONFIG['user'] or not EMAIL_CONFIG['to']:
         logger.warning("邮箱未配置，跳过发送")
         return False
 
-    msg = MIMEMultipart()
+    msg = MIMEMultipart("alternative")
     msg['From'] = EMAIL_CONFIG.get('from_addr', EMAIL_CONFIG['user'])
     recipients = [r.strip() for r in EMAIL_CONFIG['to'].split(',') if r.strip()]
     msg['To'] = ', '.join(recipients)
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
+    if html_body:
+        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
     try:
         if EMAIL_CONFIG['smtp_port'] == 465:
@@ -1533,7 +1539,41 @@ def main():
                           + (f" ETF高确信{hc}" if hc else ""))
                 full_report = build_report(snapshot, limit_up, yaogu, bull, intersections,
                                           tag=phase6_tag, rt_ts=rt_ts or "", etf_text=etf_text)
-                send_email(subject, full_report)
+
+                # ── Hotpoint 涨停复盘（仅日终，三道门禁）──
+                hotpoint_html = None
+                if not is_intraday and not args.dry_run:
+                    date_tag = target_date.strftime("%Y%m%d")
+                    # 门禁1: 图片存在
+                    hp_dir = os.path.join(os.path.dirname(os.path.dirname(
+                        os.path.abspath(__file__))), "hotpoint")
+                    png_path = os.path.join(hp_dir, f"{date_tag}.png")
+                    if not os.path.exists(png_path):
+                        logger.warning(f"  Hotpoint: {date_tag}.png 不存在，跳过")
+                        full_report += f"\n\n⚠️ 涨停复盘图未就绪（{date_tag}.png 不存在）"
+                    else:
+                        logger.info("═══ Hotpoint: 涨停复盘分析 ═══")
+                        from analyze_hotpoint import run_hotpoint_analysis
+                        hp_result = run_hotpoint_analysis(
+                            engine, target_date=str(target_date.date()),
+                            min_count=1, skip_ocr=False, use_surya=True,
+                        )
+                        # 门禁2: 记录数 ≥ 20
+                        td_records = hp_result["master_df"][
+                            hp_result["master_df"]["date"] == date_tag]
+                        n_records = len(td_records) if not td_records.empty else 0
+                        if n_records < 20:
+                            logger.warning(f"  Hotpoint: 仅 {n_records} 条记录，跳过")
+                            full_report += f"\n\n⚠️ 涨停复盘数据不足（仅 {n_records} 条，需 ≥20）"
+                        elif not hp_result.get("html"):
+                            # 门禁3: HTML 非空
+                            logger.warning("  Hotpoint: HTML 为空，跳过")
+                            full_report += "\n\n⚠️ 涨停复盘无有效内容"
+                        else:
+                            hotpoint_html = hp_result["html"]
+                            logger.success(f"  Hotpoint: {n_records} 条记录，HTML {len(hotpoint_html)} 字符")
+
+                send_email(subject, full_report, html_body=hotpoint_html)
 
         elapsed = time.time() - t_start
         logger.success(f"全部完成 ({elapsed:.0f}s)")

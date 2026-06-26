@@ -717,7 +717,10 @@ def keyword_freq(master_df, window_dates):
         )
     rows = []
     for _, row in df.iterrows():
-        for kw in (row.get("keyword_list") or []):
+        kw_list = row.get("keyword_list") or []
+        if not isinstance(kw_list, list):
+            kw_list = []
+        for kw in kw_list:
             rows.append({"keyword": kw, "code": row["code"], "date": row["date"], "sector": row["sector"]})
     if not rows:
         return pd.Series(dtype=int)
