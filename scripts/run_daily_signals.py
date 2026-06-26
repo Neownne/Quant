@@ -1451,6 +1451,13 @@ def main():
                 logger.error(f"数据同步失败（{MAX_SYNC_RETRIES}次重试后仍不达标），退出")
                 return
 
+            # ── 外部市场数据同步（北向/港股/美股/利差/汇率）──
+            try:
+                from data.sync_external import sync_all as sync_external
+                sync_external(days=5)  # 仅最近5天，秒级完成
+            except Exception as e:
+                logger.warning(f"外部数据同步失败（非致命）: {e}")
+
             # ── Phase 3: 同步后质量验证 ──
             logger.info("═══ Phase 3: 同步后质量验证 ═══")
             post_qr = check_data_quality(engine)

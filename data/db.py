@@ -599,6 +599,52 @@ CREATE TABLE IF NOT EXISTS data_quality_log (
 
 DDL_DATA_QUALITY_LOG_IDX = "CREATE INDEX IF NOT EXISTS idx_dql_date ON data_quality_log (trade_date);"
 
+# ========== 外部市场数据 ==========
+DDL_NORTH_FLOW = """
+CREATE TABLE IF NOT EXISTS market_north_flow (
+    trade_date      DATE PRIMARY KEY,
+    net_flow        DOUBLE PRECISION,
+    buy_amount      DOUBLE PRECISION,
+    sell_amount     DOUBLE PRECISION,
+    accum_net       DOUBLE PRECISION,
+    quota_balance   DOUBLE PRECISION,
+    holdings_value  DOUBLE PRECISION,
+    lead_stock      VARCHAR(10),
+    lead_stock_name VARCHAR(50),
+    lead_stock_pct  DOUBLE PRECISION,
+    hs300           DOUBLE PRECISION,
+    hs300_pct       DOUBLE PRECISION
+);
+"""
+
+DDL_BOND_YIELD = """
+CREATE TABLE IF NOT EXISTS market_bond_yield (
+    trade_date       DATE PRIMARY KEY,
+    cn_2y            DOUBLE PRECISION,
+    cn_5y            DOUBLE PRECISION,
+    cn_10y           DOUBLE PRECISION,
+    cn_30y           DOUBLE PRECISION,
+    cn_10y_2y_spread DOUBLE PRECISION,
+    us_2y            DOUBLE PRECISION,
+    us_5y            DOUBLE PRECISION,
+    us_10y           DOUBLE PRECISION,
+    us_30y           DOUBLE PRECISION,
+    us_10y_2y_spread DOUBLE PRECISION,
+    spread_cn_us_10y DOUBLE PRECISION
+);
+"""
+
+DDL_FX_RATE = """
+CREATE TABLE IF NOT EXISTS market_fx_rate (
+    trade_date  DATE PRIMARY KEY,
+    usd_cny     DOUBLE PRECISION,
+    eur_cny     DOUBLE PRECISION,
+    jpy_cny     DOUBLE PRECISION,
+    hkd_cny     DOUBLE PRECISION,
+    gbp_cny     DOUBLE PRECISION
+);
+"""
+
 
 # ========== 策略管理 ==========
 
@@ -914,6 +960,10 @@ def init_db() -> None:
         # ========== 数据质量 ==========
         conn.execute(text(DDL_DATA_QUALITY_LOG))
         conn.execute(text(DDL_DATA_QUALITY_LOG_IDX))
+        # ========== 外部市场数据 ==========
+        conn.execute(text(DDL_NORTH_FLOW))
+        conn.execute(text(DDL_BOND_YIELD))
+        conn.execute(text(DDL_FX_RATE))
         # migration: add note column for trade reason tracking
         try:
             conn.execute(text(
@@ -955,6 +1005,9 @@ def upsert_df(df: pd.DataFrame, table: str, engine: Engine | None = None) -> int
             "etf_basic": "code",
             "fund_basic": "code",
             "concept_board": "code",
+            "market_north_flow": "trade_date",
+            "market_bond_yield": "trade_date",
+            "market_fx_rate": "trade_date",
         }
         if table in pk_map:
             pk = pk_map[table]
