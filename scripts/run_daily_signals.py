@@ -1580,7 +1580,25 @@ def main():
                             hotpoint_html = hp_result["html"]
                             logger.success(f"  Hotpoint: {n_records} 条记录，HTML {len(hotpoint_html)} 字符")
 
-                send_email(subject, full_report, html_body=hotpoint_html)
+                # 构建 HTML 正文（信号文字 + hotpoint）
+                if hotpoint_html:
+                    # 纯文本信号报告转简单 HTML，放在 hotpoint 前面
+                    signal_html = full_report.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    signal_html = f"""<html><body>
+<pre style="font-family: -apple-system, 'PingFang SC', sans-serif; font-size: 13px; line-height: 1.6; white-space: pre-wrap; max-width: 800px;">
+{signal_html}
+</pre>
+<hr style="margin:20px 0; border:none; border-top:2px solid #e0e0e0;">
+</body></html>"""
+                    # 把 hotpoint HTML 插入 </body> 之前（去掉 hotpoint 自己的 <html><body> 标签）
+                    hp_body = hotpoint_html
+                    for tag in ["<html>", "</html>", "<!DOCTYPE html>"]:
+                        hp_body = hp_body.replace(tag, "").replace(tag.lower(), "")
+                    hp_body = hp_body.replace("<body>", "").replace("</body>", "")
+                    combined_html = signal_html.replace("</body>", hp_body + "</body>")
+                    send_email(subject, full_report, html_body=combined_html)
+                else:
+                    send_email(subject, full_report)
 
         elapsed = time.time() - t_start
         logger.success(f"全部完成 ({elapsed:.0f}s)")
