@@ -29,7 +29,7 @@ from config.settings import TradingConfig
 ACCOUNT_ID = 3
 RUN_ID = 3
 TOP_N = 5
-MCAP_MIN, MCAP_MAX = 30.0, 500.0
+MCAP_MIN, MCAP_MAX = 30.0, float('inf')
 PRICE_MIN, PRICE_MAX = 5.0, 63.0
 LU_PCT, LU_LOOKBACK, LU_COUNT = 0.099, 20, 1
 MIN_CONDITIONS = 4  # 4条件: 市值+股价+均线+涨停(去跌停)

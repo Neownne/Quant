@@ -1408,7 +1408,7 @@ def _get_limit_pool_codes(codes, target_date):
                 result[code] = False; continue
             r = today.loc[code]
             mcap = extra_map.get(code, 0)
-            result[code] = bool(30 <= mcap <= 500 and 5 <= r["close"] <= 100 and
+            result[code] = bool(mcap >= 30 and 5 <= r["close"] <= 100 and
                                r["ma5"] > r["ma10"] and 2 <= r["lu_20d"] <= 4)
 
         engine.dispose()

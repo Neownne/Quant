@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """涨停池信号生成器 —— 新规则，对齐管线 CSV 格式。
 
-4条件: 市值30-500亿 + 股价5-100 + MA5>MA10 + 近20日涨停2-4次
+4条件: 市值≥30亿 + 股价5-100 + MA5>MA10 + 近20日涨停2-4次
 不要求当日涨停。
 
 用法:
@@ -121,7 +121,7 @@ def main():
 
         # 4条件筛选
         mask = (
-            (td_df.get("mcap", pd.Series(np.nan, index=td_df.index)).between(30, 500)) &
+            (td_df.get("mcap", pd.Series(np.nan, index=td_df.index)) >= 30) &
             (td_df["close"].between(5, 100)) &
             (td_df["ma5"] > td_df["ma10"]) &
             (td_df["lu_20d"] >= 2) & (td_df["lu_20d"] <= 4) &

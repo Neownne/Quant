@@ -728,7 +728,7 @@ def screen_limit_up(daily, extra, target_date, prev_td, name_map, ind_map):
 
     # 4条件筛选（不要求当日涨停，只要近20日涨停2-4次）
     mask = (
-        (today['mcap'].between(30, 500)) &
+        (today['mcap'] >= 30) &
         (today['close'].between(5, 100)) &
         (today['ma5'] > today['ma10']) &
         (today['lu_20d'] >= 2) & (today['lu_20d'] <= 4) &
@@ -1148,7 +1148,7 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None,
     lines.append("")
 
     # 涨停池（全量）
-    lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件(市值30-500亿/股价5-100/MA5>MA10/20日涨停2-4次)")
+    lines.append(f"【涨停池】{len(limit_up)} 只 — 4条件(市值≥30亿/股价5-100/MA5>MA10/20日涨停2-4次)")
     if not limit_up.empty:
         for _, r in limit_up.iterrows():
             lu_tag = f" [涨停]" if r.get('今日涨幅', 0) >= 9.5 else ""
@@ -1231,7 +1231,7 @@ def build_report(snapshot, limit_up, yaogu, bull, intersections=None,
 
     # 规则
     lines.append("【各池规则】")
-    lines.append("  涨停池: 4条件(市值30-500亿+股价5-100+MA5>MA10+20日涨停2-4次) → 按今日涨幅排序")
+    lines.append("  涨停池: 4条件(市值≥30亿+股价5-100+MA5>MA10+20日涨停2-4次) → 按今日涨幅排序")
     lines.append("  妖股池: 一字板(+3) + 低振幅<8%(+2) + 缩量板(+1) + 非量能极值(+1)")
     lines.append("          + 连板≥2(+1) + 缩量整理≥1天(+1) → 评分≥3入选")
     lines.append("  牛股池: 市值5-50亿 + 收盘<MA40 + 缩量 + 20日波动<3% + 60日无涨停")

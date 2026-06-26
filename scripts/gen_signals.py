@@ -21,7 +21,7 @@ from config.settings import TradingConfig
 
 # ── 默认参数（E4增强版）──
 DEFAULTS = dict(
-    mcap_min=30, mcap_max=500, price_min=5, price_max=63,
+    mcap_min=30, mcap_max=float('inf'), price_min=5, price_max=63,
     limit_up_lookback=20, limit_up_count=1,
     min_conditions=4, min_listed_days=120,
 )

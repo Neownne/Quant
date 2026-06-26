@@ -2,7 +2,7 @@
 """标签烙印型再启动回测 — 基于 OCR 关键词 + 涨停池条件。
 
 标签稳定度 = 历史涨停日的 OCR 关键词交集 / 并集
-策略: 涨停池(mcap 30-500亿) → 标签烙印重排 → T+2 入场 → 妖股出场规则
+策略: 涨停池(mcap ≥30亿) → 标签烙印重排 → T+2 入场 → 妖股出场规则
 
 用法:
     python scripts/bt_label_ocr.py --top-n 5
@@ -24,7 +24,7 @@ MASTER_CSV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           'data', 'arsenal', 'hotpoint', 'master.csv')
 REBALANCE_DAYS = 5
 MAX_WAIT = 2
-MCAP_LOWER, MCAP_UPPER = 30, 500
+MCAP_LOWER, MCAP_UPPER = 30, float('inf')
 DD_THRESHOLD = 0.25
 
 

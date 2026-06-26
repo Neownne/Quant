@@ -40,7 +40,8 @@ def cmd_list(args):
     print(f"  策略变体列表 ({len(variants)} 个)")
     print(f"{'='*70}")
     for v in variants:
-        mcap = f"{v.effective('mcap_min')}-{v.effective('mcap_max')}亿"
+        mc_max = v.effective('mcap_max')
+        mcap = f"{v.effective('mcap_min')}-{mc_max}亿" if mc_max != float('inf') else f"≥{v.effective('mcap_min')}亿"
         price = f"{v.effective('price_min')}-{v.effective('price_max')}元"
         print(f"  {v.name:25s} | {mcap:15s} | {price:12s} | "
               f"lookback={v.effective('lu_lookback'):2d} | lu>{v.effective('lu_count')} | "

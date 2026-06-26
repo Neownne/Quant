@@ -107,7 +107,7 @@ def export_history(start_date: str = "2026-01-01", end_date: str = "2026-06-17")
 
         # 4条件筛选
         mask = (
-            (today['mcap'].between(30, 500)) &
+            (today['mcap'] >= 30) &
             (today['close'].between(5, 100)) &
             (today['ma5'] > today['ma10']) &
             (today['lu_20d'] >= 2) & (today['lu_20d'] <= 4) &

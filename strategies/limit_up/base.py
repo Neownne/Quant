@@ -14,7 +14,7 @@ from config.settings import TradingConfig
 class LimitUpParams:
     """涨停策略 4 条件（去跌停）参数。"""
     mcap_min: float = 30.0
-    mcap_max: float = 500.0
+    mcap_max: float = float('inf')
     price_min: float = 5.0
     price_max: float = 63.0
     lu_pct: float = TradingConfig.LIMIT_UP_PCT          # 0.09
@@ -70,7 +70,7 @@ def run_screening(trade_date, daily_df, extra_df, code_set, params=None,
 
         c1 = (mcap_s is not None and code in mcap_s.index and
               not pd.isna(mcap_s.loc[code]) and
-              params.mcap_min <= mcap_s.loc[code] <= params.mcap_max)
+              params.mcap_min <= mcap_s.loc[code] <= params.mcap_max)  # mcap_max 默认 inf
         c2 = params.price_min <= close_p <= params.price_max
         c3 = (not pd.isna(ma5)) and (not pd.isna(ma10)) and (ma5 > ma10)
         lu_n = int(lu_counts.get(code, 0))

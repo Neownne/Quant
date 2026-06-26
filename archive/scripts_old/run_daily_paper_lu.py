@@ -37,7 +37,7 @@ TOP_N = 5
 MIN_LISTED_DAYS = 120
 
 LU_PARAMS = LimitUpParams(
-    mcap_min=30.0, mcap_max=500.0,
+    mcap_min=30.0,
     price_min=5.0, price_max=63.0,
     lu_pct=TradingConfig.LIMIT_UP_PCT,
     lu_lookback=20, lu_count=1, min_conditions=4,
