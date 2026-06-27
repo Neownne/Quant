@@ -66,6 +66,15 @@ def _factor_vol_ratio(daily, short, long):
     vol_long = daily.groupby("code")["volume"].transform(lambda x: x.rolling(long).mean())
     return vol_short / vol_long
 
+def _factor_sector_relative(daily, window):
+    """行业中性化收益率：原始收益 - 行业均值。预计算避免 O(N²)。"""
+    ret = _factor_ret(daily, window)
+    if "sector" not in daily.columns or daily["sector"].isna().all():
+        return ret
+    sector_mean = ret.groupby(daily["sector"]).transform("mean")
+    return ret - sector_mean
+
+
 TEMPLATES = {
     "momentum": {
         "category": "价量",
@@ -102,9 +111,7 @@ TEMPLATES = {
     "sector_relative": {
         "category": "行业中性",
         "params": {"window": [5, 10, 20]},
-        "compute": lambda daily, p: (lambda r: r - daily.groupby("code")["sector"]
-            .transform(lambda x: x.map(r.groupby(daily["sector"]).transform("mean").to_dict()))
-            if "sector" in daily.columns else r)(_factor_ret(daily, p["window"])),
+        "compute": lambda daily, p: _factor_sector_relative(daily, p["window"]),
     },
 }
 
@@ -226,12 +233,18 @@ def validate_factors(candidates, daily, extra_df, min_stocks=50, lookback_days=6
     daily["sector"] = daily["code"].map(sector_map)
     engine.dispose()
 
-    dates = sorted(daily["trade_date"].unique())
-    if len(dates) < lookback_days + 10:
+    all_dates = sorted(daily["trade_date"].unique())
+    if len(all_dates) < lookback_days + 10:
         return []
 
+    # 只验证最近 N 个交易日（采样避免全历史遍历）
+    validate_dates = all_dates[-lookback_days:][::5]  # 每5天采样，~12个窗口
+    if len(validate_dates) < 5:
+        validate_dates = all_dates[-min(len(all_dates), lookback_days):]
+
     results = []
-    for c in candidates:
+    for ci, c in enumerate(candidates):
+        logger.info(f"  验证 {ci+1}/{len(candidates)}: {c['name']} ...")
         tmpl = TEMPLATES.get(c["template"])
         if not tmpl or "compute" not in tmpl:
             c["ic_mean"] = 0; c["status"] = "no_compute_fn"
@@ -244,9 +257,9 @@ def validate_factors(candidates, daily, extra_df, min_stocks=50, lookback_days=6
 
         ic_list = []
 
-        for i, td in enumerate(dates[lookback_days:]):
-            td_idx = i + lookback_days
-            window = daily[(daily["trade_date"] > dates[td_idx - lookback_days]) &
+        for td in validate_dates:
+            td_idx = all_dates.index(td)
+            window = daily[(daily["trade_date"] > all_dates[td_idx - lookback_days]) &
                           (daily["trade_date"] <= td)].copy()
 
             try:
@@ -272,7 +285,7 @@ def validate_factors(candidates, daily, extra_df, min_stocks=50, lookback_days=6
             except Exception as e:
                 continue
 
-        if len(ic_list) >= 20:
+        if len(ic_list) >= 5:
             ic_mean = np.mean(ic_list)
             ic_std = np.std(ic_list)
             icir = ic_mean / ic_std if ic_std > 0 else 0
