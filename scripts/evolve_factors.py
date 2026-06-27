@@ -238,9 +238,11 @@ def validate_factors(candidates, daily, extra_df, min_stocks=50, lookback_days=6
         return []
 
     # 只验证最近 N 个交易日（采样避免全历史遍历）
-    validate_dates = all_dates[-lookback_days:][::5]  # 每5天采样，~12个窗口
-    if len(validate_dates) < 5:
-        validate_dates = all_dates[-min(len(all_dates), lookback_days):]
+    # 只取有足够回顾窗口的日期：索引 >= lookback_days 的
+    eligible = all_dates[lookback_days:]
+    validate_dates = eligible[::5]  # 每5天采样
+    if len(validate_dates) < 5 and len(eligible) > 0:
+        validate_dates = eligible[::max(1, len(eligible)//12)]
 
     results = []
     for ci, c in enumerate(candidates):
