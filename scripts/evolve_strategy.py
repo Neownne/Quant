@@ -158,12 +158,32 @@ class StrategyGenome:
     generation: int = 0
     parent_hash: str = ""
 
+    # 默认值（不过滤的值）
+    _DEFAULTS = {
+        'yaogu_score_min': 0, 'low_vol_streak_min': 0,
+        'vol_ratio_max': 99.0, 'lu_20d_min': 0, 'lu_20d_max': 999,
+        'lu_60d_max': 999, 'lu_streak_min': 1,
+        'amplitude_max': 0.20, 'seal_quality_min': 0.0,
+        'gap_up_min': -0.10, 'ma_bullish': False, 'ma_converge': False,
+        'ma_deviation_max': 0.50, 'mcap_min': 0.0, 'mcap_max': float('inf'),
+        'require_lu_day': False, 'sig_ret_min': -0.10, 'sig_ret_max': 0.15,
+    }
+
+    def active_params(self) -> dict:
+        """返回非默认的参数（真正起过滤作用的）。"""
+        active = {}
+        for k, default in self._DEFAULTS.items():
+            val = getattr(self, k)
+            if isinstance(default, float) and isinstance(val, float):
+                if abs(val - default) > 0.001:
+                    active[k] = val
+            elif val != default:
+                active[k] = val
+        return active
+
     def genome_hash(self) -> str:
-        """基因组哈希，用于去重。"""
-        s = json.dumps({
-            k: v for k, v in self.__dict__.items()
-            if k not in ('generation', 'parent_hash', 'genome_hash')
-        }, sort_keys=True, default=str)
+        """基因组哈希，基于有效过滤参数（去重默认值噪声）。"""
+        s = json.dumps(self.active_params(), sort_keys=True, default=str)
         return hashlib.md5(s.encode()).hexdigest()[:10]
 
     def to_dict(self) -> dict:
@@ -546,9 +566,17 @@ def load_db():
 
 
 def save_db(db):
+    """原子写入 + 只保留 Top-500 变体。"""
     os.makedirs(os.path.dirname(STRATEGY_DB), exist_ok=True)
-    with open(STRATEGY_DB, 'w') as f:
+    # 只保留 top 500（按 fitness 降序）
+    variants = db.get('variants', [])
+    if len(variants) > 500:
+        variants.sort(key=lambda v: v.get('fitness', 0), reverse=True)
+        db['variants'] = variants[:500]
+    tmp = STRATEGY_DB + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(db, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp, STRATEGY_DB)
 
 
 def save_rules(db):
