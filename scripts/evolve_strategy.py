@@ -131,10 +131,6 @@ class StrategyGenome:
             if isinstance(default, float) and isinstance(val, float):
                 if abs(val - default) > 0.001: active[k] = val
             elif val != default: active[k] = val
-        # 动态扩展基因
-        for k, v in (self.extra or {}).items():
-            if v != EXTRA_DEFAULTS.get(k, 0):
-                active[k] = v
         return active
 
     def genome_hash(self) -> str:
