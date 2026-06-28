@@ -454,9 +454,12 @@ def evaluate_genome(genome: StrategyGenome, feats_df: pd.DataFrame) -> dict:
     wr_20d = sub['ret_20d'].gt(0.10).mean()
     avg_20d = sub['ret_20d'].mean()
 
-    # 适应度 = 胜率为主 + 收益为辅 + 样本惩罚
-    sample_bonus = min(n / 200, 1.0) * 0.05  # 样本≥200得满分
-    fitness = wr_10d * 0.7 + wr_20d * 0.2 + min(avg_10d / 0.3, 0.1) + sample_bonus
+    # 适应度 = 年化收益为主 + 胜率为辅 + 样本惩罚
+    ann_ret = (1 + avg_20d) ** (252 / 20) - 1 if avg_20d > -1 else -1
+    ann_ret = max(ann_ret, -1.0)  # 下限 -100%
+    wr_bonus = min(wr_10d / 0.85, 1.0) * 0.1
+    sample_penalty = min(n / 50, 1.0)  # 样本<50时打折
+    fitness = min(ann_ret, 10.0) * 0.7 + wr_bonus + sample_penalty * 0.2
 
     return {
         'n': n,
@@ -464,6 +467,7 @@ def evaluate_genome(genome: StrategyGenome, feats_df: pd.DataFrame) -> dict:
         'avg_ret_10d': round(float(avg_10d), 4),
         'win_rate_20d': round(float(wr_20d), 4),
         'avg_ret_20d': round(float(avg_20d), 4),
+        'ann_ret': round(float(ann_ret), 4),
         'fitness': round(float(fitness), 4),
     }
 
@@ -847,28 +851,33 @@ def _render_panel(db, round_num, best_wr, target_wr, elapsed, baseline_wr):
 
     table = Table(title=f"🧬 策略进化 — Round {round_num}", title_style="bold cyan")
     table.add_column("#", style="dim", width=3)
-    table.add_column("10日胜率", justify="right", style="green")
-    table.add_column("20日胜率", justify="right", style="yellow")
-    table.add_column("均收益", justify="right")
+    table.add_column("年化收益", justify="right", style="green")
+    table.add_column("10日胜率", justify="right", style="yellow")
+    table.add_column("20日均收益", justify="right")
     table.add_column("n", justify="right", style="dim", width=4)
     table.add_column("条件", style="bright_blue", max_width=55)
 
     for i, v in enumerate(valid[:8], 1):
+        ann = v.get('ann_ret', 0)
+        ann_str = f"{ann:.0%}" if ann < 100 else f"{ann:.0f}x"
         table.add_row(
             str(i),
+            ann_str,
             f"{v.get('win_rate_10d',0):.1%}",
-            f"{v.get('win_rate_20d',0):.1%}",
-            f"{v.get('avg_ret_10d',0):+.1%}",
+            f"{v.get('avg_ret_20d',0):+.1%}",
             str(v.get('n',0)),
             v.get('condition_desc','?')[:52],
         )
 
+    best_ann = max((v.get('ann_ret', 0) for v in valid), default=0)
+    panel_title = (f"[bold]目标年化: {target_wr:.0%}  |  基线: {baseline_wr:.1%}  |  "
+                   f"最佳年化: {best_ann:.0%}  |  停滞: {stag}轮  |  变体: {total}  |  {elapsed:.0f}s[/]")
+
     return Panel(
         table,
-        title=f"[bold]目标胜率: {target_wr:.0%}  |  基线: {baseline_wr:.1%}  |  "
-              f"最佳: {best_wr:.1%}  |  停滞: {stag}轮  |  变体: {total}  |  {elapsed:.0f}s[/]",
-        subtitle=f"[{bar}] {best_wr:.1%}",
-        border_style="green" if best_wr >= target_wr else "blue",
+        title=panel_title,
+        subtitle=f"[{bar}] 年化 {best_ann:.0%}",
+        border_style="green" if best_ann >= target_wr else "blue",
     )
 
 
@@ -960,13 +969,15 @@ def main():
         while best_wr < target_wr and round_num < max_rounds:
             round_num += 1
             db = evolve_round(db, feats, round_num)
-            best_wr = db.get('best_win_rate', 0)
+            valid = [v for v in db.get('variants', []) if v.get('n', 0) >= 30]
+            best_wr = max((v.get('ann_ret', 0) for v in valid), default=0)
+            db['best_ann_ret'] = best_wr
             elapsed = time.time() - t0
 
             if HAS_RICH:
                 live.update(_render_panel(db, round_num, best_wr, target_wr, elapsed, baseline_wr))
             elif round_num % 10 == 0:
-                logger.info(f"  ⏱ Round {round_num}: best_wr={best_wr:.1%}, "
+                logger.info(f"  Round {round_num}: best_ann={best_wr:.0%}, "
                             f"变体={len(db.get('variants',[]))}, {elapsed:.0f}s")
     finally:
         if HAS_RICH:
@@ -975,9 +986,9 @@ def main():
 
     elapsed = time.time() - t0
     if best_wr >= target_wr:
-        logger.success(f"🎯 达到目标 {target_wr:.0%}！Round {round_num}, {elapsed:.0f}s")
+        logger.success(f"🎯 达到年化 {target_wr:.0%}！Round {round_num}, {elapsed:.0f}s")
     else:
-        logger.warning(f"达到轮次上限 {max_rounds}, 最佳 {best_wr:.1%}, {elapsed:.0f}s")
+        logger.warning(f"达到轮次上限 {max_rounds}, 最佳年化 {best_wr:.0%}, {elapsed:.0f}s")
 
     if HAS_RICH:
         _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=True)
