@@ -331,5 +331,210 @@ def run_backtest(args):
     print(f"{'='*60}")
 
 
+def run_backtest_on_signals(sig_df, daily_df, name_map, top_n=5, cash=1_000_000,
+                             min_score=3, trailing_stop=0.12, min_hold_days=7,
+                             start_date=None, end_date=None):
+    """内存回测：接收已加载的日线数据，返回指标字典。供进化引擎调用。"""
+    sig_df = sig_df.copy()
+    sig_df["date"] = pd.to_datetime(sig_df["date"])
+    sig_df["code"] = sig_df["code"].astype(str).str.zfill(6)
+
+    if "score" not in sig_df.columns:
+        return {"error": "无score列"}
+    sig_df = sig_df[sig_df["score"] >= min_score]
+    sig_df = sig_df[~sig_df["code"].str.startswith(('300', '301', '688', '4', '8'))]
+
+    if sig_df.empty:
+        return {"error": "无信号", "n_signals": 0}
+
+    daily = daily_df.sort_values(["code", "trade_date"]).copy()
+    if "prev_close" not in daily.columns:
+        daily["prev_close"] = daily.groupby("code")["close"].shift(1)
+    if "ma20" not in daily.columns:
+        daily["ma20"] = daily.groupby("code")["close"].transform(
+            lambda x: x.rolling(20, min_periods=5).mean())
+    if "ret" not in daily.columns:
+        daily["ret"] = daily.groupby("code")["close"].pct_change()
+
+    dates = sorted(daily["trade_date"].unique())
+    if start_date:
+        dates = [d for d in dates if d >= pd.Timestamp(start_date)]
+    if end_date:
+        dates = [d for d in dates if d <= pd.Timestamp(end_date)]
+
+    daily_by_date = {d: g.set_index("code") for d, g in daily.groupby("trade_date")}
+    date_idx = {d: i for i, d in enumerate(dates)}
+
+    # wait_for_buyable
+    sig_by_date_raw = {}
+    for d, g in sig_df.groupby("date"):
+        sig_by_date_raw[d] = g.sort_values("score", ascending=False)
+
+    buy_signals = []
+    for sig_date, sigs in sig_by_date_raw.items():
+        idx = date_idx.get(sig_date)
+        if idx is None: continue
+        for _, s in sigs.iterrows():
+            code = s["code"]
+            for offset in range(1, 11):
+                nxt = idx + offset
+                if nxt >= len(dates): break
+                nd = dates[nxt]
+                ndf = daily_by_date.get(nd)
+                if ndf is None or code not in ndf.index: continue
+                r = ndf.loc[code]
+                px, prev_c = r["close"], r.get("prev_close")
+                if pd.notna(prev_c) and prev_c > 0:
+                    if TradingConfig.is_at_limit_up(px, prev_c, code): continue
+                    if TradingConfig.is_at_limit_down(px, prev_c, code): continue
+                buy_signals.append({
+                    "date": nd, "code": code, "score": int(s["score"]),
+                    "close": float(px), "signal_date": sig_date, "wait_days": offset,
+                })
+                break
+
+    buy_df = pd.DataFrame(buy_signals)
+    if buy_df.empty:
+        return {"error": "无可买入日", "n_signals": len(sig_df)}
+
+    sig_by_date = {}
+    for d, g in buy_df.groupby("date"):
+        sig_by_date[d] = g.sort_values("score", ascending=False)
+
+    # 回测循环
+    cash_val = cash
+    positions = {}
+    equity, trade_log = [], []
+    trades_count = 0
+
+    NET_SELL = 1.0 - TradingConfig.SLIPPAGE - TradingConfig.COMMISSION - TradingConfig.STAMP_DUTY
+    BUY_COST = 1.0 + TradingConfig.COMMISSION + TradingConfig.SLIPPAGE
+    peak_value, frozen, frozen_days = cash_val, False, 0
+
+    for i, td in enumerate(dates):
+        td_df = daily_by_date.get(td)
+        if td_df is None: continue
+        px_map = td_df["close"].to_dict()
+        prev_map = {c: r["prev_close"] for c, r in td_df.iterrows() if pd.notna(r.get("prev_close"))}
+        ma20_map = td_df["ma20"].to_dict()
+
+        for code, pos in list(positions.items()):
+            cur_px = px_map.get(code, pos["entry_price"])
+            pos["current_price"], pos["hold_days"] = cur_px, pos["hold_days"] + 1
+            if cur_px > pos.get("peak_price", 0):
+                pos["peak_price"] = cur_px
+
+        pos_val = sum(p["shares"] * p.get("current_price", p["entry_price"]) for p in positions.values())
+        total = cash_val + pos_val
+        equity.append(float(total))
+
+        if total > peak_value: peak_value = total
+        dd = (peak_value - total) / peak_value if peak_value > 0 else 0
+        if dd > 0.35 and not frozen:
+            frozen, frozen_days = True, 0
+        if frozen:
+            frozen_days += 1
+        if frozen and frozen_days > 60:
+            frozen, peak_value = False, total
+
+        # 退出
+        for code, pos in list(positions.items()):
+            cur_px, reason = pos["current_price"], None
+            ma20 = ma20_map.get(code)
+            if ma20 and cur_px < ma20 and pos["hold_days"] > 5:
+                reason = "ma20"
+            elif (pos["hold_days"] >= min_hold_days and
+                  pos.get("peak_price", 0) > pos["entry_price"] * 1.05):
+                if cur_px < pos["peak_price"] * (1 - trailing_stop):
+                    reason = "trailing"
+            code_ret = daily[(daily["code"] == code) & (daily["trade_date"] <= td)]
+            stock_vol = code_ret.tail(20)["ret"].std() if len(code_ret) >= 10 else 0
+            stop_pct = max(0.08, stock_vol * 2) if pd.notna(stock_vol) and stock_vol > 0 else 0.08
+            if cur_px < pos["entry_price"] * (1 - stop_pct):
+                reason = f"stop({stop_pct:.0%})"
+            if reason:
+                prev_c = prev_map.get(code)
+                if prev_c and TradingConfig.is_at_limit_down(cur_px, prev_c, code): continue
+                proceeds = pos["shares"] * cur_px * NET_SELL
+                cash_val += proceeds
+                trade_log.append({
+                    "pnl_pct": (cur_px / pos["entry_price"] - 1),
+                    "entry_date": pos["entry_date"],
+                    "exit_date": td.strftime("%Y-%m-%d"),
+                    "code": code, "reason": reason, "hold_days": pos["hold_days"],
+                })
+                trades_count += 1
+                del positions[code]
+
+        # 买入
+        if i % REBALANCE_DAYS != 0 or frozen: continue
+        if td not in sig_by_date: continue
+        available = top_n - len(positions)
+        if available <= 0: continue
+        held = set(positions.keys())
+        today_sigs = sig_by_date[td]
+        today_sigs = today_sigs[~today_sigs["code"].isin(held)]
+        alloc = cash_val * 0.95 / available
+        bought = 0
+        for _, s in today_sigs.iterrows():
+            if bought >= available: break
+            code, px = s["code"], px_map.get(s["code"])
+            if not px or px <= 0: continue
+            prev_c = prev_map.get(code)
+            if prev_c and TradingConfig.is_at_limit_up(px, prev_c, code): continue
+            sz = int(alloc / px / 100) * 100
+            if sz < 100: continue
+            cost = sz * px * BUY_COST
+            if cost > cash_val * 0.95:
+                sz = int(cash_val * 0.9 / px / 100) * 100
+                if sz < 100: continue
+                cost = sz * px * BUY_COST
+            cash_val -= cost
+            positions[code] = {
+                "entry_price": px, "shares": sz,
+                "entry_date": td.strftime("%Y-%m-%d"),
+                "hold_days": 0, "current_price": px, "peak_price": px,
+            }
+            trades_count += 1
+            bought += 1
+
+    # 指标
+    fv = equity[-1] if equity else cash_val
+    ret_total = (fv / cash - 1)
+    n_years = (dates[-1] - dates[0]).days / 365.25 if dates else 1
+    ret_annual = (fv / cash) ** (1 / max(n_years, 0.5)) - 1
+
+    if len(equity) > 2:
+        dret = [(equity[j] - equity[j-1]) / max(equity[j-1], 1) for j in range(1, len(equity))]
+        sharpe = float(np.mean(dret) / np.std(dret) * np.sqrt(252)) if np.std(dret) > 0 else 0
+    else:
+        sharpe = 0
+
+    peak = equity[0] if equity else cash
+    mdd = 0.0
+    for v in equity:
+        if v > peak: peak = v
+        mdd = max(mdd, (peak - v) / peak)
+
+    sells = [t for t in trade_log if t.get("pnl_pct") is not None]
+    wins = [t for t in sells if float(t.get("pnl_pct", 0) or 0) > 0]
+    win_rate = len(wins) / max(len(sells), 1)
+
+    return {
+        "n_signals": len(sig_df),
+        "n_buyable": len(buy_df),
+        "n_trades": len(sells),
+        "n_buys": trades_count - len(sells),
+        "ret_total": round(float(ret_total), 4),
+        "ret_annual": round(float(ret_annual), 4),
+        "sharpe": round(float(sharpe), 4),
+        "max_dd": round(float(mdd), 4),
+        "win_rate": round(float(win_rate), 4),
+        "final_value": round(float(fv), 2),
+        "equity": equity,
+        "trades": trade_log,
+    }
+
+
 if __name__ == "__main__":
     run_backtest(parse_args())
