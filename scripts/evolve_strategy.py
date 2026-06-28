@@ -100,10 +100,16 @@ class StrategyGenome:
     seal_quality_min: float = 0.0
 
     # ── 调仓参数 ──
-    top_n: int = 5                 # 持仓数
-    rebalance_days: int = 5        # 调仓周期
-    trailing_stop: float = 0.12    # 移动止盈
-    min_hold_days: int = 7         # 最小持有天数
+    top_n: int = 5
+    rebalance_days: int = 5
+    trailing_stop: float = 0.12
+    min_hold_days: int = 7
+
+    # ── 复合特征 ──
+    entry_quality_min: float = 0.0     # 封板×缩量/振幅
+    seal_streak_min: float = 0.0       # 封板×缩量
+    lu_efficiency_max: float = 99.0    # 涨停效率上限
+    lu_streak_min: int = 0            # 连板天数
 
     generation: int = 0
     parent_hash: str = ""
@@ -114,6 +120,8 @@ class StrategyGenome:
         'ma_bullish': False, 'require_lu_day': False,
         'amplitude_max': 0.20, 'seal_quality_min': 0.0,
         'top_n': 5, 'rebalance_days': 5, 'trailing_stop': 0.12, 'min_hold_days': 7,
+        'entry_quality_min': 0.0, 'seal_streak_min': 0.0,
+        'lu_efficiency_max': 99.0, 'lu_streak_min': 0,
     }
 
     def active_params(self) -> dict:
@@ -123,6 +131,10 @@ class StrategyGenome:
             if isinstance(default, float) and isinstance(val, float):
                 if abs(val - default) > 0.001: active[k] = val
             elif val != default: active[k] = val
+        # 动态扩展基因
+        for k, v in (self.extra or {}).items():
+            if v != EXTRA_DEFAULTS.get(k, 0):
+                active[k] = v
         return active
 
     def genome_hash(self) -> str:
@@ -165,6 +177,10 @@ class StrategyGenome:
         if 'rebalance_days' in ap: parts.append(f"调仓{self.rebalance_days}d")
         if 'trailing_stop' in ap: parts.append(f"止盈{self.trailing_stop:.0%}")
         if 'min_hold_days' in ap: parts.append(f"持≥{self.min_hold_days}d")
+        if 'entry_quality_min' in ap: parts.append(f"入场质量≥{self.entry_quality_min:.0f}")
+        if 'seal_streak_min' in ap: parts.append(f"封板×缩量≥{self.seal_streak_min:.0f}")
+        if 'lu_efficiency_max' in ap: parts.append(f"涨停效率≤{self.lu_efficiency_max:.1f}")
+        if 'lu_streak_min' in ap: parts.append(f"连板≥{self.lu_streak_min}")
         return " + ".join(parts) if parts else "基线"
 
 
@@ -239,6 +255,18 @@ def attach_features(sig_df, daily_df):
         seal = float(today["close"] / today["high"]) if (pd.notna(today.get("high"))
                      and today["high"] > 0) else 0.0
 
+        # 连板天数
+        lu_streak_val = 0
+        for _, pr in pre.iloc[::-1].iterrows():
+            if pd.notna(pr.get('ret')) and pr['ret'] >= 0.095: lu_streak_val += 1
+            else: break
+        if is_lu_day: lu_streak_val += 1
+
+        # 复合特征
+        entry_quality = seal * low_vol_streak / (amplitude + 0.001)
+        seal_streak = seal * low_vol_streak
+        lu_efficiency = lu_20d / max(lu_streak_val, 1) if lu_20d > 0 else 0
+
         features.append({
             "code": code, "date": sig_date,
             "score": float(sig.get("score", 0)) if pd.notna(sig.get("score")) else 0,
@@ -247,6 +275,10 @@ def attach_features(sig_df, daily_df):
             "ma_bullish": ma_bullish,
             "is_lu_day": is_lu_day, "sig_ret": sig_ret,
             "amplitude": amplitude, "seal_quality": seal,
+            "lu_streak": lu_streak_val,
+            "entry_quality": round(entry_quality, 1),
+            "seal_streak": round(seal_streak, 1),
+            "lu_efficiency": round(lu_efficiency, 2),
         })
 
     return pd.DataFrame(features)
@@ -276,6 +308,14 @@ def filter_signals(sig_df, genome, feats_df):
         m &= df["amplitude"] <= genome.amplitude_max
     if 'seal_quality_min' in ap:
         m &= df["seal_quality"] >= genome.seal_quality_min
+    if 'entry_quality_min' in ap:
+        m &= df["entry_quality"] >= genome.entry_quality_min
+    if 'seal_streak_min' in ap:
+        m &= df["seal_streak"] >= genome.seal_streak_min
+    if 'lu_efficiency_max' in ap:
+        m &= df["lu_efficiency"] <= genome.lu_efficiency_max
+    if 'lu_streak_min' in ap:
+        m &= df["lu_streak"] >= genome.lu_streak_min
 
     return df[m][["code", "date", "score"]].copy()
 
@@ -337,14 +377,17 @@ def mutate(genome, generation, temp=1.0):
 
     int_fields = {'yaogu_score_min': (0, 9), 'low_vol_streak_min': (0, 15),
                   'lu_20d_min': (0, 10), 'lu_20d_max': (1, 999), 'lu_60d_max': (1, 999),
-                  'top_n': (1, 15), 'rebalance_days': (1, 20), 'min_hold_days': (3, 20)}
+                  'top_n': (1, 15), 'rebalance_days': (1, 20), 'min_hold_days': (3, 20),
+                  'lu_streak_min': (0, 15)}
     for f, (lo, hi) in int_fields.items():
         if random.random() < 0.4 * temp:
             delta = random.choice([-1, 1, -2, 2])
             setattr(g, f, max(lo, min(hi, getattr(g, f) + delta)))
 
     float_fields = {'amplitude_max': (0.03, 0.20), 'seal_quality_min': (0.0, 1.0),
-                    'trailing_stop': (0.05, 0.30)}
+                    'trailing_stop': (0.05, 0.30),
+                    'entry_quality_min': (0, 500), 'seal_streak_min': (0, 50),
+                    'lu_efficiency_max': (0.5, 99)}
     for f, (lo, hi) in float_fields.items():
         if random.random() < 0.4 * temp:
             delta = random.choice([-0.02, 0.02, -0.05, 0.05])
@@ -370,7 +413,8 @@ def crossover(g1, g2, generation):
     fields = ['yaogu_score_min', 'low_vol_streak_min', 'lu_20d_min', 'lu_20d_max',
               'lu_60d_max', 'ma_bullish', 'require_lu_day',
               'amplitude_max', 'seal_quality_min',
-              'top_n', 'rebalance_days', 'trailing_stop', 'min_hold_days']
+              'top_n', 'rebalance_days', 'trailing_stop', 'min_hold_days',
+              'entry_quality_min', 'seal_streak_min', 'lu_efficiency_max', 'lu_streak_min']
     for f in fields:
         setattr(child, f, getattr(random.choice([g1, g2]), f))
     return child
