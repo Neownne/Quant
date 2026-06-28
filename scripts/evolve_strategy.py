@@ -11,7 +11,7 @@
   python scripts/evolve_strategy.py --rounds 5        # 5 轮进化
   python scripts/evolve_strategy.py --status           # 查看进度
   python scripts/evolve_strategy.py --top 10           # 最佳策略
-  python scripts/evolve_strategy.py --target 0.80      # 目标胜率(默认0.80)
+  python scripts/evolve_strategy.py --target 0.50      # 目标年化收益(默认50%)
 """
 
 from __future__ import annotations
@@ -566,7 +566,7 @@ def load_db():
     if os.path.exists(STRATEGY_DB):
         with open(STRATEGY_DB) as f:
             return json.load(f)
-    return {"variants": [], "rounds": 0, "best_fitness": 0, "target": 0.80}
+    return {"variants": [], "rounds": 0, "best_fitness": 0, "target": 0.50}
 
 
 def save_db(db):
@@ -596,7 +596,7 @@ def save_rules(db):
     lines = [
         "# 策略进化规则",
         f"# 进化轮次: {db.get('rounds', 0)}",
-        f"# 目标胜率: {db.get('target', 0.80):.0%}",
+        f"# 目标胜率: {db.get('target', 0.50):.0%}",
         f"# 当前最佳: {db.get('best_fitness', 0):.4f}",
         "",
         "## 已验证有效的过滤条件",
@@ -901,7 +901,7 @@ def parse_args():
     p.add_argument("--rounds", type=int, default=5, help="进化轮次")
     p.add_argument("--status", action="store_true", help="查看进化状态")
     p.add_argument("--top", type=int, default=10, help="显示最佳策略数")
-    p.add_argument("--target", type=float, default=0.80, help="目标胜率")
+    p.add_argument("--target", type=float, default=0.50, help="目标胜率")
     p.add_argument("--reset", action="store_true", help="重置进化DB")
     return p.parse_args()
 
