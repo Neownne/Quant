@@ -158,15 +158,15 @@ class StrategyGenome:
     generation: int = 0
     parent_hash: str = ""
 
-    # 默认值（不过滤的值）
+    # 默认值（不过滤的值）—— 与 dataclass 默认值保持一致
     _DEFAULTS = {
-        'yaogu_score_min': 0, 'low_vol_streak_min': 0,
-        'vol_ratio_max': 99.0, 'lu_20d_min': 0, 'lu_20d_max': 999,
-        'lu_60d_max': 999, 'lu_streak_min': 1,
-        'amplitude_max': 0.20, 'seal_quality_min': 0.0,
-        'gap_up_min': -0.10, 'ma_bullish': False, 'ma_converge': False,
-        'ma_deviation_max': 0.50, 'mcap_min': 0.0, 'mcap_max': float('inf'),
+        'yaogu_score_min': 3, 'lu_20d_min': 1, 'lu_20d_max': 999,
+        'lu_60d_max': 999, 'low_vol_streak_min': 1, 'vol_ratio_max': 99.0,
+        'amplitude_max': 0.20, 'seal_quality_min': 0.0, 'gap_up_min': -0.10,
+        'ma_bullish': False, 'ma_converge': False, 'ma_deviation_max': 0.50,
+        'mcap_min': 10.0, 'mcap_max': float('inf'),
         'require_lu_day': False, 'sig_ret_min': -0.10, 'sig_ret_max': 0.15,
+        'lu_streak_min': 1,
     }
 
     def active_params(self) -> dict:
@@ -947,7 +947,7 @@ def main():
 
     round_num = db.get('rounds', 0)
     best_wr = db.get('best_win_rate', 0)
-    max_rounds = 10000
+    max_rounds = args.rounds if args.rounds != 5 else 10000  # --rounds 非默认值时作为上限
 
     # 可视化
     console = Console() if HAS_RICH else None
