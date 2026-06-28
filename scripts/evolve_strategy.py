@@ -99,6 +99,12 @@ class StrategyGenome:
     amplitude_max: float = 0.20
     seal_quality_min: float = 0.0
 
+    # ── 调仓参数 ──
+    top_n: int = 5                 # 持仓数
+    rebalance_days: int = 5        # 调仓周期
+    trailing_stop: float = 0.12    # 移动止盈
+    min_hold_days: int = 7         # 最小持有天数
+
     generation: int = 0
     parent_hash: str = ""
 
@@ -107,6 +113,7 @@ class StrategyGenome:
         'lu_20d_min': 0, 'lu_20d_max': 999, 'lu_60d_max': 999,
         'ma_bullish': False, 'require_lu_day': False,
         'amplitude_max': 0.20, 'seal_quality_min': 0.0,
+        'top_n': 5, 'rebalance_days': 5, 'trailing_stop': 0.12, 'min_hold_days': 7,
     }
 
     def active_params(self) -> dict:
@@ -153,7 +160,12 @@ class StrategyGenome:
         if 'require_lu_day' in ap: parts.append("当日涨停")
         if 'amplitude_max' in ap: parts.append(f"振幅≤{self.amplitude_max:.0%}")
         if 'seal_quality_min' in ap: parts.append(f"封板≥{self.seal_quality_min:.0%}")
-        return " + ".join(parts) if parts else "基线(score≥3)"
+        # 调仓参数
+        if 'top_n' in ap: parts.append(f"持仓{self.top_n}")
+        if 'rebalance_days' in ap: parts.append(f"调仓{self.rebalance_days}d")
+        if 'trailing_stop' in ap: parts.append(f"止盈{self.trailing_stop:.0%}")
+        if 'min_hold_days' in ap: parts.append(f"持≥{self.min_hold_days}d")
+        return " + ".join(parts) if parts else "基线"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -272,8 +284,8 @@ def filter_signals(sig_df, genome, feats_df):
 # 适应度评估
 # ══════════════════════════════════════════════════════════════════════
 
-def evaluate_genome(genome, feats_df, daily_df, top_n=5, cash=1_000_000):
-    """跑真实回测，返回指标。"""
+def evaluate_genome(genome, feats_df, daily_df, cash=1_000_000):
+    """跑真实回测，返回指标。使用基因组的调仓参数。"""
     from scripts.bt_yaogu import run_backtest_on_signals
 
     filtered = filter_signals(None, genome, feats_df)
@@ -284,7 +296,10 @@ def evaluate_genome(genome, feats_df, daily_df, top_n=5, cash=1_000_000):
 
     result = run_backtest_on_signals(
         filtered, daily_df, name_map={},
-        top_n=top_n, cash=cash, min_score=0,  # 已在 filter_signals 中过滤
+        top_n=genome.top_n, cash=cash, min_score=0,
+        trailing_stop=genome.trailing_stop,
+        min_hold_days=genome.min_hold_days,
+        rebalance_days=genome.rebalance_days,
     )
 
     if "error" in result:
@@ -321,13 +336,15 @@ def mutate(genome, generation, temp=1.0):
     g.parent_hash = genome.genome_hash()
 
     int_fields = {'yaogu_score_min': (0, 9), 'low_vol_streak_min': (0, 15),
-                  'lu_20d_min': (0, 10), 'lu_20d_max': (1, 999), 'lu_60d_max': (1, 999)}
+                  'lu_20d_min': (0, 10), 'lu_20d_max': (1, 999), 'lu_60d_max': (1, 999),
+                  'top_n': (1, 15), 'rebalance_days': (1, 20), 'min_hold_days': (3, 20)}
     for f, (lo, hi) in int_fields.items():
         if random.random() < 0.4 * temp:
             delta = random.choice([-1, 1, -2, 2])
             setattr(g, f, max(lo, min(hi, getattr(g, f) + delta)))
 
-    float_fields = {'amplitude_max': (0.03, 0.20), 'seal_quality_min': (0.0, 1.0)}
+    float_fields = {'amplitude_max': (0.03, 0.20), 'seal_quality_min': (0.0, 1.0),
+                    'trailing_stop': (0.05, 0.30)}
     for f, (lo, hi) in float_fields.items():
         if random.random() < 0.4 * temp:
             delta = random.choice([-0.02, 0.02, -0.05, 0.05])
@@ -352,7 +369,8 @@ def crossover(g1, g2, generation):
     child.parent_hash = g1.genome_hash()[:5] + "_" + g2.genome_hash()[:5]
     fields = ['yaogu_score_min', 'low_vol_streak_min', 'lu_20d_min', 'lu_20d_max',
               'lu_60d_max', 'ma_bullish', 'require_lu_day',
-              'amplitude_max', 'seal_quality_min']
+              'amplitude_max', 'seal_quality_min',
+              'top_n', 'rebalance_days', 'trailing_stop', 'min_hold_days']
     for f in fields:
         setattr(child, f, getattr(random.choice([g1, g2]), f))
     return child
@@ -372,6 +390,16 @@ def seed_genomes():
         seeds.append(StrategyGenome(yaogu_score_min=5, amplitude_max=amp, low_vol_streak_min=3))
     for seal in [0.8, 0.9, 0.95]:
         seeds.append(StrategyGenome(yaogu_score_min=5, seal_quality_min=seal))
+    # 调仓参数变体
+    for top_n in [3, 5, 8, 10]:
+        for reb in [3, 5, 10]:
+            seeds.append(StrategyGenome(yaogu_score_min=5, low_vol_streak_min=3,
+                                        top_n=top_n, rebalance_days=reb))
+    for ts in [0.08, 0.12, 0.18, 0.25]:
+        for mh in [5, 7, 10]:
+            seeds.append(StrategyGenome(yaogu_score_min=5, low_vol_streak_min=3,
+                                        trailing_stop=ts, min_hold_days=mh))
+
     for _ in range(10):
         seeds.append(StrategyGenome(
             yaogu_score_min=random.randint(0, 7),
@@ -379,6 +407,10 @@ def seed_genomes():
             lu_20d_min=random.randint(0, 5),
             ma_bullish=random.random() < 0.5,
             require_lu_day=random.random() < 0.3,
+            top_n=random.choice([3, 5, 8, 10]),
+            rebalance_days=random.choice([3, 5, 10, 15]),
+            trailing_stop=random.choice([0.08, 0.12, 0.18, 0.25]),
+            min_hold_days=random.choice([5, 7, 10, 15]),
         ))
     return seeds
 
@@ -600,8 +632,8 @@ def main():
 
     # 基线
     logger.info("运行基线回测...")
-    base_genome = StrategyGenome()  # 默认：score≥3
-    baseline = evaluate_genome(base_genome, feats, daily, top_n=args.top_n)
+    base_genome = StrategyGenome(top_n=args.top_n)
+    baseline = evaluate_genome(base_genome, feats, daily)
     logger.info(f"基线: ann={baseline.get('ret_annual',0):.1%} Sharpe={baseline.get('sharpe',0):.2f} "
                 f"trades={baseline.get('n_trades',0)}")
 

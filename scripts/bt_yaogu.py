@@ -333,7 +333,7 @@ def run_backtest(args):
 
 def run_backtest_on_signals(sig_df, daily_df, name_map, top_n=5, cash=1_000_000,
                              min_score=3, trailing_stop=0.12, min_hold_days=7,
-                             start_date=None, end_date=None):
+                             rebalance_days=5, start_date=None, end_date=None):
     """内存回测：接收已加载的日线数据，返回指标字典。供进化引擎调用。"""
     sig_df = sig_df.copy()
     sig_df["date"] = pd.to_datetime(sig_df["date"])
@@ -467,7 +467,7 @@ def run_backtest_on_signals(sig_df, daily_df, name_map, top_n=5, cash=1_000_000,
                 del positions[code]
 
         # 买入
-        if i % REBALANCE_DAYS != 0 or frozen: continue
+        if i % rebalance_days != 0 or frozen: continue
         if td not in sig_by_date: continue
         available = top_n - len(positions)
         if available <= 0: continue
