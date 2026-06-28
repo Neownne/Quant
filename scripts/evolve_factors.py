@@ -113,6 +113,60 @@ TEMPLATES = {
         "params": {"window": [5, 10, 20]},
         "compute": lambda daily, p: _factor_sector_relative(daily, p["window"]),
     },
+    # ── 新增模板 ──
+    "turnover_shock": {
+        "category": "价量",
+        "params": {"window": [5, 10, 20], "period": [20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            daily.groupby("code")["turnover"].transform(lambda x: x.pct_change(p["window"])),
+            p["period"]),
+    },
+    "volume_price_divergence": {
+        "category": "价量",
+        "params": {"window": [5, 10, 20], "period": [20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            daily.groupby("code")["close"].transform(lambda x: x.pct_change(p["window"]))
+            / (daily.groupby("code")["volume"].transform(lambda x: x.pct_change(p["window"])).abs() + 1e-9),
+            p["period"]),
+    },
+    "amplitude_factor": {
+        "category": "价量",
+        "params": {"window": [5, 10, 20], "period": [20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            (daily["high"] - daily["low"]) / daily.groupby("code")["close"].shift(1),
+            p["period"]),
+    },
+    "gap_momentum": {
+        "category": "价量",
+        "params": {"window": [5, 10], "period": [20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            (daily["open"] - daily.groupby("code")["close"].shift(1))
+            / daily.groupby("code")["close"].shift(1),
+            p["period"]),
+    },
+    "seal_quality": {
+        "category": "价量",
+        "params": {"period": [10, 20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            daily["close"] / (daily["high"] + 1e-9), p["period"]),
+    },
+    "volume_climax": {
+        "category": "价量",
+        "params": {"window": [5, 10], "period": [20, 40]},
+        "compute": lambda daily, p: _roll_rank(
+            daily["volume"] / (daily.groupby("code")["volume"].transform(
+                lambda x: x.rolling(p["period"]).mean()) + 1e-9),
+            p["period"]),
+    },
+    "ma_spread": {
+        "category": "价量",
+        "params": {"period": [20, 40, 60]},
+        "compute": lambda daily, p: _roll_rank(
+            (daily.groupby("code")["close"].transform(lambda x: x.rolling(5).mean())
+             - daily.groupby("code")["close"].transform(lambda x: x.rolling(20).mean()))
+            / daily.groupby("code")["close"].transform(lambda x: x.rolling(20).mean()),
+            p["period"]),
+    },
 }
 
 # ── 学习规则库 ──
@@ -154,34 +208,51 @@ def factor_hash(expr):
 # ═══════════════════════════════════════════════════════════════
 
 def generate_candidates(db):
-    """基于模板 + 历史成功率生成候选因子。"""
+    """基于模板 + 历史成功率生成候选因子。参数空间每轮扩展。"""
     candidates = []
+    round_num = db["rounds"] + 1
 
     # 统计各模板的历史成功率
     template_stats = defaultdict(lambda: {"count": 0, "ic_pass": 0})
     for f in db["factors"]:
         tmpl = f.get("template", "unknown")
         template_stats[tmpl]["count"] += 1
-        if abs(f.get("ic_mean", 0)) > 0.01:
+        if abs(f.get("ic_mean", 0)) > 0.02:
             template_stats[tmpl]["ic_pass"] += 1
 
     ranked_templates = sorted(
         template_stats.items(),
         key=lambda x: x[1]["ic_pass"] / max(x[1]["count"], 1), reverse=True)
 
-    # 首轮全量，后续从 top 采样
-    use_templates = list(TEMPLATES.keys()) if len(db["factors"]) == 0 else [
-        t for t, _ in ranked_templates[:5]]
+    # 首轮全量，后续优先高分模板 + 随机探索
+    if len(db["factors"]) == 0:
+        use_templates = list(TEMPLATES.keys())
+    else:
+        top_half = [t for t, _ in ranked_templates[:max(3, len(ranked_templates)//2)]]
+        rest = [t for t in TEMPLATES if t not in top_half]
+        use_templates = top_half + random.sample(rest, min(3, len(rest)))
 
     from itertools import product
+
     for tmpl_name in use_templates:
         tmpl = TEMPLATES.get(tmpl_name)
         if not tmpl: continue
 
         param_keys = list(tmpl["params"].keys())
-        param_values = [tmpl["params"][k] for k in param_keys]
+        base_values = [tmpl["params"][k] for k in param_keys]
 
-        for combo in product(*param_values):
+        # 每 3 轮扩展参数空间
+        expand_factor = 1 + round_num // 3
+        expanded_values = []
+        for vals in base_values:
+            ev = list(vals)
+            if isinstance(vals[0], (int, float)) and len(vals) >= 2:
+                step = vals[1] - vals[0] if isinstance(vals[0], int) else (vals[1] - vals[0]) / 2
+                ev.append(vals[0] - step * expand_factor)
+                ev.append(vals[-1] + step * expand_factor)
+            expanded_values.append(ev)
+
+        for combo in product(*expanded_values):
             params = dict(zip(param_keys, combo))
             name = f"{tmpl_name}_" + "_".join(f"{k}{v}" for k, v in params.items())
             h = factor_hash(name)
@@ -194,7 +265,31 @@ def generate_candidates(db):
                 "hash": h, "template_pass_rate": 0.5,
             })
 
-    logger.info(f"生成 {len(candidates)} 个候选因子")
+    if len(candidates) == 0 and round_num > 1:
+        # 穷尽时注入随机噪声变体
+        logger.info("基础组合穷尽，注入随机变体...")
+        for _ in range(20):
+            tmpl_name = random.choice(list(TEMPLATES.keys()))
+            tmpl = TEMPLATES[tmpl_name]
+            params = {}
+            for k, vals in tmpl["params"].items():
+                v = random.choice(vals)
+                if isinstance(v, (int, float)):
+                    noise = random.uniform(-0.3, 0.3) * v
+                    params[k] = round(v + noise, 0) if isinstance(v, int) else round(v + noise, 3)
+                else:
+                    params[k] = v
+            name = tmpl_name + "_rnd" + str(round_num) + "_" + factor_hash(str(params))
+            h = factor_hash(name)
+            if any(f.get("hash") == h for f in db["factors"]):
+                continue
+            candidates.append({
+                "name": name, "template": tmpl_name,
+                "category": tmpl["category"], "params": params,
+                "hash": h, "template_pass_rate": 0.3,
+            })
+
+    logger.info(f"生成 {len(candidates)} 个候选因子 (Round {round_num})")
     return candidates
 
 
@@ -497,21 +592,29 @@ def main():
     extra["trade_date"] = pd.to_datetime(extra["trade_date"])
     logger.info(f"市值: {len(extra)} 行")
 
-    # ── 进化循环 ──
+    # ── 进化循环（持续运行直到达到目标或轮次上限）──
     t0 = time.time()
-    for r in range(args.rounds):
+    target_rounds = max(args.rounds, 100)  # 最少跑 100 轮
+    max_rounds = 10000  # 安全上限
+
+    for r in range(target_rounds):
+        round_num = db["rounds"] + 1
         db = evolve_round(engine, db, daily, extra)
 
+        # 每 10 轮汇报
+        if round_num % 10 == 0:
+            passed = [f for f in db["factors"] if f.get("status") == "pass"]
+            best_ic = max((abs(f.get("ic_mean", 0)) for f in db["factors"] if f.get("ic_samples", 0) > 0), default=0)
+            elapsed = time.time() - t0
+            logger.info(f"  ⏱ Round {round_num}: {len(passed)}通过, 最佳|IC|={best_ic:.4f}, {elapsed:.0f}s")
+
+        if round_num >= max_rounds:
+            break
+
     elapsed = time.time() - t0
-    logger.success(f"全部完成: {args.rounds} 轮, {elapsed:.0f}s")
+    logger.success(f"进化完成: {db['rounds']} 轮, {elapsed:.0f}s")
     logger.info(f"规则文件: {RULES_FILE}")
     logger.info(f"因子 DB: {FACTOR_DB}")
-
-    # 输出本轮最佳
-    round_factors = [f for f in db["factors"] if f.get("round") == db["rounds"]]
-    if round_factors:
-        best = max(round_factors, key=lambda x: abs(x.get("ic_mean", 0)))
-        logger.info(f"本轮最佳: {best['name']} IC={best['ic_mean']:.4f}")
 
     engine.dispose()
 
