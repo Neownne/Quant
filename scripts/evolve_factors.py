@@ -17,7 +17,7 @@
   python scripts/evolve_factors.py --status           # 查看DB统计
   python scripts/evolve_factors.py --top 10           # 输出最佳因子
 """
-import sys, os, json, argparse, time, hashlib
+import sys, os, json, argparse, time, hashlib, random
 from datetime import date, timedelta
 from collections import defaultdict
 import numpy as np
