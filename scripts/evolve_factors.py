@@ -34,6 +34,7 @@ try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
+    from rich.live import Live
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -489,39 +490,42 @@ def save_rules(rules):
 # 可视化
 # ═══════════════════════════════════════════════════════════════
 
-def _render_factor_status(console, db, round_num, elapsed, final=False):
-    if console is None:
-        return
+def _render_factor_panel(db, round_num, elapsed):
+    """返回 Rich Panel 用于 Live 刷新。"""
     factors = db.get("factors", [])
     valid = [f for f in factors if f.get("ic_samples", 0) >= 5]
     valid.sort(key=lambda f: abs(f.get("ic_mean", 0)), reverse=True)
     passed = [f for f in valid if f.get("status") == "pass"]
+    best_ic = max((abs(f.get("ic_mean", 0)) for f in valid), default=0)
 
-    table = Table(title=f"因子进化 — Round {round_num}", title_style="bold cyan")
+    table = Table(title=f"🧪 因子进化 — Round {round_num}", title_style="bold cyan")
     table.add_column("#", style="dim", width=3)
-    table.add_column("因子名", style="bright_blue", max_width=35)
+    table.add_column("因子", style="bright_blue", max_width=32)
     table.add_column("|IC|", justify="right", style="green")
     table.add_column("ICIR", justify="right", style="yellow")
-    table.add_column("样本", justify="right", style="dim")
+    table.add_column("n", justify="right", style="dim", width=4)
     table.add_column("类别")
 
-    for i, f in enumerate(valid[:10], 1):
+    for i, f in enumerate(valid[:8], 1):
         table.add_row(
-            str(i),
-            f.get("name", "?")[:32],
-            f"{abs(f.get('ic_mean', 0)):.4f}",
-            f"{f.get('icir', 0):+.2f}",
-            str(f.get("ic_samples", 0)),
-            f.get("category", "?"),
+            str(i), f.get("name","?")[:30],
+            f"{abs(f.get('ic_mean',0)):.4f}",
+            f"{f.get('icir',0):+.2f}",
+            str(f.get("ic_samples",0)),
+            f.get("category","?"),
         )
 
-    panel = Panel.fit(
+    return Panel(
         table,
-        title=f"[bold]总因子: {len(factors)}  |  有效: {len(valid)}  |  通过: {len(passed)}  |  {elapsed:.0f}s[/]",
+        title=f"[bold]总因子: {len(factors)}  |  有效: {len(valid)}  |  通过: {len(passed)}  |  "
+              f"最佳|IC|: {best_ic:.4f}  |  {elapsed:.0f}s[/]",
         border_style="green" if passed else "blue",
     )
-    console.clear()
-    console.print(panel)
+
+
+def _render_factor_status(console, db, round_num, elapsed, final=False):
+    if console is None: return
+    console.print(_render_factor_panel(db, round_num, elapsed))
     if final:
         console.print(f"\n[bold green]✅ 因子进化完成！{db['rounds']} 轮[/]")
 
@@ -651,23 +655,31 @@ def main():
     max_rounds = 10000
     console = Console() if HAS_RICH else None
 
-    for r in range(target_rounds):
-        round_num = db["rounds"] + 1
-        db = evolve_round(engine, db, daily, extra)
+    if HAS_RICH:
+        live = Live(console=console, refresh_per_second=2, screen=True)
+        live.start()
 
-        if HAS_RICH and round_num % 10 == 0:
-            _render_factor_status(console, db, round_num, time.time() - t0)
-        elif round_num % 10 == 0:
-            passed = [f for f in db["factors"] if f.get("status") == "pass"]
-            best_ic = max((abs(f.get("ic_mean", 0)) for f in db["factors"] if f.get("ic_samples", 0) > 0), default=0)
-            logger.info(f"  ⏱ Round {round_num}: {len(passed)}通过, 最佳|IC|={best_ic:.4f}")
+    try:
+        for r in range(target_rounds):
+            round_num = db["rounds"] + 1
+            db = evolve_round(engine, db, daily, extra)
+            elapsed = time.time() - t0
 
-        if round_num >= max_rounds:
-            break
+            if HAS_RICH:
+                live.update(_render_factor_panel(db, round_num, elapsed))
+            elif round_num % 10 == 0:
+                passed = [f for f in db["factors"] if f.get("status") == "pass"]
+                best_ic = max((abs(f.get("ic_mean", 0)) for f in db["factors"] if f.get("ic_samples", 0) > 0), default=0)
+                logger.info(f"  ⏱ Round {round_num}: {len(passed)}通过, 最佳|IC|={best_ic:.4f}")
+
+            if round_num >= max_rounds:
+                break
+    finally:
+        if HAS_RICH:
+            live.stop()
+            _render_factor_status(console, db, db['rounds'], time.time() - t0, final=True)
 
     elapsed = time.time() - t0
-    if HAS_RICH:
-        _render_factor_status(console, db, db['rounds'], elapsed, final=True)
     logger.success(f"进化完成: {db['rounds']} 轮, {elapsed:.0f}s")
 
     engine.dispose()

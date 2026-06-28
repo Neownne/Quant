@@ -34,9 +34,7 @@ try:
     from rich.console import Console
     from rich.table import Table
     from rich.live import Live
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
     from rich.panel import Panel
-    from rich.layout import Layout
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -343,16 +341,23 @@ def compute_features_for_signals(signals_df, daily_df, extra_df=None):
         if is_lu_day:
             lu_streak += 1
 
-        # 前向收益
-        fwd = daily_df[(daily_df['code'] == code) & (daily_df['trade_date'] > sig_date)].head(20)
-        if len(fwd) < 5:
+        # 前向收益：如果信号日是涨停日，实际 T+1 才能买入，用次日收盘为入场价
+        fwd = daily_df[(daily_df['code'] == code) & (daily_df['trade_date'] > sig_date)].head(21)
+        if len(fwd) < 2:
             continue
-        sig_close = today['close']
-        if pd.isna(sig_close) or sig_close <= 0:
+
+        if is_lu_day:
+            # 涨停日买不到，T+1 入场
+            entry_price = fwd.iloc[0]['close']  # 次日收盘
+            fwd = fwd.iloc[1:]  # 前向从 T+2 开始
+        else:
+            entry_price = today['close']
+
+        if pd.isna(entry_price) or entry_price <= 0:
             continue
-        ret_5d = fwd.iloc[min(4, len(fwd)-1)]['close'] / sig_close - 1
-        ret_10d = fwd.iloc[min(9, len(fwd)-1)]['close'] / sig_close - 1
-        ret_20d = fwd.iloc[min(19, len(fwd)-1)]['close'] / sig_close - 1
+        ret_5d = fwd.iloc[min(4, len(fwd)-1)]['close'] / entry_price - 1 if len(fwd) >= 1 else 0
+        ret_10d = fwd.iloc[min(9, len(fwd)-1)]['close'] / entry_price - 1 if len(fwd) >= 1 else 0
+        ret_20d = fwd.iloc[min(19, len(fwd)-1)]['close'] / entry_price - 1 if len(fwd) >= 1 else 0
 
         mcap_val = float(today.get('market_cap', 0)) if pd.notna(today.get('market_cap')) else 0.0
         features.append({
@@ -797,57 +802,54 @@ def evolve_round(db: dict, feats_df: pd.DataFrame, round_num: int,
 # 可视化
 # ══════════════════════════════════════════════════════════════════════
 
-def _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=False):
-    """渲染进化状态面板。"""
-    if console is None:
-        return
-
+def _render_panel(db, round_num, best_wr, target_wr, elapsed, baseline_wr):
+    """返回一个 Rich Panel（用于 Live.update）。"""
     valid = [v for v in db.get('variants', []) if v.get('n', 0) >= 30]
     valid = sorted(valid, key=lambda v: v.get('win_rate_10d', 0), reverse=True)[:10]
     stag = db.get('stagnation_counter', 0)
+    total = len(db.get('variants', []))
 
-    # 进度条
     progress_pct = min(best_wr / target_wr, 1.0) if target_wr > 0 else 0
-    bar_width = 40
+    bar_width = 30
     filled = int(bar_width * progress_pct)
     bar = "█" * filled + "░" * (bar_width - filled)
 
-    # 构建表格
-    table = Table(title=f"策略进化 — Round {round_num}", title_style="bold cyan")
+    table = Table(title=f"🧬 策略进化 — Round {round_num}", title_style="bold cyan")
     table.add_column("#", style="dim", width=3)
-    table.add_column("胜率(10d)", justify="right", style="green")
-    table.add_column("胜率(20d)", justify="right", style="yellow")
+    table.add_column("10日胜率", justify="right", style="green")
+    table.add_column("20日胜率", justify="right", style="yellow")
     table.add_column("均收益", justify="right")
-    table.add_column("样本", justify="right", style="dim")
-    table.add_column("条件", style="bright_blue", max_width=60)
+    table.add_column("n", justify="right", style="dim", width=4)
+    table.add_column("条件", style="bright_blue", max_width=55)
 
-    for i, v in enumerate(valid[:10], 1):
-        wr10 = v.get('win_rate_10d', 0)
-        wr20 = v.get('win_rate_20d', 0)
-        avg10 = v.get('avg_ret_10d', 0)
-        n = v.get('n', 0)
-        desc = v.get('condition_desc', '?')
+    for i, v in enumerate(valid[:8], 1):
         table.add_row(
             str(i),
-            f"{wr10:.1%}",
-            f"{wr20:.1%}",
-            f"{avg10:+.1%}",
-            str(n),
-            desc[:55],
+            f"{v.get('win_rate_10d',0):.1%}",
+            f"{v.get('win_rate_20d',0):.1%}",
+            f"{v.get('avg_ret_10d',0):+.1%}",
+            str(v.get('n',0)),
+            v.get('condition_desc','?')[:52],
         )
 
-    panel = Panel.fit(
+    return Panel(
         table,
-        title=f"[bold]目标: {target_wr:.0%}  |  基线: {baseline_wr:.1%}  |  "
-              f"当前最佳: {best_wr:.1%}  |  停滞: {stag}轮  |  {elapsed:.0f}s[/]",
-        subtitle=f"进度 [{bar}] {best_wr:.1%}",
+        title=f"[bold]目标胜率: {target_wr:.0%}  |  基线: {baseline_wr:.1%}  |  "
+              f"最佳: {best_wr:.1%}  |  停滞: {stag}轮  |  变体: {total}  |  {elapsed:.0f}s[/]",
+        subtitle=f"[{bar}] {best_wr:.1%}",
         border_style="green" if best_wr >= target_wr else "blue",
     )
-    console.clear()
-    console.print(panel)
+
+
+def _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=False):
+    """最终输出。"""
+    if console is None:
+        return
+    valid = [v for v in db.get('variants', []) if v.get('n', 0) >= 30]
+    console.print(_render_panel(db, round_num, best_wr, target_wr, elapsed, baseline_wr))
     if final:
         console.print(f"\n[bold green]✅ 进化完成！总变体: {len(db.get('variants',[]))}, "
-                      f"有效: {len(valid)}[/]")
+                      f"有效策略: {len(valid)}[/]")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -919,17 +921,26 @@ def main():
     # 可视化
     console = Console() if HAS_RICH else None
 
-    while best_wr < target_wr and round_num < max_rounds:
-        round_num += 1
-        db = evolve_round(db, feats, round_num)
-        best_wr = db.get('best_win_rate', 0)
-        elapsed = time.time() - t0
+    if HAS_RICH:
+        live = Live(console=console, refresh_per_second=2, screen=True)
+        live.start()
 
-        if HAS_RICH and round_num % 5 == 0:
-            _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr)
-        elif round_num % 10 == 0:
-            logger.info(f"  ⏱ Round {round_num}: best_wr={best_wr:.1%}, "
-                        f"变体={len(db.get('variants',[]))}, {elapsed:.0f}s")
+    try:
+        while best_wr < target_wr and round_num < max_rounds:
+            round_num += 1
+            db = evolve_round(db, feats, round_num)
+            best_wr = db.get('best_win_rate', 0)
+            elapsed = time.time() - t0
+
+            if HAS_RICH:
+                live.update(_render_panel(db, round_num, best_wr, target_wr, elapsed, baseline_wr))
+            elif round_num % 10 == 0:
+                logger.info(f"  ⏱ Round {round_num}: best_wr={best_wr:.1%}, "
+                            f"变体={len(db.get('variants',[]))}, {elapsed:.0f}s")
+    finally:
+        if HAS_RICH:
+            live.stop()
+            _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=True)
 
     elapsed = time.time() - t0
     if best_wr >= target_wr:
