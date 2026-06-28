@@ -901,22 +901,37 @@ def scan_etf(engine, target_date: pd.Timestamp) -> dict | None:
     )
     idx_kl = idx_kl.sort_values("date") if not idx_kl.empty else pd.DataFrame()
 
-    # ── 份额数据 ──
+    # ── 份额数据（文件缓存 + akshare 实时补齐）──
     shares_map = {}
     try:
         import akshare as ak
+        shares_dir = "data/etf_shares"
+        os.makedirs(shares_dir, exist_ok=True)
         for code in etfs:
-            # 从缓存文件读取昨日值，计算日变化率
-            cache_file = f"output/etf_shares_{code}.txt"
-            prev = 0.0
+            cache_file = os.path.join(shares_dir, f"{code}.txt")
+            prev_share = None
             try:
                 with open(cache_file) as f:
-                    prev = float(f.read().strip())
+                    prev_share = float(f.read().strip())
             except Exception:
                 pass
-            # 今日份额来自 etf_basic 或实时数据，此处简化为缓存模式
-            delta_pct = 0.0
-            shares_map[code] = delta_pct
+            # 尝试从 akshare 获取最新份额
+            curr_share = None
+            try:
+                info = ak.fund_etf_fund_info_em(fund=code, market=etfs[code].get("market", "SH"))
+                if info is not None and not info.empty:
+                    curr_share = float(info.iloc[0].get("基金份额", info.iloc[0].get("total_share", 0)) or 0)
+            except Exception:
+                pass
+            if curr_share and curr_share > 0:
+                with open(cache_file, "w") as f:
+                    f.write(str(curr_share))
+                if prev_share and prev_share > 0:
+                    shares_map[code] = (curr_share - prev_share) / prev_share * 100
+                else:
+                    shares_map[code] = 0.0
+            elif prev_share and prev_share > 0:
+                shares_map[code] = 0.0  # 无新数据，保持中性
     except Exception as e:
         logger.warning(f"[etf] 份额数据获取失败: {e}")
 
@@ -967,8 +982,71 @@ def scan_etf(engine, target_date: pd.Timestamp) -> dict | None:
     high_count = sum(1 for r in results if r.get("signal_level") == "high")
     mid_count = sum(1 for r in results if r.get("signal_level") == "mid")
 
+    # ── 国家队入场预警 ──
+    # 条件: 沪深300跌>0.5% + ≥3只宽基ETF倍量(>2x) + 综合概率>50%
+    nt_alert = ""
+    try:
+        idx_chg_today = 0.0
+        if not idx_kl.empty:
+            idx_c = idx_kl["close"].astype(float)
+            if len(idx_c) >= 2:
+                idx_chg_today = (idx_c.iloc[-1] - idx_c.iloc[-2]) / idx_c.iloc[-2] * 100
+
+        nt_candidates = [
+            r for r in results
+            if not r.get("error")
+            and r.get("vol_ratio", 0) >= 2.0
+            and r.get("composite_prob", 0) >= 50
+        ]
+        # 疑似入场: 指数下跌时≥3只宽基ETF放量
+        if idx_chg_today < -0.3 and len(nt_candidates) >= 3:
+            nt_alert = (f"⚠️ 疑似国家队入场: 沪深300 {idx_chg_today:+.2f}%, "
+                        f"{len(nt_candidates)}只ETF倍量")
+            logger.warning(f"[etf] {nt_alert}")
+        # 疑似退场: 指数大涨(>2%)时宽基ETF缩量(<0.5x)
+        nt_exit = [
+            r for r in results
+            if not r.get("error")
+            and r.get("vol_ratio", 0) <= 0.5
+            and r.get("composite_prob", 0) < 30
+        ]
+        if idx_chg_today > 1.5 and len(nt_exit) >= 3:
+            if nt_alert:
+                nt_alert += " | "
+            nt_alert += (f"⚠️ 疑似国家队退场: 沪深300 {idx_chg_today:+.2f}%, "
+                         f"{len(nt_exit)}只ETF缩量")
+            logger.warning(f"[etf] 疑似国家队退场: {len(nt_exit)}只")
+    except Exception as e:
+        logger.warning(f"[etf] 国家队检测失败: {e}")
+
+    # ── 高确信信号邮件告警 ──
+    if high_count > 0 or nt_alert:
+        try:
+            # 生成简易 HTML 告警
+            alert_rows = ""
+            for r in sorted([r for r in results if r.get("signal_level") == "high"],
+                           key=lambda x: x.get("composite_prob", 0), reverse=True):
+                alert_rows += (f"<tr><td>{r['code']}</td><td>{r['name']}</td>"
+                              f"<td>{r.get('chg_pct',0):+.2f}%</td>"
+                              f"<td>{r.get('vol_ratio',0):.2f}x</td>"
+                              f"<td style='color:#c62828;font-weight:bold'>"
+                              f"{r.get('composite_prob',0):.0f}%</td></tr>")
+            alert_html = (f"<h3>ETF 高确信信号 — {target_str}</h3>"
+                         f"<p>{nt_alert}</p>" if nt_alert else "") + \
+                         (f"<table>{alert_rows}</table>" if alert_rows else "")
+            send_email(
+                subject=f"ETF告警 {target_str} — {high_count}只高确信" + (" ⚠️国家队" if nt_alert else ""),
+                body=f"ETF三因子监测 {target_str}: 高确信{high_count}只, 中等{mid_count}只\n{nt_alert}",
+                html_body=alert_html if alert_rows else None,
+            )
+            logger.info(f"[etf] 告警邮件已发送: 高确信{high_count}只")
+        except Exception as e:
+            logger.warning(f"[etf] 告警邮件发送失败: {e}")
+
     # ── 生成报告文本 ──
     lines = []
+    if nt_alert:
+        lines.append(f"  {nt_alert}")
     lines.append(f"【ETF 三因子监测】{len(results)} 只 | "
                  f"高确信 {high_count} | 中等 {mid_count}")
     lines.append(f"  {'代码':<8s} {'名称':<12s} {'涨跌':>7s} {'量比':>6s} "
@@ -995,6 +1073,7 @@ def scan_etf(engine, target_date: pd.Timestamp) -> dict | None:
         "results": results,
         "high_count": high_count,
         "mid_count": mid_count,
+        "nt_alert": nt_alert,
         "summary_text": "\n".join(lines),
     }
 

@@ -10,8 +10,6 @@ ETFS_OVERRIDE: dict | None = None
 MIN_DAYS = 60
 # 最大监控数量（按近20日均成交额降序取前N只）
 MAX_ETFS = 50
-# 最大监控数量（按数据天数降序取前N只，None=全部）
-MAX_ETFS = 50
 
 # 信号分级阈值
 SIGNAL_HIGH = 70   # ≥70% 高确信
@@ -60,12 +58,3 @@ def load_etfs(engine) -> dict[str, dict]:
         etfs[code] = {"name": name, "idx_name": idx_name, "market": market}
 
     return etfs
-
-# 信号分级阈值
-SIGNAL_HIGH = 70   # ≥70% 高确信
-SIGNAL_MID = 50    # 50-70% 中等
-
-# 因子权重
-VOL_WT = 0.50
-DIR_WT = 0.20
-SHARE_WT = 0.30

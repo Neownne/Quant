@@ -98,8 +98,16 @@ def generate_html_report(results, target_date):
     else:
         banner = ("⚪ 正常", "#2e7d32")
 
+    # 按综合概率降序排列
+    sorted_results = sorted(
+        [r for r in results if not r.get("error")],
+        key=lambda x: x.get("composite_prob", 0), reverse=True,
+    )
+    error_results = [r for r in results if r.get("error")]
+    display_results = sorted_results + error_results
+
     rows_html = ""
-    for r in results:
+    for r in display_results:
         if r.get("error"):
             rows_html += f"<tr><td>{r['code']}</td><td>{r['name']}</td><td colspan='10' style='color:#999'>{r['error']}</td></tr>"
             continue
@@ -193,27 +201,38 @@ def main():
             kline_map[code] = kl
     idx_kl = fetch_idx_kline(engine, 60)
 
-    # 拉取 ETF 份额数据
+    # 拉取 ETF 份额数据（文件缓存 + akshare API）
     shares_map = {}
     try:
         import akshare as ak
+        shares_dir = "data/etf_shares"
+        os.makedirs(shares_dir, exist_ok=True)
         for code, info in etfs.items():
-            d = float(info.get("shares_yi", 0))
-            # 份额数据：缓存昨日值计算日变化率
-            cache_file = f"output/etf_shares_{code}.txt"
-            prev = 0.0
+            cache_file = os.path.join(shares_dir, f"{code}.txt")
+            prev = None
             try:
                 with open(cache_file) as f:
                     prev = float(f.read().strip())
             except Exception:
                 pass
-            delta_pct = (d - prev) / abs(prev) * 100 if prev > 0 else 0
-            shares_map[code] = delta_pct
-            # 缓存今日值
-            os.makedirs("output", exist_ok=True)
-            with open(cache_file, "w") as f:
-                f.write(str(d))
-        logger.info(f"份额数据: {len(shares_map)} 只 (缓存模式，需先有昨日数据)")
+            # 从 akshare 获取最新份额
+            curr = None
+            try:
+                fund_info = ak.fund_etf_fund_info_em(fund=code, market=info.get("market", "SH"))
+                if fund_info is not None and not fund_info.empty:
+                    curr = float(fund_info.iloc[0].get("基金份额", fund_info.iloc[0].get("total_share", 0)) or 0)
+            except Exception:
+                pass
+            if curr and curr > 0:
+                with open(cache_file, "w") as f:
+                    f.write(str(curr))
+                if prev and prev > 0:
+                    shares_map[code] = (curr - prev) / prev * 100
+                else:
+                    shares_map[code] = 0.0
+            elif prev and prev > 0:
+                shares_map[code] = 0.0
+        logger.info(f"份额数据: {len(shares_map)} 只")
     except Exception as e:
         logger.warning(f"份额数据获取失败: {e}")
 
