@@ -355,8 +355,10 @@ def validate_factors(candidates, daily, extra_df, min_stocks=50, lookback_days=6
     validate_dates = eligible[::step]
 
     results = []
+    n_candidates = len(candidates)
     for ci, c in enumerate(candidates):
-        logger.info(f"  验证 {ci+1}/{len(candidates)}: {c['name']} ...")
+        if ci > 0:
+            logger.info(f"  [{ci}/{n_candidates}] {c['name']} ...")
         tmpl = TEMPLATES.get(c["template"])
         if not tmpl or "compute" not in tmpl:
             c["ic_mean"] = 0; c["status"] = "no_compute_fn"

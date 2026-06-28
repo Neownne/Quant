@@ -272,8 +272,11 @@ def compute_features_for_signals(signals_df, daily_df, extra_df=None):
 
     features = []
     daily_by_code_date = daily_df.set_index(['code', 'trade_date'])
+    total_sigs = len(signals_df)
 
-    for _, sig in signals_df.iterrows():
+    for si, (_, sig) in enumerate(signals_df.iterrows()):
+        if si > 0 and si % 3000 == 0:
+            logger.info(f"  特征进度: {si}/{total_sigs} ({si/total_sigs*100:.0f}%)")
         code = sig['code']
         sig_date = sig['date']
         score = sig.get('score', 0)
