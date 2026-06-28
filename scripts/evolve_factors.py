@@ -30,6 +30,14 @@ from data.db import get_engine
 from data.loader import load_daily_data
 from sqlalchemy import text
 
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
 # ── 配置 ──
 FACTOR_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          'data', 'factor_db.json')
@@ -241,15 +249,19 @@ def generate_candidates(db):
         param_keys = list(tmpl["params"].keys())
         base_values = [tmpl["params"][k] for k in param_keys]
 
-        # 每 3 轮扩展参数空间
+        # 每 3 轮扩展参数空间（保证参数 > 0）
         expand_factor = 1 + round_num // 3
         expanded_values = []
         for vals in base_values:
             ev = list(vals)
             if isinstance(vals[0], (int, float)) and len(vals) >= 2:
                 step = vals[1] - vals[0] if isinstance(vals[0], int) else (vals[1] - vals[0]) / 2
-                ev.append(vals[0] - step * expand_factor)
-                ev.append(vals[-1] + step * expand_factor)
+                lo = max(1, vals[0] - step * expand_factor)
+                hi = vals[-1] + step * expand_factor
+                if isinstance(vals[0], int):
+                    lo, hi = int(lo), int(hi)
+                ev.append(lo)
+                ev.append(hi)
             expanded_values.append(ev)
 
         for combo in product(*expanded_values):
@@ -474,6 +486,47 @@ def save_rules(rules):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 可视化
+# ═══════════════════════════════════════════════════════════════
+
+def _render_factor_status(console, db, round_num, elapsed, final=False):
+    if console is None:
+        return
+    factors = db.get("factors", [])
+    valid = [f for f in factors if f.get("ic_samples", 0) >= 5]
+    valid.sort(key=lambda f: abs(f.get("ic_mean", 0)), reverse=True)
+    passed = [f for f in valid if f.get("status") == "pass"]
+
+    table = Table(title=f"因子进化 — Round {round_num}", title_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("因子名", style="bright_blue", max_width=35)
+    table.add_column("|IC|", justify="right", style="green")
+    table.add_column("ICIR", justify="right", style="yellow")
+    table.add_column("样本", justify="right", style="dim")
+    table.add_column("类别")
+
+    for i, f in enumerate(valid[:10], 1):
+        table.add_row(
+            str(i),
+            f.get("name", "?")[:32],
+            f"{abs(f.get('ic_mean', 0)):.4f}",
+            f"{f.get('icir', 0):+.2f}",
+            str(f.get("ic_samples", 0)),
+            f.get("category", "?"),
+        )
+
+    panel = Panel.fit(
+        table,
+        title=f"[bold]总因子: {len(factors)}  |  有效: {len(valid)}  |  通过: {len(passed)}  |  {elapsed:.0f}s[/]",
+        border_style="green" if passed else "blue",
+    )
+    console.clear()
+    console.print(panel)
+    if final:
+        console.print(f"\n[bold green]✅ 因子进化完成！{db['rounds']} 轮[/]")
+
+
+# ═══════════════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════════════
 
@@ -594,27 +647,28 @@ def main():
 
     # ── 进化循环（持续运行直到达到目标或轮次上限）──
     t0 = time.time()
-    target_rounds = max(args.rounds, 100)  # 最少跑 100 轮
-    max_rounds = 10000  # 安全上限
+    target_rounds = max(args.rounds, 100)
+    max_rounds = 10000
+    console = Console() if HAS_RICH else None
 
     for r in range(target_rounds):
         round_num = db["rounds"] + 1
         db = evolve_round(engine, db, daily, extra)
 
-        # 每 10 轮汇报
-        if round_num % 10 == 0:
+        if HAS_RICH and round_num % 10 == 0:
+            _render_factor_status(console, db, round_num, time.time() - t0)
+        elif round_num % 10 == 0:
             passed = [f for f in db["factors"] if f.get("status") == "pass"]
             best_ic = max((abs(f.get("ic_mean", 0)) for f in db["factors"] if f.get("ic_samples", 0) > 0), default=0)
-            elapsed = time.time() - t0
-            logger.info(f"  ⏱ Round {round_num}: {len(passed)}通过, 最佳|IC|={best_ic:.4f}, {elapsed:.0f}s")
+            logger.info(f"  ⏱ Round {round_num}: {len(passed)}通过, 最佳|IC|={best_ic:.4f}")
 
         if round_num >= max_rounds:
             break
 
     elapsed = time.time() - t0
+    if HAS_RICH:
+        _render_factor_status(console, db, db['rounds'], elapsed, final=True)
     logger.success(f"进化完成: {db['rounds']} 轮, {elapsed:.0f}s")
-    logger.info(f"规则文件: {RULES_FILE}")
-    logger.info(f"因子 DB: {FACTOR_DB}")
 
     engine.dispose()
 

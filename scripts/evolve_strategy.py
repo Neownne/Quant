@@ -18,10 +18,8 @@ from __future__ import annotations
 
 import sys, os, json, argparse, time, hashlib, random
 from copy import deepcopy
-from dataclasses import dataclass, field
-from datetime import date, timedelta
-from collections import defaultdict
-from itertools import product as cartesian_product
+from dataclasses import dataclass
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -30,6 +28,18 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
+
+# ── 可视化（可选）──
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.live import Live
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+    from rich.panel import Panel
+    from rich.layout import Layout
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 # ── 路径 ──
 STRATEGY_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -228,9 +238,18 @@ class StrategyGenome:
 # 适应度评估
 # ══════════════════════════════════════════════════════════════════════
 
-def compute_features_for_signals(signals_df, daily_df):
+def compute_features_for_signals(signals_df, daily_df, extra_df=None):
     """为每个信号行预计算所有可能用到的特征。"""
     daily_df = daily_df.sort_values(['code', 'trade_date']).copy()
+
+    # 合并市值数据
+    if extra_df is not None and not extra_df.empty:
+        daily_df = daily_df.merge(
+            extra_df[['code', 'trade_date', 'market_cap']],
+            on=['code', 'trade_date'], how='left')
+        daily_df['mcap'] = daily_df['market_cap'].fillna(0)
+    else:
+        daily_df['mcap'] = 0.0
 
     # 分组预计算
     daily_df['ret'] = daily_df.groupby('code')['close'].pct_change()
@@ -300,7 +319,10 @@ def compute_features_for_signals(signals_df, daily_df):
         is_lu_day = sig_ret >= 0.095
 
         # 新特征
-        amplitude = float((today['high'] - today['low']) / today.get('prev_close', today['close'] or 1)
+        prev_c = today.get('prev_close', np.nan)
+        if pd.isna(prev_c) or prev_c <= 0:
+            prev_c = today['close'] if pd.notna(today['close']) and today['close'] > 0 else 1.0
+        amplitude = float((today['high'] - today['low']) / prev_c
                          ) if pd.notna(today.get('high')) and pd.notna(today.get('low')) else 0.50
         seal_quality = float(today['close'] / today['high']) if (pd.notna(today.get('high'))
                          and today['high'] > 0) else 0.0
@@ -314,7 +336,7 @@ def compute_features_for_signals(signals_df, daily_df):
         # 连板天数
         lu_streak = 0
         for _, pr in pre.iloc[::-1].iterrows():
-            if pr.get('ret', 0) and pr['ret'] >= 0.095:
+            if pd.notna(pr.get('ret')) and pr['ret'] >= 0.095:
                 lu_streak += 1
             else:
                 break
@@ -332,6 +354,7 @@ def compute_features_for_signals(signals_df, daily_df):
         ret_10d = fwd.iloc[min(9, len(fwd)-1)]['close'] / sig_close - 1
         ret_20d = fwd.iloc[min(19, len(fwd)-1)]['close'] / sig_close - 1
 
+        mcap_val = float(today.get('market_cap', 0)) if pd.notna(today.get('market_cap')) else 0.0
         features.append({
             'code': code, 'date': sig_date, 'score': score,
             'low_vol_streak': low_vol_streak,
@@ -340,7 +363,7 @@ def compute_features_for_signals(signals_df, daily_df):
             'ma_deviation': ma_deviation,
             'is_lu_day': is_lu_day, 'sig_ret': sig_ret,
             'amplitude': amplitude, 'seal_quality': seal_quality,
-            'gap_up': gap_up, 'vol_ratio': vol_ratio,
+            'gap_up': gap_up, 'vol_ratio': vol_ratio, 'mcap': mcap_val,
             'ret_5d': ret_5d, 'ret_10d': ret_10d, 'ret_20d': ret_20d,
         })
 
@@ -381,9 +404,9 @@ def evaluate_genome(genome: StrategyGenome, feats_df: pd.DataFrame) -> dict:
     if genome.ma_deviation_max < 0.50:
         mask &= df['ma_deviation'] <= genome.ma_deviation_max
     if genome.mcap_min > 0:
-        mask &= df['mcap'] >= genome.mcap_min if 'mcap' in df.columns else True
+        mask &= df['mcap'] >= genome.mcap_min
     if genome.mcap_max < float('inf'):
-        mask &= df['mcap'] <= genome.mcap_max if 'mcap' in df.columns else True
+        mask &= df['mcap'] <= genome.mcap_max
     if genome.require_lu_day:
         mask &= df['is_lu_day'] == True
     if genome.sig_ret_min > -0.10:
@@ -642,7 +665,6 @@ def evolve_round(db: dict, feats_df: pd.DataFrame, round_num: int,
 
     # 收敛检测
     if len(valid_variants) >= 10:
-        recent_best = [v.get('fitness', 0) for v in valid_variants[:5]]
         prev_best = db.get('prev_best_fitness', 0)
         best_now = valid_variants[0].get('fitness', 0) if valid_variants else 0
 
@@ -772,6 +794,63 @@ def evolve_round(db: dict, feats_df: pd.DataFrame, round_num: int,
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 可视化
+# ══════════════════════════════════════════════════════════════════════
+
+def _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=False):
+    """渲染进化状态面板。"""
+    if console is None:
+        return
+
+    valid = [v for v in db.get('variants', []) if v.get('n', 0) >= 30]
+    valid = sorted(valid, key=lambda v: v.get('win_rate_10d', 0), reverse=True)[:10]
+    stag = db.get('stagnation_counter', 0)
+
+    # 进度条
+    progress_pct = min(best_wr / target_wr, 1.0) if target_wr > 0 else 0
+    bar_width = 40
+    filled = int(bar_width * progress_pct)
+    bar = "█" * filled + "░" * (bar_width - filled)
+
+    # 构建表格
+    table = Table(title=f"策略进化 — Round {round_num}", title_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("胜率(10d)", justify="right", style="green")
+    table.add_column("胜率(20d)", justify="right", style="yellow")
+    table.add_column("均收益", justify="right")
+    table.add_column("样本", justify="right", style="dim")
+    table.add_column("条件", style="bright_blue", max_width=60)
+
+    for i, v in enumerate(valid[:10], 1):
+        wr10 = v.get('win_rate_10d', 0)
+        wr20 = v.get('win_rate_20d', 0)
+        avg10 = v.get('avg_ret_10d', 0)
+        n = v.get('n', 0)
+        desc = v.get('condition_desc', '?')
+        table.add_row(
+            str(i),
+            f"{wr10:.1%}",
+            f"{wr20:.1%}",
+            f"{avg10:+.1%}",
+            str(n),
+            desc[:55],
+        )
+
+    panel = Panel.fit(
+        table,
+        title=f"[bold]目标: {target_wr:.0%}  |  基线: {baseline_wr:.1%}  |  "
+              f"当前最佳: {best_wr:.1%}  |  停滞: {stag}轮  |  {elapsed:.0f}s[/]",
+        subtitle=f"进度 [{bar}] {best_wr:.1%}",
+        border_style="green" if best_wr >= target_wr else "blue",
+    )
+    console.clear()
+    console.print(panel)
+    if final:
+        console.print(f"\n[bold green]✅ 进化完成！总变体: {len(db.get('variants',[]))}, "
+                      f"有效: {len(valid)}[/]")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════
 
@@ -823,34 +902,43 @@ def main():
     daily = cache['daily']
 
     logger.info("预计算特征...")
-    feats = compute_features_for_signals(signals, daily)
+    feats = compute_features_for_signals(signals, daily, cache.get('extra'))
     logger.info(f"特征: {len(feats)} 行, {len(feats.columns)} 列")
     logger.info(f"基线胜率: {feats['ret_10d'].gt(0.05).mean():.1%} (n={len(feats)})")
 
     # ── 进化 ──
     t0 = time.time()
     target_wr = args.target
-    logger.info(f"目标胜率: {target_wr:.0%}, 基线: {feats['ret_10d'].gt(0.05).mean():.1%}")
+    baseline_wr = feats['ret_10d'].gt(0.05).mean()
+    logger.info(f"目标胜率: {target_wr:.0%}, 基线: {baseline_wr:.1%}")
 
     round_num = db.get('rounds', 0)
     best_wr = db.get('best_win_rate', 0)
-    max_rounds = 10000  # 安全上限，实际由目标胜率控制
+    max_rounds = 10000
+
+    # 可视化
+    console = Console() if HAS_RICH else None
 
     while best_wr < target_wr and round_num < max_rounds:
         round_num += 1
         db = evolve_round(db, feats, round_num)
         best_wr = db.get('best_win_rate', 0)
+        elapsed = time.time() - t0
 
-        if round_num % 10 == 0:
-            elapsed = time.time() - t0
+        if HAS_RICH and round_num % 5 == 0:
+            _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr)
+        elif round_num % 10 == 0:
             logger.info(f"  ⏱ Round {round_num}: best_wr={best_wr:.1%}, "
-                        f"total={len(db.get('variants',[]))} 变体, {elapsed:.0f}s")
+                        f"变体={len(db.get('variants',[]))}, {elapsed:.0f}s")
 
     elapsed = time.time() - t0
     if best_wr >= target_wr:
         logger.success(f"🎯 达到目标 {target_wr:.0%}！Round {round_num}, {elapsed:.0f}s")
     else:
         logger.warning(f"达到轮次上限 {max_rounds}, 最佳 {best_wr:.1%}, {elapsed:.0f}s")
+
+    if HAS_RICH:
+        _render_status(console, db, round_num, best_wr, target_wr, elapsed, baseline_wr, final=True)
 
     save_rules(db)
     save_db(db)
