@@ -460,6 +460,7 @@ def main():
                 bt = run_backtest_on_signals(
                     top5[["date", "code", "score"]], bt_df,
                     name_map=name_map, top_n=5,
+                    min_score=-999.0,  # ML分数是0-1，yaogu默认min_score=3会滤掉全部
                 )
 
                 if "error" not in bt:
