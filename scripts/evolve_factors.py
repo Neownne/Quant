@@ -136,50 +136,67 @@ def sector_neutral(df, col):
 # 模板：组合基础因子
 # ══════════════════════════════════════════════════════════════════════
 
-TEMPLATES = {
-    # ── 动量/反转 ──
-    "momentum_5d":     {"compute": lambda df: ts_rank(df, "ret_5d", 20),  "category": "动量"},
-    "momentum_20d":    {"compute": lambda df: ts_rank(df, "ret_20d", 40), "category": "动量"},
-    "reversal_1d":     {"compute": lambda df: -ts_rank(df, "ret_1d", 10), "category": "反转"},
-    "reversal_5d":     {"compute": lambda df: -ts_rank(df, "ret_5d", 20), "category": "反转"},
+# 可排序的基础列（ts_rank 的参数）
+RANKABLE_COLS = ["ret_1d", "ret_5d", "ret_20d", "vol_5d", "vol_20d",
+                 "vol_ratio", "amplitude", "seal", "gap", "ma5_dev",
+                 "ma20_dev", "ma_spread", "log_mcap", "lu_20d"]
+PERIODS = [10, 20, 40, 60, 120]
+CATEGORIES = ["动量", "反转", "波动率", "量价", "形态", "均线", "基本面", "涨停", "行业中性", "复合", "杂乱", "非线性", "组合"]
 
-    # ── 波动率 ──
-    "vol_5d":          {"compute": lambda df: -ts_rank(df, "vol_5d", 20),  "category": "波动率"},
-    "vol_20d":         {"compute": lambda df: -ts_rank(df, "vol_20d", 40), "category": "波动率"},
 
-    # ── 量价 ──
-    "vol_ratio":       {"compute": lambda df: ts_rank(df, "vol_ratio", 20),  "category": "量价"},
-    "volume_shock":    {"compute": lambda df: df["volume"] / df["volume_ma20"], "category": "量价"},
-    "turnover_ratio":  {"compute": lambda df: ts_rank(df, "turnover_ratio", 20) if "turnover_ratio" in df.columns else None, "category": "量价"},
+def make_template(name, col, period, sign=1, category="进化"):
+    """创建参数化的 ts_rank 模板。"""
+    return {
+        "name": name,
+        "col": col,
+        "period": period,
+        "sign": sign,
+        "category": category,
+        "compute": lambda df, c=col, p=period, s=sign: ts_rank(df, c, p) * s,
+    }
 
-    # ── 价格形态 ──
-    "seal_quality":    {"compute": lambda df: ts_rank(df, "seal", 20),       "category": "形态"},
-    "amplitude":       {"compute": lambda df: -ts_rank(df, "amplitude", 20), "category": "形态"},
-    "gap_momentum":    {"compute": lambda df: ts_rank(df, "gap", 20),        "category": "形态"},
 
-    # ── 均线 ──
-    "ma5_dev":         {"compute": lambda df: ts_rank(df, "ma5_dev", 20),   "category": "均线"},
-    "ma20_dev":        {"compute": lambda df: ts_rank(df, "ma20_dev", 40),  "category": "均线"},
-    "ma_spread":       {"compute": lambda df: ts_rank(df, "ma_spread", 20), "category": "均线"},
+# 种子模板池
+BASE_TEMPLATES = [
+    make_template("momentum_5d", "ret_5d", 20, 1, "动量"),
+    make_template("momentum_20d", "ret_20d", 40, 1, "动量"),
+    make_template("reversal_1d", "ret_1d", 10, -1, "反转"),
+    make_template("reversal_5d", "ret_5d", 20, -1, "反转"),
+    make_template("vol_5d", "vol_5d", 20, -1, "波动率"),
+    make_template("vol_20d", "vol_20d", 40, -1, "波动率"),
+    make_template("vol_ratio", "vol_ratio", 20, 1, "量价"),
+    make_template("seal_quality", "seal", 20, 1, "形态"),
+    make_template("amplitude", "amplitude", 20, -1, "形态"),
+    make_template("gap_momentum", "gap", 20, 1, "形态"),
+    make_template("ma5_dev", "ma5_dev", 20, 1, "均线"),
+    make_template("ma20_dev", "ma20_dev", 40, 1, "均线"),
+    make_template("ma_spread", "ma_spread", 20, 1, "均线"),
+    make_template("log_mcap", "log_mcap", 60, 1, "基本面"),
+    make_template("lu_intensity", "lu_20d", 40, 1, "涨停"),
+]
 
-    # ── 基本面 ──
-    "log_mcap":        {"compute": lambda df: ts_rank(df, "log_mcap", 60) if df["log_mcap"].notna().any() else None, "category": "基本面"},
-
-    # ── 涨停相关 ──
-    "lu_intensity":    {"compute": lambda df: ts_rank(df, "lu_20d", 40),     "category": "涨停"},
-    "lu_quality":      {"compute": lambda df: ts_rank(df, "seal", 10) * df["is_lu"], "category": "涨停"},
-
-    # ── 行业中性 ──
-    "sector_neutral_mom": {"compute": lambda df: sector_neutral(df, df["ret_5d"]), "category": "行业中性"},
-    "sector_neutral_vol": {"compute": lambda df: sector_neutral(df, df["vol_5d"]), "category": "行业中性"},
-
-    # ── 复合因子 ──
-    "seal_x_streak":   {"compute": lambda df: df["seal"] * df.groupby("code")["is_lu"].transform(
-        lambda x: x[::-1].cumprod()[::-1].where(lambda y: y > 0, 0).rolling(20, min_periods=1).sum()), "category": "复合"},
-    "quality_combo":   {"compute": lambda df: ts_rank(df, "seal", 20) * 0.4
-                        - ts_rank(df, "amplitude", 20) * 0.3
-                        + ts_rank(df, "ret_5d", 20) * 0.3, "category": "复合"},
+# 特殊模板（非 ts_rank）
+SPECIAL_TEMPLATES = {
+    "volume_shock":   {"compute": lambda df: df["volume"] / df["volume_ma20"], "category": "量价"},
+    "turnover_ratio": {"compute": lambda df: ts_rank(df, "turnover_ratio", 20) if "turnover_ratio" in df.columns else None, "category": "量价"},
+    "lu_quality":     {"compute": lambda df: ts_rank(df, "seal", 10) * df["is_lu"], "category": "涨停"},
+    "sector_n_mom":   {"compute": lambda df: sector_neutral(df, df["ret_5d"]), "category": "行业中性"},
+    "sector_n_vol":   {"compute": lambda df: sector_neutral(df, df["vol_5d"]), "category": "行业中性"},
 }
+
+
+def get_active_templates(pool):
+    """获取当前活跃的模板列表（基础+特殊+pool中的进化模板）。"""
+    result = {}
+    # 基础
+    for t in BASE_TEMPLATES:
+        result[t["name"]] = t
+    # 特殊
+    result.update(SPECIAL_TEMPLATES)
+    # 进化池
+    for t in pool:
+        result[t["name"]] = t
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -194,37 +211,35 @@ def compute_rank_ic(factor_values, forward_returns):
     return spearmanr(factor_values.loc[common], forward_returns.loc[common])[0]
 
 
-def validate_all(df, lookback_days=60, min_stocks=50):
-    """对所有模板一次验证。采样最近 lookback_days 个交易日的 IC。"""
+def validate_all(df, pool, lookback_days=60, min_stocks=50):
+    """对活跃模板 + 进化池模板验证 IC。"""
     df = df.sort_values(["code", "trade_date"])
     all_dates = sorted(df["trade_date"].unique())
     if len(all_dates) < lookback_days + 10:
-        return {}
+        return {}, pool
 
-    # 采样最近 trading days
     eligible = all_dates[lookback_days:]
     step = max(1, len(eligible) // 20)
-    validate_dates = eligible[::step][-20:]  # 最多20个验证点
+    validate_dates = eligible[::step][-20:]
 
-    # 预计算前向收益
     df["fwd_ret"] = df.groupby("code")["close"].pct_change().shift(-1)
-
+    templates = get_active_templates(pool)
     results = {}
-    n_total = len(TEMPLATES)
 
-    for ti, (name, tmpl) in enumerate(TEMPLATES.items()):
-        logger.info(f"  [{ti+1}/{n_total}] {name} ...")
+    for ti, (name, tmpl) in enumerate(templates.items()):
+        logger.info(f"  [{ti+1}/{len(templates)}] {name} ...")
 
         try:
             factor_val = tmpl["compute"](df)
         except Exception as e:
             results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": 0,
-                            "status": "compute_error", "error": str(e)[:80]}
+                            "status": "compute_error", "error": str(e)[:80],
+                            "category": tmpl.get("category", "?")}
             continue
 
         if factor_val is None:
             results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": 0,
-                            "status": "no_data"}
+                            "status": "no_data", "category": tmpl.get("category", "?")}
             continue
 
         ic_list = []
@@ -233,30 +248,144 @@ def validate_all(df, lookback_days=60, min_stocks=50):
             fv = factor_val[mask].dropna()
             fr = df.loc[mask, "fwd_ret"].dropna()
             common = fv.index.intersection(fr.index)
-            if len(common) < min_stocks:
-                continue
+            if len(common) < min_stocks: continue
             ic = compute_rank_ic(fv.loc[common], fr.loc[common])
-            if not np.isnan(ic):
-                ic_list.append(ic)
+            if not np.isnan(ic): ic_list.append(ic)
 
         if len(ic_list) >= 5:
             ic_mean = np.mean(ic_list)
             ic_std = np.std(ic_list)
             icir = ic_mean / ic_std if ic_std > 0 else 0
             status = "pass" if abs(ic_mean) > 0.01 and abs(icir) > 0.3 else "fail"
-            results[name] = {
-                "ic_mean": round(float(ic_mean), 4),
-                "icir": round(float(icir), 4),
-                "ic_samples": len(ic_list),
-                "status": status,
-                "category": tmpl.get("category", "?"),
-            }
+            results[name] = {"ic_mean": round(float(ic_mean), 4),
+                            "icir": round(float(icir), 4),
+                            "ic_samples": len(ic_list), "status": status,
+                            "category": tmpl.get("category", "?")}
         else:
             results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": len(ic_list),
                             "status": "insufficient_data",
                             "category": tmpl.get("category", "?")}
 
-    return results
+    # ── 因子组合（基于本轮验证结果）──
+    valid = [(n, r) for n, r in results.items() if r.get("ic_samples", 0) >= 5]
+    valid.sort(key=lambda x: abs(x[1].get("ic_mean", 0)), reverse=True)
+    top = [n for n, _ in valid[:5]]
+
+    if len(top) >= 2:
+        for ci in range(3):
+            sel = random.sample(top, 2)
+            name = f"cross_{sel[0][:6]}x{sel[1][:6]}_r{random.randint(0,99)}"
+            n1, n2 = sel[0], sel[1]
+            # 需要实际计算值来做交叉积
+            try:
+                v1 = templates[n1]["compute"](df)
+                v2 = templates[n2]["compute"](df)
+                if v1 is not None and v2 is not None:
+                    combo_val = _safe_mul(v1, v2)
+                    ic_list = []
+                    for td in validate_dates:
+                        mask = df["trade_date"] == td
+                        fv = combo_val[mask].dropna()
+                        fr = df.loc[mask, "fwd_ret"].dropna()
+                        common = fv.index.intersection(fr.index)
+                        if len(common) < min_stocks: continue
+                        ic = compute_rank_ic(fv.loc[common], fr.loc[common])
+                        if not np.isnan(ic): ic_list.append(ic)
+                    if len(ic_list) >= 5:
+                        ic_mean = np.mean(ic_list)
+                        ic_std = np.std(ic_list)
+                        icir = ic_mean / ic_std if ic_std > 0 else 0
+                        results[name] = {"ic_mean": round(float(ic_mean), 4),
+                                        "icir": round(float(icir), 4),
+                                        "ic_samples": len(ic_list),
+                                        "status": "pass" if abs(ic_mean)>0.01 else "fail",
+                                        "category": "交叉积"}
+            except Exception:
+                pass
+
+    return results, pool
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 模板进化
+# ══════════════════════════════════════════════════════════════════════
+
+def mutate_template(tmpl):
+    """变异一个模板的参数。"""
+    new = dict(tmpl)
+    if "col" in new:
+        if random.random() < 0.4:
+            new["col"] = random.choice(RANKABLE_COLS)
+        if random.random() < 0.5:
+            delta = random.choice([-1, 1, -2, 2]) * random.choice([10, 20, 40])
+            new["period"] = max(5, min(240, new.get("period", 20) + delta))
+    if random.random() < 0.2 and "sign" in new:
+        new["sign"] = -new.get("sign", 1)
+    if random.random() < 0.3:
+        new["category"] = random.choice(CATEGORIES[:6])
+    new["name"] = f"evo_{new.get('col','?')[:8]}_p{new.get('period',20)}_s{new.get('sign',1)}_g{random.randint(0,999)}"
+    if "compute" in new:
+        del new["compute"]  # 重新生成
+    new["compute"] = lambda df, c=new["col"], p=new["period"], s=new.get("sign", 1): ts_rank(df, c, p) * s
+    return new
+
+
+def crossover_templates(t1, t2):
+    """两个模板交叉。"""
+    child = {}
+    for key in ["col", "period", "sign", "category"]:
+        parent = random.choice([t1, t2])
+        if key in parent:
+            child[key] = parent[key]
+    child["name"] = f"evo_x_{child.get('col','?')[:6]}_p{child.get('period',20)}_g{random.randint(0,999)}"
+    child["compute"] = lambda df, c=child["col"], p=child["period"], s=child.get("sign", 1): ts_rank(df, c, p) * s
+    return child
+
+
+def evolve_pool(pool, results, max_pool=30):
+    """根据 IC 结果进化模板池：保留高分 + 变异 + 交叉 + 随机注入。"""
+    scored = []
+    for t in pool:
+        r = results.get(t["name"], {})
+        ic = abs(r.get("ic_mean", 0))
+        scored.append((ic, t))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # 保留 top 10
+    new_pool = [t for _, t in scored[:10]]
+
+    # 变异 top 5
+    for _, t in scored[:5]:
+        for _ in range(2):
+            new_pool.append(mutate_template(t))
+
+    # 交叉 top 5
+    top5 = [t for _, t in scored[:5]]
+    for i in range(min(3, len(top5))):
+        for j in range(i+1, min(5, len(top5))):
+            new_pool.append(crossover_templates(top5[i], top5[j]))
+
+    # 随机注入新模板
+    for _ in range(5):
+        col = random.choice(RANKABLE_COLS)
+        period = random.choice(PERIODS)
+        sign = random.choice([1, -1])
+        new_t = make_template(
+            f"rnd_{col[:6]}_p{period}_s{sign}_g{random.randint(0,999)}",
+            col, period, sign, random.choice(CATEGORIES[:6]))
+        new_pool.append(new_t)
+
+    # 去重 + 限制数量
+    seen = set()
+    unique = []
+    for t in new_pool:
+        h = f"{t.get('col','')}_{t.get('period','')}_{t.get('sign','')}"
+        if h not in seen:
+            seen.add(h)
+            unique.append(t)
+
+    logger.info(f"  模板池: {len(pool)}→{len(unique)} (存{len(scored[:10])}+变异+交叉+随机)")
+    return unique[:max_pool]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -516,46 +645,40 @@ def main():
     t0 = time.time()
     console = Console() if HAS_RICH else None
 
+    pool = []  # 进化模板池
+
     for r in range(args.rounds):
         round_num = db["rounds"] + 1
         logger.info(f"═══ Round {round_num} ═══")
 
-        results = validate_all(df)
+        results, pool = validate_all(df, pool)
 
-        # 自动生成组合因子
-        combos = generate_combos(results, df)
-        if combos:
-            # 临时加入模板列表
-            for name, cfg in combos.items():
-                TEMPLATES[name] = cfg
-            combo_results = validate_all(df)  # 只验证新组合
-            results.update(combo_results)
-            # 清理
-            for name in combos:
-                del TEMPLATES[name]
+        # 进化模板池
+        if round_num >= 1:
+            pool = evolve_pool(pool, results)
 
-        entry = {"round": round_num, "date": str(pd.Timestamp.now())[:19], "results": results}
+        entry = {"round": round_num, "date": str(pd.Timestamp.now())[:19],
+                 "results": results, "pool_size": len(pool)}
         db["history"].append(entry)
         db["rounds"] = round_num
 
         passed = sum(1 for r in results.values() if r.get("status") == "pass")
-        valid = sum(1 for r in results.values() if r.get("ic_samples", 0) >= 5)
+        valid_cnt = sum(1 for r in results.values() if r.get("ic_samples", 0) >= 5)
         best_ic = max((abs(r.get("ic_mean", 0)) for r in results.values()
                        if r.get("ic_samples", 0) >= 5), default=0)
 
-        # 提取规则
-        rules = extract_rules(db)
-        if rules:
-            with open(RULES_FILE, "w") as f:
-                for k, v in sorted(rules.items()):
-                    f.write(f"- **{k}**: {v}\n")
-
+        if round_num % 5 == 0:
+            rules = extract_rules(db)
+            if rules:
+                with open(RULES_FILE, "w") as f:
+                    for k, v in sorted(rules.items()):
+                        f.write(f"- **{k}**: {v}\n")
         save_db(db)
 
         elapsed = time.time() - t0
-        logger.info(f"  通过: {passed}/{valid}, 最佳|IC|: {best_ic:.4f}, {elapsed:.0f}s")
+        logger.info(f"  通过: {passed}/{valid_cnt}, 最佳|IC|: {best_ic:.4f}, 池: {len(pool)}, {elapsed:.0f}s")
 
-        if HAS_RICH and round_num % 5 == 0:
+        if HAS_RICH and round_num % 10 == 0:
             panel = _render_panel(db, round_num, elapsed)
             console.print(panel)
 
