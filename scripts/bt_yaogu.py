@@ -119,10 +119,23 @@ def run_backtest(args):
                     continue
                 r = ndf.loc[code]
                 px, prev_c = r["close"], r.get("prev_close")
+                open_px, high_px = r.get("open"), r.get("high")
                 if pd.notna(prev_c) and prev_c > 0:
-                    if TradingConfig.is_at_limit_up(px, prev_c, code):
+                    is_lu = TradingConfig.is_at_limit_up(px, prev_c, code)
+                    is_ld = TradingConfig.is_at_limit_down(px, prev_c, code)
+                    if is_lu:
+                        # 一字板检测：开盘价≈涨停价 且 最高价≈涨停价 → 全日封死，无法买入
+                        limit_up_price = TradingConfig.calc_limit_price(prev_c, code, is_up=True)
+                        is_yiziban = (
+                            pd.notna(open_px) and open_px > 0 and
+                            pd.notna(high_px) and high_px > 0 and
+                            abs(open_px - limit_up_price) / limit_up_price < 0.001 and
+                            abs(high_px - limit_up_price) / limit_up_price < 0.001
+                        )
+                        if is_yiziban:
+                            logger.debug(f"  {code} {nd.date()} 一字板(open={open_px:.2f}, high={high_px:.2f}, limit={limit_up_price:.2f})")
                         continue
-                    if TradingConfig.is_at_limit_down(px, prev_c, code):
+                    if is_ld:
                         continue
                 buy_signals.append({
                     "date": nd, "code": code, "score": int(s["score"]),
@@ -384,9 +397,23 @@ def run_backtest_on_signals(sig_df, daily_df, name_map, top_n=5, cash=1_000_000,
                 if ndf is None or code not in ndf.index: continue
                 r = ndf.loc[code]
                 px, prev_c = r["close"], r.get("prev_close")
+                open_px, high_px = r.get("open"), r.get("high")
                 if pd.notna(prev_c) and prev_c > 0:
-                    if TradingConfig.is_at_limit_up(px, prev_c, code): continue
-                    if TradingConfig.is_at_limit_down(px, prev_c, code): continue
+                    is_lu = TradingConfig.is_at_limit_up(px, prev_c, code)
+                    is_ld = TradingConfig.is_at_limit_down(px, prev_c, code)
+                    if is_lu:
+                        limit_up_price = TradingConfig.calc_limit_price(prev_c, code, is_up=True)
+                        is_yiziban = (
+                            pd.notna(open_px) and open_px > 0 and
+                            pd.notna(high_px) and high_px > 0 and
+                            abs(open_px - limit_up_price) / limit_up_price < 0.001 and
+                            abs(high_px - limit_up_price) / limit_up_price < 0.001
+                        )
+                        if is_yiziban:
+                            logger.debug(f"  {code} {nd.date()} 一字板(open={open_px:.2f}, high={high_px:.2f}, limit={limit_up_price:.2f})")
+                        continue
+                    if is_ld:
+                        continue
                 buy_signals.append({
                     "date": nd, "code": code, "score": int(s["score"]),
                     "close": float(px), "signal_date": sig_date, "wait_days": offset,
