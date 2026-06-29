@@ -309,12 +309,33 @@ def main():
 
     # ── Build leaf pool ──
     leaf_pool = list(RAW_LEAVES)
-    # NOTE: @ALL_FACTORS references could be added here but require
-    # pre-computing all 123 factor values as df columns. Skipping for now
-    # to keep the initial implementation fast and simple.
-    # TODO: add a precompute pass when speed is acceptable.
 
-    print(f"[2/4] 叶子池: {len(leaf_pool)} 原始列")
+    # Precompute key @ALL_FACTORS as columns for GP leaves
+    print("[2/4] 叶子池: 预计算因子...")
+    try:
+        from factors.engine import FactorEngine
+        KEY_FACTORS = [
+            "lu_streak", "lu_seal_quality", "lu_vol_intensity", "lu_amplitude",
+            "lu_is_yiziban", "lu_volume_climax", "lu_streak_quality",
+            "lu_count_5d", "lu_count_20d", "lu_days_since_last",
+            "log_mcap", "turnover_mom", "gap_ratio", "intra_vol",
+            "rev_5", "rev_20", "mom_20", "mom_60",
+            "rsi_14", "bb_position", "atr_14", "mfi_14", "cmf_20",
+        ]
+        engine = FactorEngine(KEY_FACTORS)
+        # Compute once for train, once for backtest
+        train_factors = engine.compute(train_df)
+        bt_factors = engine.compute(bt_df)
+        for fc in KEY_FACTORS:
+            col_name = f"@{fc}"
+            if fc in train_factors.columns:
+                train_df[col_name] = train_factors[fc].values
+            if fc in bt_factors.columns:
+                bt_df[col_name] = bt_factors[fc].values
+        leaf_pool.extend(["@" + f for f in KEY_FACTORS])
+        print(f"   叶子池: {len(leaf_pool)} ({len(RAW_LEAVES)} 原始列 + {len(KEY_FACTORS)} @因子)")
+    except Exception as e:
+        print(f"   叶子池: {len(leaf_pool)} 原始列 (预计算失败: {e})")
 
     # ── Initialize population ──
     POP_SIZE = 50
