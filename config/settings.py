@@ -25,6 +25,18 @@ class DBConfig:
         """SQLAlchemy 连接字符串"""
         return f"postgresql+psycopg2://{cls.USER}:{cls.PASSWORD}@{cls.HOST}:{cls.PORT}/{cls.NAME}"
 
+    @classmethod
+    def create_engine(cls) -> "Engine":
+        """创建 SQLAlchemy 引擎实例（连接池）。"""
+        from sqlalchemy import create_engine as _create_engine
+        return _create_engine(
+            cls.url(),
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            connect_args={"options": "-c timezone=Asia/Shanghai"},
+        )
+
 
 class DataConfig:
     """数据同步相关参数"""
