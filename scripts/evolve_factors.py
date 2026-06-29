@@ -852,7 +852,7 @@ def _render_panel(db, round_num, elapsed):
     return Panel(
         table,
         title=f"[bold]通过: {sum(1 for _,r in valid if r.get('status')=='pass')}/{len(valid)}  |  最佳胜率: {best_wr:.1%}  |  {elapsed:.0f}s[/]",
-        border_style="green" if passed else "blue",
+        border_style="green" if best_wr >= 0.50 else "blue",
     )
 
 
