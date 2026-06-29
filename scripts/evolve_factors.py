@@ -316,11 +316,11 @@ def main():
         from factors.engine import FactorEngine
         KEY_FACTORS = [
             "lu_streak", "lu_seal_quality", "lu_vol_intensity", "lu_amplitude",
-            "lu_is_yiziban", "lu_volume_climax", "lu_streak_quality",
+            "lu_volume_climax", "lu_streak_quality",
             "lu_count_5d", "lu_count_20d", "lu_days_since_last",
             "log_mcap", "turnover_mom", "gap_ratio", "intra_vol",
             "rev_5", "rev_20", "mom_20", "mom_60",
-            "rsi_14", "bb_position", "atr_14", "mfi_14", "cmf_20",
+            "rsi_14", "bb_position", "atr_14",
         ]
         engine = FactorEngine(KEY_FACTORS)
         # Compute once for train, once for backtest
