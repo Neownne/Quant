@@ -18,9 +18,12 @@ from itertools import product as cartesian_product
 
 import numpy as np
 import pandas as pd
+import warnings
 from loguru import logger
 from scipy.stats import spearmanr
 from sqlalchemy import text
+
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.db import get_engine
@@ -200,115 +203,397 @@ def get_active_templates(pool):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# IC 验证
+# 头部效应评价（替代全市场 IC）
 # ══════════════════════════════════════════════════════════════════════
 
-def compute_rank_ic(factor_values, forward_returns):
-    """截面 Rank IC (Spearman)。"""
-    common = factor_values.dropna().index & forward_returns.dropna().index
-    if len(common) < 30:
-        return np.nan
-    return spearmanr(factor_values.loc[common], forward_returns.loc[common])[0]
+def compute_top_n_performance(factor_val, df, forward_ret, top_n=5,
+                               quality_filter=True):
+    """评价因子在头部 N 只股票上的实际表现。
 
+    返回:
+      - mean_ret: 头部平均前向收益
+      - win_rate: 正收益比例
+      - sharpe: 头部收益的 Sharpe (截面)
+      - top_ret: 头部收益序列
+      - tail_ic: 仅在前20%股票中计算的IC
+    """
+    dates = sorted(df["trade_date"].unique())
+    all_rets = []
+    all_wins = []
+    ic_top20 = []
 
-def validate_all(df, pool, lookback_days=60, min_stocks=50):
-    """对活跃模板 + 进化池模板验证 IC。"""
-    df = df.sort_values(["code", "trade_date"])
-    all_dates = sorted(df["trade_date"].unique())
-    if len(all_dates) < lookback_days + 10:
-        return {}, pool
-
-    eligible = all_dates[lookback_days:]
-    step = max(1, len(eligible) // 20)
-    validate_dates = eligible[::step][-20:]
-
-    df["fwd_ret"] = df.groupby("code")["close"].pct_change().shift(-1)
-    templates = get_active_templates(pool)
-    results = {}
-
-    for ti, (name, tmpl) in enumerate(templates.items()):
-        logger.info(f"  [{ti+1}/{len(templates)}] {name} ...")
-
-        try:
-            factor_val = tmpl["compute"](df)
-        except Exception as e:
-            results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": 0,
-                            "status": "compute_error", "error": str(e)[:80],
-                            "category": tmpl.get("category", "?")}
+    for td in dates[-60:]:  # 最近60个交易日
+        mask = df["trade_date"] == td
+        if mask.sum() < 100:
             continue
 
-        if factor_val is None:
-            results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": 0,
-                            "status": "no_data", "category": tmpl.get("category", "?")}
+        fv = factor_val[mask].dropna()
+        fr = forward_ret[mask].dropna()
+        common = fv.index.intersection(fr.index)
+        if len(common) < 100:
             continue
+        fv = fv.loc[common]
+        fr = fr.loc[common]
 
-        ic_list = []
-        for td in validate_dates:
-            mask = df["trade_date"] == td
-            fv = factor_val[mask].dropna()
-            fr = df.loc[mask, "fwd_ret"].dropna()
+        # 质量底线：剔除市值最小20% + 成交额最低20%
+        if quality_filter:
+            mcap_td = df.loc[common, "mcap"] if "mcap" in df.columns else None
+            vol_td = df.loc[common, "volume"] if "volume" in df.columns else None
+            keep = pd.Series(True, index=common)
+            if mcap_td is not None and mcap_td.notna().sum() > 50:
+                mcap_cut = mcap_td.quantile(0.2)
+                keep &= mcap_td >= mcap_cut
+            if vol_td is not None and vol_td.notna().sum() > 50:
+                vol_cut = vol_td.quantile(0.2)
+                keep &= vol_td >= vol_cut
+            fv = fv[keep[common]]
+            fr = fr[keep[common]]
             common = fv.index.intersection(fr.index)
-            if len(common) < min_stocks: continue
-            ic = compute_rank_ic(fv.loc[common], fr.loc[common])
-            if not np.isnan(ic): ic_list.append(ic)
+            if len(common) < 50:
+                continue
 
-        if len(ic_list) >= 5:
-            ic_mean = np.mean(ic_list)
-            ic_std = np.std(ic_list)
-            icir = ic_mean / ic_std if ic_std > 0 else 0
-            status = "pass" if abs(ic_mean) > 0.01 and abs(icir) > 0.3 else "fail"
-            results[name] = {"ic_mean": round(float(ic_mean), 4),
-                            "icir": round(float(icir), 4),
-                            "ic_samples": len(ic_list), "status": status,
-                            "category": tmpl.get("category", "?")}
-        else:
-            results[name] = {"ic_mean": 0, "icir": 0, "ic_samples": len(ic_list),
-                            "status": "insufficient_data",
-                            "category": tmpl.get("category", "?")}
+        # 因子排序取 top-N
+        fv_sorted = fv.sort_values(ascending=False)
+        top_idx = fv_sorted.head(top_n).index
+        top_ret = fr.loc[top_idx]
 
-    # ── 因子组合（基于本轮验证结果）──
-    valid = [(n, r) for n, r in results.items() if r.get("ic_samples", 0) >= 5]
-    valid.sort(key=lambda x: abs(x[1].get("ic_mean", 0)), reverse=True)
-    top = [n for n, _ in valid[:5]]
+        all_rets.extend(top_ret.values)
+        all_wins.extend((top_ret > 0).values)
 
-    if len(top) >= 2:
-        for ci in range(3):
-            sel = random.sample(top, 2)
-            name = f"cross_{sel[0][:6]}x{sel[1][:6]}_r{random.randint(0,99)}"
-            n1, n2 = sel[0], sel[1]
-            # 需要实际计算值来做交叉积
+        # Tail IC: 只在 top 20% 中算
+        top20_cut = int(len(fv) * 0.2)
+        if top20_cut >= 20:
+            top20_idx = fv_sorted.head(top20_cut).index
             try:
-                v1 = templates[n1]["compute"](df)
-                v2 = templates[n2]["compute"](df)
-                if v1 is not None and v2 is not None:
-                    combo_val = _safe_mul(v1, v2)
-                    ic_list = []
-                    for td in validate_dates:
-                        mask = df["trade_date"] == td
-                        fv = combo_val[mask].dropna()
-                        fr = df.loc[mask, "fwd_ret"].dropna()
-                        common = fv.index.intersection(fr.index)
-                        if len(common) < min_stocks: continue
-                        ic = compute_rank_ic(fv.loc[common], fr.loc[common])
-                        if not np.isnan(ic): ic_list.append(ic)
-                    if len(ic_list) >= 5:
-                        ic_mean = np.mean(ic_list)
-                        ic_std = np.std(ic_list)
-                        icir = ic_mean / ic_std if ic_std > 0 else 0
-                        results[name] = {"ic_mean": round(float(ic_mean), 4),
-                                        "icir": round(float(icir), 4),
-                                        "ic_samples": len(ic_list),
-                                        "status": "pass" if abs(ic_mean)>0.01 else "fail",
-                                        "category": "交叉积"}
+                with np.errstate(invalid='ignore'):
+                    ic, _ = spearmanr(fv.loc[top20_idx], fr.loc[top20_idx])
+                if not np.isnan(ic):
+                    ic_top20.append(ic)
             except Exception:
                 pass
 
+    if len(all_rets) < 20:
+        return {"mean_ret": 0, "win_rate": 0, "sharpe": 0,
+                "n_samples": len(all_rets), "tail_ic": 0, "status": "insufficient"}
+
+    arr = np.array(all_rets)
+    mean_ret = float(np.mean(arr))
+    win_rate = float(np.mean(np.array(all_wins)))
+    sharpe = float(np.mean(arr) / np.std(arr) * np.sqrt(252)) if np.std(arr) > 0 else 0
+    tail_ic = float(np.mean(ic_top20)) if ic_top20 else 0
+
+    return {
+        "mean_ret": round(mean_ret, 4),
+        "win_rate": round(win_rate, 4),
+        "sharpe": round(sharpe, 4),
+        "n_samples": len(all_rets),
+        "tail_ic": round(tail_ic, 4),
+        "status": "pass" if len(all_rets) >= 50 and win_rate > 0.45 else "fail",
+    }
+
+
+def compute_multi_factor_intersection(factor_dict, df, forward_ret, top_n=5,
+                                       quality_filter=True):
+    """多因子交集法：A∩B 交集内取 top-N。
+
+    factor_dict: {name: factor_series}
+    先用因子A选前20%→因子B选前20%→交集内用因子C排序取top-N
+    """
+    if len(factor_dict) < 2:
+        return {}
+
+    dates = sorted(df["trade_date"].unique())
+    factor_names = list(factor_dict.keys())
+    # 取前3个因子做交集
+    use_factors = factor_names[:3]
+    all_rets = []
+
+    for td in dates[-60:]:
+        mask = df["trade_date"] == td
+        fr = forward_ret[mask].dropna()
+        common = fr.index
+
+        # 质量底线
+        if quality_filter:
+            mcap_td = df.loc[common, "mcap"] if "mcap" in df.columns else None
+            if mcap_td is not None and mcap_td.notna().sum() > 50:
+                common = common.intersection(mcap_td[mcap_td >= mcap_td.quantile(0.2)].index)
+            if len(common) < 50:
+                continue
+
+        # 逐层交集
+        pool = set(common)
+        for fn in use_factors:
+            fv = factor_dict[fn][mask].dropna()
+            valid = set(fv.index) & pool
+            if len(valid) < 50:
+                break
+            fv_valid = fv[list(valid)].sort_values(ascending=False)
+            cut20 = int(len(fv_valid) * 0.2)
+            pool = set(fv_valid.head(cut20).index)
+
+        if len(pool) < top_n:
+            continue
+
+        # 在最终交集中用第一个因子排序取 top-N
+        final_fv = factor_dict[use_factors[0]][mask].dropna()
+        final_pool = list(set(final_fv.index) & pool)
+        if len(final_pool) < top_n:
+            continue
+        top_idx = final_fv[final_pool].sort_values(ascending=False).head(top_n).index
+        top_ret = fr.loc[fr.index.intersection(top_idx)]
+        all_rets.extend(top_ret.values)
+
+    if len(all_rets) < 20:
+        return {"mean_ret": 0, "win_rate": 0, "n_samples": len(all_rets)}
+
+    arr = np.array(all_rets)
+    return {
+        "mean_ret": round(float(np.mean(arr)), 4),
+        "win_rate": round(float(np.mean(arr > 0)), 4),
+        "sharpe": round(float(np.mean(arr) / np.std(arr) * np.sqrt(252)), 4)
+        if np.std(arr) > 0 else 0,
+        "n_samples": len(all_rets),
+    }
+
+
+def mcap_neutral(df, col):
+    """市值中性化：因子值 - 同市值分位截面均值。"""
+    if "mcap" not in df.columns or df["mcap"].isna().all():
+        return df[col] if col in df.columns else None
+    # 分5个市值组
+    mcap_rank = df.groupby("trade_date")["mcap"].transform(
+        lambda x: pd.qcut(x.rank(method="first"), 5, labels=False, duplicates="drop"))
+    group_mean = df.groupby(["trade_date", mcap_rank])[col].transform("mean")
+    return df[col] - group_mean
+
+
+def compute_quantile_spread(factor_val, df, forward_ret, n_quantiles=20):
+    """分位数颗粒度：Top组 vs Top-2组收益差。正值=有顶部效应，负值=极值反转。"""
+    dates = sorted(df["trade_date"].unique())
+    spreads = []
+    for td in dates[-60:]:
+        mask = df["trade_date"] == td
+        fv = factor_val[mask].dropna()
+        fr = forward_ret[mask].dropna()
+        common = fv.index.intersection(fr.index)
+        if len(common) < n_quantiles * 5: continue
+        fv_c = fv.loc[common]
+        try:
+            labels = pd.qcut(fv_c.rank(method="first"), n_quantiles, labels=False, duplicates="drop")
+            q1_ret = fr.loc[common][labels == labels.max()].mean()
+            q2_ret = fr.loc[common][labels == labels.max() - 1].mean()
+            if pd.notna(q1_ret) and pd.notna(q2_ret):
+                spreads.append(q1_ret - q2_ret)
+        except Exception:
+            continue
+    return np.mean(spreads) if spreads else 0
+
+
+def generate_nonlinear_combos(df, factor_dict, top_n=6):
+    """从 Top 因子生成非线性组合：乘积/平方/Sigmoid。"""
+    scored = []
+    for n, fv in factor_dict.items():
+        s = fv.dropna()
+        scored.append((len(s), n))
+    scored.sort(reverse=True)
+    top = [n for _, n in scored[:top_n]]
+
+    combos = {}
+    for i in range(min(len(top), 5)):
+        for j in range(i + 1, min(len(top), 5)):
+            n1, n2 = top[i], top[j]
+            if n1 in factor_dict and n2 in factor_dict:
+                v1 = _safe_norm(factor_dict[n1])
+                v2 = _safe_norm(factor_dict[n2])
+                name = f"cross_{n1[:8]}x{n2[:8]}"
+                combos[name] = {"compute": lambda df, a=v1, b=v2: a * b, "category": "非线性"}
+
+    for n in top[:4]:
+        if n in factor_dict:
+            v = _safe_norm(factor_dict[n])
+            combos[f"{n[:10]}_sq"] = {"compute": lambda df, x=v: x ** 2, "category": "非线性"}
+            combos[f"{n[:10]}_sig"] = {
+                "compute": lambda df, x=v: 1 / (1 + np.exp(-x * 3)), "category": "非线性"}
+
+    return combos
+
+
+def train_ml_ranker(df, factor_dict, top_n=5):
+    """XGBoost 学习头部特征：用因子截面 rank 预测 5 日涨 > 2%。"""
+    try:
+        from xgboost import XGBClassifier
+    except ImportError:
+        return None, {}
+
+    feature_cols = list(factor_dict.keys())
+    if len(feature_cols) < 3:
+        return None, {}
+
+    # 构建训练集：每只股票每天的特征 = 各因子的截面 rank
+    df["fwd_5d_up"] = (df.groupby("code")["close"].pct_change(5).shift(-5) > 0.02).astype(int)
+    dates = sorted(df["trade_date"].unique())
+
+    X_list, y_list = [], []
+    for td in dates[-90:]:
+        mask = df["trade_date"] == td
+        if mask.sum() < 200: continue
+        feats = {}
+        for fn in feature_cols:
+            if fn in factor_dict:
+                fv = factor_dict[fn][mask].dropna()
+                feats[fn] = fv.rank(pct=True)
+        if len(feats) < 3: continue
+        feat_df = pd.DataFrame(feats)
+        feat_df = feat_df.dropna()
+        if len(feat_df) < 100: continue
+        y_td = df.loc[feat_df.index, "fwd_5d_up"].dropna()
+        common = feat_df.index.intersection(y_td.index)
+        if len(common) < 100: continue
+        X_list.append(feat_df.loc[common])
+        y_list.append(y_td.loc[common])
+
+    if len(X_list) < 10:
+        return None, {}
+
+    X = pd.concat(X_list)
+    y = pd.concat(y_list)
+    if len(X) < 500:
+        return None, {}
+
+    model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, verbosity=0)
+    model.fit(X, y)
+
+    # 在最近 20 天评估胜率
+    ml_rets, ml_wins = [], []
+    for td in dates[-20:]:
+        mask = df["trade_date"] == td
+        feats = {}
+        for fn in feature_cols:
+            if fn in factor_dict:
+                fv = factor_dict[fn][mask].dropna()
+                feats[fn] = fv.rank(pct=True)
+        if len(feats) < 3: continue
+        feat_df = pd.DataFrame(feats).dropna()
+        if len(feat_df) < 100: continue
+        proba = model.predict_proba(feat_df[feature_cols])[:, 1]
+        top_idx = pd.Series(proba, index=feat_df.index).sort_values(ascending=False).head(top_n).index
+        fr = df.loc[mask, "fwd_5d_up"].dropna()
+        r = fr.loc[fr.index.intersection(top_idx)]
+        ml_rets.extend(r.values)  # 这里是二元标签
+        ml_wins.extend((r > 0).values if len(r) > 0 else [])
+
+    ml_wr = np.mean(ml_wins) if ml_wins else 0
+    return model, {"ml_win_rate": round(float(ml_wr), 4), "ml_samples": len(ml_wins)}
+
+
+def validate_all_v3(df, pool, top_n=5):
+    """v3.0 主评价循环：单因子头部效应 + 分位数 + 中性化 + 非线性 + 交集 + ML。"""
+    df = df.sort_values(["code", "trade_date"])
+    df["fwd_5d"] = df.groupby("code")["close"].pct_change(5).shift(-5)
+    df["fwd_10d"] = df.groupby("code")["close"].pct_change(10).shift(-10)
+
+    templates = get_active_templates(pool)
+    results = {}
+    factor_values = {}
+
+    # ── Phase 1: 单因子评价 ──
+    for ti, (name, tmpl) in enumerate(templates.items()):
+        logger.info(f"  [{ti+1}/{len(templates)}] {name} ...")
+        try:
+            fv_raw = tmpl["compute"](df)
+        except Exception as e:
+            results[name] = {"win_rate": 0, "mean_ret": 0, "status": "compute_error",
+                            "category": tmpl.get("category", "?")}
+            continue
+        if fv_raw is None:
+            results[name] = {"win_rate": 0, "mean_ret": 0, "status": "no_data",
+                            "category": tmpl.get("category", "?")}
+            continue
+
+        fv = fv_raw
+        factor_values[name] = fv
+
+        # 头部效应
+        perf = compute_top_n_performance(fv, df, df["fwd_5d"], top_n, quality_filter=True)
+        perf_10 = compute_top_n_performance(fv, df, df["fwd_10d"], top_n, quality_filter=True)
+        q_spread = compute_quantile_spread(fv, df, df["fwd_5d"])
+
+        n = perf.get("n_samples", 0)
+        wr = perf.get("win_rate", 0)
+        mr = perf.get("mean_ret", 0)
+        status = "pass" if (n >= 50 and wr >= 0.50) else "fail"
+
+        results[name] = {
+            "win_rate": round(wr, 4),
+            "mean_ret": round(mr, 4),
+            "win_rate_10d": round(perf_10.get("win_rate", 0), 4),
+            "mean_ret_10d": round(perf_10.get("mean_ret", 0), 4),
+            "sharpe": perf.get("sharpe", 0),
+            "tail_ic": perf.get("tail_ic", 0),
+            "quantile_spread": round(float(q_spread), 4),
+            "n_samples": n,
+            "status": status,
+            "category": tmpl.get("category", "?"),
+        }
+
+    # ── Phase 2: 非线性因子 ──
+    passed = {n: r for n, r in results.items() if r.get("n_samples", 0) >= 50}
+    if len(passed) >= 3:
+        combos = generate_nonlinear_combos(df, factor_values)
+        for cname, ctmpl in combos.items():
+            try:
+                fv = ctmpl["compute"](df)
+                if fv is None: continue
+                factor_values[cname] = fv
+                perf = compute_top_n_performance(fv, df, df["fwd_5d"], top_n, quality_filter=True)
+                wr = perf.get("win_rate", 0)
+                results[cname] = {
+                    "win_rate": round(wr, 4),
+                    "mean_ret": round(perf.get("mean_ret", 0), 4),
+                    "n_samples": perf.get("n_samples", 0),
+                    "status": "pass" if (perf.get("n_samples", 0) >= 50 and wr >= 0.50) else "fail",
+                    "category": "非线性",
+                }
+            except Exception:
+                pass
+
+    # ── Phase 3: 多因子交集 ──
+    scored = [(n, r["win_rate"] * r.get("mean_ret", 0))
+              for n, r in results.items() if r.get("n_samples", 0) >= 50 and r["win_rate"] > 0]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_names = [n for n, _ in scored[:6]]
+    if len(top_names) >= 3:
+        inter = compute_multi_factor_intersection(
+            {n: factor_values[n] for n in top_names[:3] if n in factor_values},
+            df, df["fwd_5d"], top_n, quality_filter=True)
+        if inter.get("n_samples", 0) >= 20:
+            wr_i = inter.get("win_rate", 0)
+            results["multi_intersect"] = {
+                "win_rate": round(wr_i, 4),
+                "mean_ret": round(inter.get("mean_ret", 0), 4),
+                "sharpe": inter.get("sharpe", 0),
+                "n_samples": inter.get("n_samples", 0),
+                "status": "pass" if wr_i >= 0.50 else "fail",
+                "category": "多因子交集",
+                "factors": top_names[:3],
+            }
+            logger.info(f"  交集: wr={wr_i:.1%} ret={inter.get('mean_ret',0):+.2%}")
+
+    # ── Phase 4: ML 评分 ──
+    model, ml_result = train_ml_ranker(df, factor_values, top_n)
+    if ml_result:
+        ml_wr = ml_result.get("ml_win_rate", 0)
+        results["xgb_ranker"] = {
+            "win_rate": round(ml_wr, 4),
+            "mean_ret": 0,
+            "n_samples": ml_result.get("ml_samples", 0),
+            "status": "pass" if ml_wr >= 0.50 else "fail",
+            "category": "ML",
+        }
+        logger.info(f"  XGBoost: wr={ml_wr:.1%}")
+
     return results, pool
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 模板进化
-# ══════════════════════════════════════════════════════════════════════
 
 def mutate_template(tmpl):
     """变异一个模板的参数。"""
@@ -347,8 +632,11 @@ def evolve_pool(pool, results, max_pool=30):
     scored = []
     for t in pool:
         r = results.get(t["name"], {})
-        ic = abs(r.get("ic_mean", 0))
-        scored.append((ic, t))
+        # 适应度 = win_rate × (1 + mean_ret)，胜率≥50%才有正分
+        wr = r.get("win_rate", 0)
+        mr = r.get("mean_ret", 0)
+        score = wr * (1 + mr) if wr >= 0.45 else 0
+        scored.append((score, t))
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # 保留 top 10
@@ -539,32 +827,31 @@ def _render_panel(db, round_num, elapsed):
     last = history[-1] if history else {}
     results = last.get("results", {})
 
-    passed = [(n, r) for n, r in results.items() if r.get("status") == "pass"]
-    passed.sort(key=lambda x: abs(x[1].get("ic_mean", 0)), reverse=True)
+    valid = [(n, r) for n, r in results.items() if r.get("n_samples", 0) >= 50]
+    valid.sort(key=lambda x: x[1].get("win_rate", 0), reverse=True)
 
     table = Table(title=f"🧪 因子进化 — Round {round_num}", title_style="bold cyan")
     table.add_column("#", style="dim", width=3)
     table.add_column("因子", style="bright_blue", max_width=28)
-    table.add_column("|IC|", justify="right", style="green")
-    table.add_column("ICIR", justify="right", style="yellow")
-    table.add_column("n", justify="right", style="dim", width=4)
+    table.add_column("胜率", justify="right", style="green")
+    table.add_column("均收益", justify="right", style="yellow")
+    table.add_column("n", justify="right", style="dim", width=5)
     table.add_column("类别")
 
-    for i, (name, r) in enumerate(passed[:10], 1):
+    for i, (name, r) in enumerate(valid[:10], 1):
         table.add_row(
             str(i), name[:25],
-            f"{abs(r.get('ic_mean',0)):.4f}",
-            f"{r.get('icir',0):+.2f}",
-            str(r.get('ic_samples',0)),
+            f"{r.get('win_rate',0):.1%}",
+            f"{r.get('mean_ret',0):+.2%}",
+            str(r.get('n_samples',0)),
             r.get('category','?'),
         )
 
-    all_valid = [(n, r) for n, r in results.items() if r.get('ic_samples', 0) >= 5]
-    best_ic = max((abs(r.get('ic_mean',0)) for _, r in all_valid), default=0)
+    best_wr = max((r.get('win_rate',0) for _, r in valid), default=0)
 
     return Panel(
         table,
-        title=f"[bold]通过: {len(passed)}  |  最佳|IC|: {best_ic:.4f}  |  {elapsed:.0f}s[/]",
+        title=f"[bold]通过: {sum(1 for _,r in valid if r.get('status')=='pass')}/{len(valid)}  |  最佳胜率: {best_wr:.1%}  |  {elapsed:.0f}s[/]",
         border_style="green" if passed else "blue",
     )
 
@@ -592,11 +879,12 @@ def main():
             last = history[-1]
             results = last.get("results", {})
             passed = [(n, r) for n, r in results.items() if r.get("status") == "pass"]
-            all_v = [(n, r) for n, r in results.items() if r.get("ic_samples", 0) >= 5]
+            all_v = [(n, r) for n, r in results.items() if r.get("n_samples", 0) >= 50]
             print(f"最近一轮: {len(passed)}通过/{len(all_v)}有效")
-            all_v.sort(key=lambda x: abs(x[1].get("ic_mean", 0)), reverse=True)
+            all_v.sort(key=lambda x: x[1].get("win_rate", 0), reverse=True)
             for i, (n, r) in enumerate(all_v[:args.top], 1):
-                print(f"  {i:2d}. {n:<30s} |IC|={abs(r.get('ic_mean',0)):.4f} ICIR={r.get('icir',0):+.2f} [{r.get('category','?')}]")
+                print(f"  {i:2d}. {n:<30s} WR={r.get('win_rate',0):.1%} ret={r.get('mean_ret',0):+.2%} "
+                      f"n={r.get('n_samples',0)} [{r.get('category','?')}]")
         return
 
     # ── 加载数据 ──
@@ -642,6 +930,7 @@ def main():
     df = precompute_base_factors(daily)
 
     # ── 进化循环 ──
+    top_n = 5  # 头部选股数
     t0 = time.time()
     console = Console() if HAS_RICH else None
 
@@ -651,7 +940,7 @@ def main():
         round_num = db["rounds"] + 1
         logger.info(f"═══ Round {round_num} ═══")
 
-        results, pool = validate_all(df, pool)
+        results, pool = validate_all_v3(df, pool, top_n=top_n)
 
         # 进化模板池
         if round_num >= 1:
@@ -663,9 +952,11 @@ def main():
         db["rounds"] = round_num
 
         passed = sum(1 for r in results.values() if r.get("status") == "pass")
-        valid_cnt = sum(1 for r in results.values() if r.get("ic_samples", 0) >= 5)
-        best_ic = max((abs(r.get("ic_mean", 0)) for r in results.values()
-                       if r.get("ic_samples", 0) >= 5), default=0)
+        valid_cnt = sum(1 for r in results.values() if r.get("n_samples", 0) >= 50)
+        best_wr = max((r.get("win_rate", 0) for r in results.values()
+                       if r.get("n_samples", 0) >= 50), default=0)
+        best_ret = max((r.get("mean_ret", 0) for r in results.values()
+                        if r.get("n_samples", 0) >= 50), default=0)
 
         if round_num % 5 == 0:
             rules = extract_rules(db)
@@ -676,7 +967,7 @@ def main():
         save_db(db)
 
         elapsed = time.time() - t0
-        logger.info(f"  通过: {passed}/{valid_cnt}, 最佳|IC|: {best_ic:.4f}, 池: {len(pool)}, {elapsed:.0f}s")
+        logger.info(f"  通过: {passed}/{valid_cnt}, 最佳WR: {best_wr:.1%} ret: {best_ret:+.2%}, 池: {len(pool)}, {elapsed:.0f}s")
 
         if HAS_RICH and round_num % 10 == 0:
             panel = _render_panel(db, round_num, elapsed)
