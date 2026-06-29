@@ -564,7 +564,7 @@ def _render_panel(db, round_num, elapsed):
 
     return Panel(
         table,
-        title=f"[bold]模板: {len(TEMPLATES)}  |  通过: {len(passed)}  |  最佳|IC|: {best_ic:.4f}  |  {elapsed:.0f}s[/]",
+        title=f"[bold]通过: {len(passed)}  |  最佳|IC|: {best_ic:.4f}  |  {elapsed:.0f}s[/]",
         border_style="green" if passed else "blue",
     )
 
