@@ -113,19 +113,40 @@ def save_db(db):
 # ══════════════════════════════════════════════════════════════════════
 
 def _evaluate_one(df, tokens, forward_ret):
-    """Evaluate a single RPN expression. Returns dict or None."""
+    """Evaluate a single RPN expression. Returns dict or None.
+
+    IC computed as daily cross-sectional Spearman (factor vs fwd_ret),
+    averaged across days. This correctly penalizes macro columns with no
+    cross-sectional variation (they get ~0 IC instead of spurious IC from
+    time-series trend overlap).
+    """
     try:
         fv = evaluate_rpn(df, tokens)
         valid = fv.notna() & forward_ret.notna()
         if valid.sum() < 100:
             return None
-        ic = compute_rank_ic(fv[valid].values, forward_ret[valid].values)
+
+        # 每日截面 IC，取均值
+        tmp = pd.DataFrame({"fv": fv, "fwd": forward_ret, "td": df["trade_date"].values})
+        tmp = tmp.dropna()
+        daily_ics = []
+        for td, grp in tmp.groupby("td"):
+            if len(grp) >= 10:
+                ic = compute_rank_ic(grp["fv"].values, grp["fwd"].values)
+                if not np.isnan(ic):
+                    daily_ics.append(ic)
+
+        if len(daily_ics) < 5:
+            return None
+
+        ic = float(np.mean(daily_ics))
         if np.isnan(ic):
             return None
+
         name = ";".join(str(t) for t in tokens)
         if len(name) > 80:
             name = name[:77] + "..."
-        return {"name": name, "tokens": tokens, "ic": float(ic), "series": fv}
+        return {"name": name, "tokens": tokens, "ic": ic, "series": fv}
     except Exception:
         return None
 
@@ -368,17 +389,32 @@ def main():
         top_factors = results[:20]
 
         # ── Stage 2: LightGBM LambdaRank ──
+        # CRITICAL: 截面排名因子值 — 宏观列同一天所有股票值相同，不排名 qcut 会报错
         factor_df = train_df[["code", "trade_date"]].copy()
         for i, r in enumerate(top_factors):
             col = f"f_{i}"
-            factor_df[col] = r["series"].values
+            raw_vals = r["series"].values
+            # 截面排名：每天内 rank(pct)，值域 [0, 1]，消除宏观列同值问题
+            factor_df[col] = raw_vals
             r["col_name"] = col
+
+        # 按天做截面排名
+        factor_cols = [f"f_{i}" for i in range(len(top_factors))]
+        for col in factor_cols:
+            factor_df[col] = factor_df.groupby("trade_date")[col].transform(
+                lambda g: g.rank(pct=True)
+            )
+        # 排名后填 NaN（rank 不会产生 NaN，但 transform 可能导致某些天只有 NaN）
+        factor_df[factor_cols] = factor_df[factor_cols].fillna(0.5)
 
         ml_result = {"model": None, "ndcg_score": 0.0, "feature_importances": {}}
         try:
             ml_result = train_lambdarank(factor_df, train_df["fwd_5d"])
         except Exception as e:
             print(f"   [!] ML训练失败: {e}")
+
+        if ml_result.get("model") is None:
+            print(f"   [!] ML模型为None — 可能是因子截面变异不足或训练数据不够")
 
         # ── Stage 3: Backtest on out-of-sample period ──
         bt_annual = 0.0
@@ -397,6 +433,13 @@ def main():
                     bt_factor_df[col] = bt_fv.values
                 except Exception:
                     bt_factor_df[col] = np.nan
+
+            # 截面排名（与训练保持一致）
+            for col in factor_cols:
+                bt_factor_df[col] = bt_factor_df.groupby("trade_date")[col].transform(
+                    lambda g: g.rank(pct=True)
+                )
+            bt_factor_df[factor_cols] = bt_factor_df[factor_cols].fillna(0.5)
 
             try:
                 scores = predict_rank(ml_result, bt_factor_df)
