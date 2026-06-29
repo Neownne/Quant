@@ -1,0 +1,21 @@
+{
+  "force_data_source": ["financial", "valuation", "price_volume"],
+  "boost_leaf_prob": {
+    "roe": 0.3,
+    "gross_margin": 0.3,
+    "net_margin": 0.3,
+    "pe": 0.2,
+    "pb": 0.2,
+    "open": 0.2,
+    "high": 0.2,
+    "adjusted_profit": 0.2,
+    "float_share": 0.2
+  },
+  "boost_operator": ["ts_delta", "ts_pct", "log", "ts_std", "sector_rank", "ts_corr", "sub"],
+  "kill_operator": [],
+  "cap_max_depth": 3,
+  "shift_forward_days": 5,
+  "penalty_redundancy": 0.7,
+  "segment_focus": "all",
+  "kill_patterns": ["@rsi_14;@lu_vol_intensity;add;north_net;rank;div"]
+}

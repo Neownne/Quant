@@ -357,6 +357,105 @@ def _color_for_fitness(fit_val: float) -> str:
         return RED
 
 
+def plot_live_dashboard(db: dict):
+    """实时终端仪表盘 — 多面板 ANSI 彩色面板，替代简单的单行进度条。
+
+    每轮结束后调用，显示：
+    1. 适应度/IC/年化趋势 sparkline
+    2. 最近 N 轮回测数据表格
+    3. 数据源覆盖率摘要
+    """
+    history = db.get("history", [])
+    if not history:
+        print(f"{YELLOW}  (no data yet){RESET}")
+        return
+
+    latest = history[-1]
+    last_n = history[-8:]  # show last 8 rounds
+
+    # ── Sparkline helper ──
+    def sparkline(values, width=20):
+        if len(values) < 2:
+            return " " * width
+        vmin, vmax = min(values), max(values)
+        if vmax == vmin:
+            return "─" * width
+        chars = " ▁▂▃▄▅▆▇█"
+        result = []
+        for v in values:
+            idx = int((v - vmin) / (vmax - vmin) * 8)
+            result.append(chars[min(idx, 8)])
+        # right-align to width
+        s = "".join(result)
+        if len(s) < width:
+            s = " " * (width - len(s)) + s
+        return s[-width:]
+
+    def mini_table(rows, headers, col_widths):
+        lines = []
+        # header
+        hdr = " │ ".join(h.ljust(w) for h, w in zip(headers, col_widths))
+        lines.append(f"    {hdr}")
+        lines.append(f"    {'─' * len(hdr)}")
+        for row in rows:
+            line = " │ ".join(str(r).ljust(w) for r, w in zip(row, col_widths))
+            lines.append(f"    {line}")
+        return "\n".join(lines)
+
+    print()
+    print(f"  ╔{'═'*58}╗")
+    print(f"  ║ {GREEN}v4.0 进化仪表盘{RESET} — 第 {latest['round']} 轮{' ' * (42 - len(str(latest['round']))) }║")
+    print(f"  ╠{'═'*58}╣")
+
+    # ── 趋势 sparklines ──
+    ic_vals = [abs(_safe_float(h, "best_ic")) for h in last_n]
+    ann_vals = [_safe_float(h, "bt_annual") for h in last_n]
+    mdd_vals = [_safe_float(h, "bt_mdd") for h in last_n]
+    fit_vals = [_safe_float(h, "best_fitness") for h in last_n]
+
+    cur_ic = abs(_safe_float(latest, "best_ic"))
+    cur_ann = _safe_float(latest, "bt_annual")
+    cur_mdd = _safe_float(latest, "bt_mdd")
+    cur_fit = _safe_float(latest, "best_fitness")
+
+    print(f"  ║  适应度 {_color_for_fitness(cur_fit)}{cur_fit:+.3f}{RESET}  {sparkline(fit_vals)}")
+    print(f"  ║  IC      {_color_for_ic(cur_ic)}{cur_ic:+.4f}{RESET}  {sparkline(ic_vals)}")
+    print(f"  ║  年化    {GREEN if cur_ann > 0 else RED}{cur_ann:+.1%}{RESET}  {sparkline(ann_vals)}")
+    print(f"  ║  MDD     {GREEN if cur_mdd < 0.15 else YELLOW if cur_mdd < 0.25 else RED}{cur_mdd:.1%}{RESET}  {sparkline([-v for v in mdd_vals])}")
+
+    # ── 最近轮回测表格 ──
+    print(f"  ╠{'═'*58}╣")
+    table_rows = []
+    for h in last_n:
+        table_rows.append([
+            f"R{h['round']}",
+            f"{_safe_float(h,'bt_annual'):+.1%}",
+            f"{_safe_float(h,'bt_mdd'):.0%}",
+            f"{_safe_float(h,'bt_sharpe'):+.2f}",
+            f"{_safe_float(h,'bt_wr'):.0%}",
+            str(int(_safe_float(h, 'bt_trades'))),
+        ])
+    print(mini_table(table_rows,
+                     ["轮", "年化", "MDD", "夏普", "胜率", "笔数"],
+                     [4, 7, 5, 6, 5, 5]))
+
+    # ── 当前轮详情 ──
+    n_valid = latest.get("n_valid", "?")
+    n_ind = latest.get("n_individuals", "?")
+    ndcg = _safe_float(latest, "ml_ndcg")
+    print(f"  ╠{'═'*58}╣")
+    print(f"  ║  有效个体: {n_valid}/{n_ind}  │  ML NDCG: {ndcg:.4f}  │  耗时: {latest.get('round', '?')}轮")
+
+    # Best factor
+    top_factors = latest.get("top_factors", [])
+    if top_factors:
+        name = top_factors[0].get("name", "?")[:50]
+        print(f"  ║  最佳: {name}")
+
+    print(f"  ╚{'═'*58}╝")
+    print()
+
+
 def _save_or_show(fig: plt.Figure, save_path: str | None):
     """保存或显示图表。"""
     if save_path:

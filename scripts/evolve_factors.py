@@ -40,7 +40,7 @@ from factors.analyst import (
     apply_suggestions,
     save_analysis_report,
 )
-from factors.viz import plot_terminal_summary, plot_evolution_dashboard, plot_round_detail
+from factors.viz import plot_live_dashboard, plot_terminal_summary, plot_evolution_dashboard, plot_round_detail
 from scripts.validate_factors import compute_rank_ic
 from scripts.bt_yaogu import run_backtest_on_signals
 
@@ -531,7 +531,7 @@ def main():
 
         # Terminal progress
         try:
-            plot_terminal_summary(db)
+            plot_live_dashboard(db)
         except Exception as e:
             print(f"   [!] 终端图表失败: {e}")
 
