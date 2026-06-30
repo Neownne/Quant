@@ -152,6 +152,66 @@ def _evaluate_one(df, tokens, forward_ret):
         return None
 
 
+# ── 调仓参数优化 ──
+_TRADING_PARAMS = {"top_n": 5, "rebalance_days": 1, "min_hold_days": 3,
+                   "trailing_stop": 0.12}
+
+def _optimize_trading_params(ml_result, bt_factor_df, bt_df, factor_cols, name_map):
+    """每5轮对当前最佳因子做网格搜索，找最优调仓参数。
+
+    测试12组(top_n, rebalance_days, min_hold_days, trailing_stop)组合。
+    回测很快——信号已计算好，只是执行规则不同。
+    """
+    combos = [
+        (3, 1, 2, 0.10), (3, 3, 5, 0.15), (3, 5, 7, 0.20),
+        (5, 1, 3, 0.12), (5, 3, 5, 0.10), (5, 5, 2, 0.18),
+        (8, 1, 5, 0.10), (8, 3, 3, 0.18), (8, 5, 7, 0.12),
+        (5, 1, 2, 0.20), (5, 3, 7, 0.12), (5, 1, 5, 0.08),
+    ]
+
+    scores = predict_rank(ml_result, bt_factor_df)
+    sig_df = bt_factor_df.copy()
+    sig_df["score"] = scores.values
+    sig_df["date"] = sig_df["trade_date"]
+
+    best_fitness = -999
+    best_params = dict(_TRADING_PARAMS)
+    best_bt = None
+
+    print(f"   [tune] 调仓网格搜索 ({len(combos)} 组)...")
+    for tn, rd, mh, ts in combos:
+        topn = sig_df.groupby("trade_date").apply(
+            lambda g: g.nlargest(tn, "score")
+        ).reset_index(drop=True)
+        topn = topn.rename(columns={"trade_date": "date"})
+
+        bt = run_backtest_on_signals(
+            topn[["date", "code", "score"]], bt_df,
+            name_map=name_map, top_n=tn,
+            min_score=-999.0, rebalance_days=rd,
+            min_hold_days=mh, trailing_stop=ts,
+        )
+        if "error" in bt:
+            continue
+
+        ann = bt.get("ret_annual", 0) or 0
+        mdd = bt.get("max_dd", 1) or 1
+        sp = bt.get("sharpe", 0) or 0
+        fit = _compute_fitness(ann, mdd, sp)
+        if fit > best_fitness:
+            best_fitness = fit
+            best_params = {"top_n": tn, "rebalance_days": rd,
+                           "min_hold_days": mh, "trailing_stop": ts}
+            best_bt = bt
+
+    if best_bt:
+        print(f"   [tune] 最优: top_n={best_params['top_n']} rebalance={best_params['rebalance_days']}d "
+              f"hold={best_params['min_hold_days']}d stop={best_params['trailing_stop']:.0%} "
+              f"→ ann={best_bt.get('ret_annual',0):+.1%} mdd={best_bt.get('max_dd',0):.1%}")
+        _TRADING_PARAMS.update(best_params)
+    return best_params
+
+
 def _compute_fitness(ann, mdd, sharpe=0.0):
     """适应度：年化收益为主，回撤惩罚，夏普加成。
 
@@ -550,7 +610,7 @@ def main():
                 sig_df["date"] = sig_df["trade_date"]
 
                 top5 = sig_df.groupby("trade_date").apply(
-                    lambda g: g.nlargest(5, "score")
+                    lambda g: g.nlargest(_TRADING_PARAMS["top_n"], "score")
                 ).reset_index(drop=True)
                 top5 = top5.rename(columns={"trade_date": "date"})
 
@@ -559,10 +619,12 @@ def main():
 
                 bt = run_backtest_on_signals(
                     top5[["date", "code", "score"]], bt_df,
-                    name_map=name_map, top_n=5,
-                    min_score=-999.0,   # ML分数0-1，默认min_score=3会滤掉
-                    rebalance_days=1,    # 每日调仓，防止信号浪费
-                    min_hold_days=3,     # 最少持有3天（降交易成本）
+                    name_map=name_map,
+                    top_n=_TRADING_PARAMS["top_n"],
+                    min_score=-999.0,
+                    rebalance_days=_TRADING_PARAMS["rebalance_days"],
+                    min_hold_days=_TRADING_PARAMS["min_hold_days"],
+                    trailing_stop=_TRADING_PARAMS["trailing_stop"],
                 )
 
                 if "error" not in bt:
@@ -635,6 +697,26 @@ def main():
                     shutil.move(sp, f"data/suggestions_round_{round_num:04d}.json")
         except Exception as e:
             print(f"   [!] 自动建议失败: {e}")
+
+        # ── 每5轮调仓参数优化 ──
+        if round_num % 5 == 0 and ml_result.get("model") is not None:
+            try:
+                # Rebuild bt_factor_df for tuning (same as backtest setup)
+                tune_factor_df = bt_df[["code", "trade_date"]].copy()
+                for i, r in enumerate(top_factors):
+                    col = f"f_{i}"
+                    try:
+                        bt_fv = evaluate_rpn(bt_df, r["tokens"])
+                        tune_factor_df[col] = bt_fv.values
+                    except Exception:
+                        tune_factor_df[col] = np.nan
+                for col in factor_cols:
+                    tune_factor_df[col] = tune_factor_df.groupby("trade_date")[col].transform(
+                        lambda g: g.rank(pct=True))
+                tune_factor_df[factor_cols] = tune_factor_df[factor_cols].fillna(0.5)
+                _optimize_trading_params(ml_result, tune_factor_df, bt_df, factor_cols, name_map)
+            except Exception as e:
+                print(f"   [!] 调仓优化失败: {e}")
 
         # ── 每 N 轮 Claude 深度审查暂停 ──
         ANALYST_INTERVAL = args.analyst_interval
