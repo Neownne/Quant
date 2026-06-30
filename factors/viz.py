@@ -419,7 +419,7 @@ def plot_live_dashboard(db: dict):
     cur_fit = _safe_float(latest, "best_fitness")
 
     print(f"  ║  适应度 {_color_for_fitness(cur_fit)}{cur_fit:+.3f}{RESET}  {sparkline(fit_vals)}")
-    print(f"  ║  IC      {_color_for_ic(cur_ic)}{cur_ic:+.4f}{RESET}  {sparkline(ic_vals)}")
+    print(f"  ║  训练IC  {_color_for_ic(cur_ic)}{cur_ic:+.4f}{RESET}  {sparkline(ic_vals)}")
     print(f"  ║  年化    {GREEN if cur_ann > 0 else RED}{cur_ann:+.1%}{RESET}  {sparkline(ann_vals)}")
     print(f"  ║  MDD     {GREEN if cur_mdd < 0.15 else YELLOW if cur_mdd < 0.25 else RED}{cur_mdd:.1%}{RESET}  {sparkline([-v for v in mdd_vals])}")
 

@@ -359,10 +359,9 @@ def pre_lu_turnover_cv(df: pd.DataFrame) -> pd.Series:
 # ══════════════════════════════════════════════════════════════════════
 
 def lu_next_day_gap(df: pd.DataFrame) -> pd.Series:
-    """涨停次日开盘缺口: (次日open - 当日close) / 当日close。
+    """[已弃用] 涨停次日开盘缺口: (次日open - 当日close) / 当日close。
 
-    高开（>2%）: 连板确认信号，市场继续看多。
-    低开（<0%）: 分歧加大，连板可能终止。
+    WARNING: 含 shift(-1) 未来函数，已从 LIMIT_UP_FACTORS 移除。保留函数体仅供存档。
     """
     next_open = df["open"].shift(-1)
     gap = (next_open - df["close"]) / df["close"].replace(0, np.nan)
@@ -494,8 +493,8 @@ LIMIT_UP_FACTORS: dict = {
     "pre_lu_vol_trend": pre_lu_vol_trend,
     "pre_lu_ret_5d": pre_lu_ret_5d,
     "pre_lu_turnover_cv": pre_lu_turnover_cv,
-    # 连板确认 (3)
-    "lu_next_day_gap": lu_next_day_gap,
+    # 连板确认 (2)
+    # lu_next_day_gap 已删除 — shift(-1)=明天开盘价，含未来函数
     "lu_streak_quality": lu_streak_quality,
     "lu_turnover_intensity": lu_turnover_intensity,
     # 相对强度 (2)

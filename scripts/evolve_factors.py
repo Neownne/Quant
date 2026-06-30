@@ -296,16 +296,16 @@ def main():
     df = assemble_universe(engine, start_date, end_date)
     print(f"   {len(df)} 行, {df['code'].nunique()} 只股票")
 
-    # Compute forward returns (5-day)
+    # Train/backtest split THEN compute forward returns (避免边界泄漏)
     df = df.sort_values(["code", "trade_date"])
-    df["fwd_5d"] = df.groupby("code")["close"].transform(
-        lambda x: x.pct_change(5).shift(-5)
-    )
-
-    # Train/backtest split: last 6 months for backtest
     bt_start = (pd.Timestamp(end_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
     train_df = df[df["trade_date"] < bt_start].copy()
     bt_df = df[df["trade_date"] >= bt_start].copy()
+
+    # 前向收益仅在训练集上计算（ML标签），回测引擎自己算PnL
+    train_df["fwd_5d"] = train_df.groupby("code")["close"].transform(
+        lambda x: x.pct_change(5).shift(-5)
+    )
     print(f"   训练: {len(train_df)} 行, 回测: {len(bt_df)} 行")
 
     # ── Build leaf pool ──
@@ -482,7 +482,9 @@ def main():
                 bt = run_backtest_on_signals(
                     top5[["date", "code", "score"]], bt_df,
                     name_map=name_map, top_n=5,
-                    min_score=-999.0,  # ML分数是0-1，yaogu默认min_score=3会滤掉全部
+                    min_score=-999.0,   # ML分数0-1，默认min_score=3会滤掉
+                    rebalance_days=1,    # 每日调仓，防止信号浪费
+                    min_hold_days=3,     # 最少持有3天（降交易成本）
                 )
 
                 if "error" not in bt:
@@ -499,7 +501,7 @@ def main():
 
         # Display results
         best_ic = abs(results[0]["ic"]) if results else 0
-        print(f"   有效: {len(results)}/{len(population)} | 最佳IC: {best_ic:+.4f} | 适应度: {fitness:+.4f}")
+        print(f"   有效: {len(results)}/{len(population)} | 训练IC: {best_ic:+.4f} | 适应度: {fitness:+.4f}")
         if ml_result.get("model") is not None:
             print(f"   回测: 年化={bt_annual:+.1%} MDD={bt_mdd:.1%} 夏普={bt_sharpe:+.2f} WR={bt_wr:.1%} trades={bt_trades}")
             print(f"   ML NDCG: {ml_result.get('ndcg_score', 0):.4f}")
