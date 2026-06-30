@@ -1,21 +1,25 @@
 {
-  "force_data_source": ["financial", "valuation", "price_volume"],
+  "force_data_source": ["financial", "valuation", "macro"],
   "boost_leaf_prob": {
-    "roe": 0.3,
+    "roe": 0.4,
     "gross_margin": 0.3,
     "eps": 0.3,
-    "goodwill_ratio": 0.2,
-    "ocf_ps": 0.2,
+    "goodwill_ratio": 0.3,
+    "ocf_ps": 0.3,
+    "pe": 0.2,
+    "pb": 0.2,
     "mcap": 0.2,
-    "open": 0.2,
-    "volume": 0.2,
-    "pe": 0.2
+    "north_net": 0.2,
+    "cn_10y": 0.2,
+    "spread_cn_us": 0.2,
+    "total_share": 0.2,
+    "debt_ratio": 0.2
   },
-  "boost_operator": ["ts_delta", "ts_pct", "log", "ts_std", "sector_rank", "sub", "mul", "ts_min"],
+  "boost_operator": ["ts_corr", "mul", "div", "sub", "log", "ts_delta", "ts_std", "zscore"],
   "kill_operator": [],
-  "cap_max_depth": 4,
+  "cap_max_depth": 5,
   "shift_forward_days": 5,
-  "penalty_redundancy": 0.7,
+  "penalty_redundancy": 0.8,
   "segment_focus": "all",
-  "kill_patterns": []
+  "kill_patterns": ["amount;sector_rank", "amount;log", "amount;zscore"]
 }

@@ -609,18 +609,33 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
     except Exception as e:
         print(f"   [!] 图表生成失败: {e}")
 
-    # Pause and wait for suggestions
+    # Pause and wait for suggestions — poll file mtime instead of stdin
+    # (works in background/non-interactive mode)
+    import time as _time
     print(f"\n{'~' * 60}")
     print(f"  Paused at 第 {round_num} 轮。Waiting for analyst suggestions...")
-    print(f"  Edit {suggestions_path} with suggestions, then press Enter to continue.")
-    print(f"  Or just press Enter to skip and continue evolving.")
+    print(f"  Edit data/suggestions.json, save it, and I'll detect the change.")
+    print(f"  Delete data/suggestions.json to skip (continue without suggestions).")
+    print(f"  Timeout in 10 minutes if no changes detected.")
     print(f"{'~' * 60}")
 
-    if hasattr(sys.stdin, 'isatty') and sys.stdin.isatty():
-        try:
-            input()
-        except EOFError:
-            pass  # non-interactive mode
+    # Record initial state
+    old_mtime = os.path.getmtime(suggestions_path) if os.path.exists(suggestions_path) else None
+    waited = 0
+    while waited < 600:  # 10 min timeout
+        _time.sleep(10)
+        waited += 10
+        if os.path.exists(suggestions_path):
+            new_mtime = os.path.getmtime(suggestions_path)
+            if old_mtime is None or new_mtime > old_mtime:
+                print(f"   [v] 检测到建议文件更新 (waited {waited}s)")
+                return
+        else:
+            if old_mtime is not None:
+                print(f"   [-] 建议文件已删除，跳过分析 (waited {waited}s)")
+                return
+
+    print(f"   [-] 超时 ({waited}s)，无建议更新，继续进化")
 
 
 if __name__ == "__main__":
