@@ -490,6 +490,15 @@ def _random_int_param(lo: int = 3, hi: int = 120) -> int:
     return random.randint(lo, hi)
 
 
+def _pick_leaf(leaf_pool: list[str]) -> str:
+    """Pick a leaf with @因子 penalty — 50% re-roll if @-prefixed."""
+    import random as _rnd
+    leaf = _rnd.choice(leaf_pool)
+    if leaf.startswith("@") and _rnd.random() < 0.5:
+        leaf = _rnd.choice(leaf_pool)
+    return leaf
+
+
 def random_tree(
     leaf_pool: list[str],
     max_depth: int = 4,
@@ -547,12 +556,12 @@ def random_tree(
         """
         # At depth >= max_depth, force a leaf
         if depth >= max_depth or depth >= 5:  # absolute cap
-            return [random.choice(leaf_pool)]
+            return [_pick_leaf(leaf_pool)]
 
         # Leaf vs operator decision
         leaf_prob = 0.4 + 0.15 * (depth - 1)  # grows with depth
         if random.random() < leaf_prob:
-            return [random.choice(leaf_pool)]
+            return [_pick_leaf(leaf_pool)]
 
         # Pick an operator
         op = random.choices(op_names, weights=op_weights, k=1)[0]
@@ -637,7 +646,7 @@ def mutate_rpn(
 
         cls = _classify_token(tok)
         if cls == "leaf":
-            result[i] = random.choice(leaf_pool)
+            result[i] = _pick_leaf(leaf_pool)
         elif cls == "param":
             cur = int(float(tok))
             delta = random.choice([-5, -3, -2, -1, 1, 2, 3, 5, 10])
