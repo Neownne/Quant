@@ -565,3 +565,119 @@ def save_analysis_report(report: dict, round_num: int) -> str:
     with open(filename, "w") as f:
         json.dump(report, f, indent=2, default=str, ensure_ascii=False)
     return filename
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Auto-Analyst: 自动分析报告 → 生成建议 → 写入 suggestions.json
+# ═══════════════════════════════════════════════════════════════════════
+
+def auto_analyze(db: dict, round_num: int) -> dict:
+    """自动分析当前进化状态并生成建议。
+
+    规则：
+    1. 同一因子模式霸榜 >=3 轮 → kill_patterns
+    2. 数据源覆盖率 <10% → 强制探索
+    3. 冗余对 >30 → 提高 penalty + 加大算子多样性
+    4. IC 连续 5 轮停滞 → 加大算子多样性
+    5. 回测 MDD 趋势上升 → 限制树深度
+    6. 正收益时保守，不做激进改变
+    """
+    history = db.get("history", [])
+    if len(history) < 2:
+        return {}
+
+    suggestions = {
+        "force_data_source": [],
+        "boost_leaf_prob": {},
+        "boost_operator": [],
+        "kill_operator": [],
+        "cap_max_depth": 5,
+        "penalty_redundancy": 0.7,
+        "kill_patterns": [],
+    }
+
+    # 1. 检测霸榜因子模式
+    recent_best = {}
+    for h in history[-10:]:
+        tf = h.get("top_factors", [])
+        if tf:
+            name = tf[0].get("name", "")
+            tokens = name.split(";")
+            pattern = ";".join(tokens[:3]) if len(tokens) >= 3 else tokens[0] if tokens else ""
+            if pattern:
+                recent_best[pattern] = recent_best.get(pattern, 0) + 1
+
+    for pattern, count in recent_best.items():
+        if count >= 3:
+            suggestions["kill_patterns"].append(pattern)
+
+    # 2. 数据源覆盖率
+    report_path = f"data/analysis_round_{round_num:04d}.json"
+    report = {}
+    if os.path.exists(report_path):
+        try:
+            with open(report_path) as f:
+                report = json.load(f)
+        except Exception:
+            pass
+
+    coverage = report.get("data_source_coverage", {})
+    source_pct = coverage.get("source_pct", {})
+    unused = coverage.get("unused_leaves", [])
+
+    low_sources = [s for s, p in source_pct.items() if p < 10 and s not in ("other",)]
+    if low_sources:
+        suggestions["force_data_source"] = low_sources
+
+    for leaf in unused[:15]:
+        if leaf in LEAF_DATA_SOURCE:
+            suggestions["boost_leaf_prob"][leaf] = 0.4
+
+    # 3. 冗余度
+    redundancy = report.get("factor_redundancy", {})
+    high_corr = redundancy.get("high_corr_count", 0)
+    if high_corr > 30:
+        suggestions["penalty_redundancy"] = 0.9
+        suggestions["boost_operator"] = ["ts_corr", "mul", "ts_delta", "ts_pct", "log"]
+    elif high_corr > 15:
+        suggestions["penalty_redundancy"] = 0.7
+
+    # 4. IC 停滞检测
+    ic_trend = report.get("ic_decay", {}).get("trend", [])
+    if len(ic_trend) >= 5:
+        recent_ics = [abs(t.get("avg_abs_ic", 0)) for t in ic_trend[-5:]]
+        if max(recent_ics) - min(recent_ics) < 0.005:
+            suggestions["boost_operator"] = list(set(
+                suggestions.get("boost_operator", []) +
+                ["ts_delta", "ts_pct", "ts_corr", "log", "mul", "div", "sub", "zscore"]
+            ))
+
+    # 5. MDD 趋势上升 → 限深
+    recent_mdd = [h.get("bt_mdd", 0) or 0 for h in history[-5:]]
+    if len(recent_mdd) >= 3 and sum(recent_mdd[-3:]) / 3 > 0.3:
+        suggestions["cap_max_depth"] = 3
+
+    # 6. 正收益时保守
+    recent_ann = [h.get("bt_annual", 0) or 0 for h in history[-3:]]
+    if any(a > 0.10 for a in recent_ann):
+        suggestions["cap_max_depth"] = max(suggestions.get("cap_max_depth", 5), 4)
+        suggestions["penalty_redundancy"] = min(suggestions.get("penalty_redundancy", 0.7), 0.5)
+        suggestions.pop("force_data_source", None)
+        suggestions.pop("kill_patterns", None)
+
+    # 清理空值
+    return {k: v for k, v in suggestions.items() if v and v != []}
+
+
+def write_auto_suggestions(db: dict, round_num: int):
+    """自动生成建议并写入 suggestions.json（触发 mtime 检测）"""
+    suggestions = auto_analyze(db, round_num)
+    if not suggestions:
+        return
+    path = "data/suggestions.json"
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(suggestions, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    summary = ", ".join(f"{k}={v}" for k, v in suggestions.items() if v)
+    print(f"   [auto] 自动建议: {summary}")

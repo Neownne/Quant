@@ -39,6 +39,7 @@ from factors.analyst import (
     load_suggestions,
     apply_suggestions,
     save_analysis_report,
+    write_auto_suggestions,
 )
 from factors.viz import plot_live_dashboard, plot_terminal_summary, plot_evolution_dashboard, plot_round_detail
 from scripts.validate_factors import compute_rank_ic
@@ -302,7 +303,7 @@ def main():
     )
 
     # Train/backtest split: last 6 months for backtest
-    bt_start = (pd.Timestamp(end_date) - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
+    bt_start = (pd.Timestamp(end_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
     train_df = df[df["trade_date"] < bt_start].copy()
     bt_df = df[df["trade_date"] >= bt_start].copy()
     print(f"   训练: {len(train_df)} 行, 回测: {len(bt_df)} 行")
@@ -597,6 +598,12 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
         )
         save_analysis_report(report, round_num)
         print(f"   [v] 分析报告已保存")
+
+        # 自动分析 → 生成建议 → 写入 suggestions.json
+        try:
+            write_auto_suggestions(db, round_num)
+        except Exception as e:
+            print(f"   [!] 自动建议生成失败: {e}")
     except Exception as e:
         print(f"   [!] 分析报告生成失败: {e}")
 
