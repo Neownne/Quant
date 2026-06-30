@@ -339,25 +339,30 @@ def main():
         _render_panel(db, args.top)
         return
 
+    # 抑制 bt_yaogu DEBUG 刷屏
+    from loguru import logger
+    logger.remove()
+    logger.add(lambda _: None, level="WARNING")
+
     # ── Setup DB connection ──
     from config.settings import DBConfig
     engine = DBConfig.create_engine()
 
-    # Date range: 3 years
+    # Date range: 6 years → 3年训练IC + 3年回测
     end_date = pd.read_sql("SELECT MAX(trade_date) FROM stock_daily", engine).iloc[0, 0]
     end_date = str(end_date)[:10]
-    start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+    start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=365 * 6)).strftime("%Y-%m-%d")
 
-    print(f"[v4.0] 数据范围: {start_date} -> {end_date}")
+    print(f"[v4.0] 数据: {start_date} → {end_date} (6年)")
 
     # ── Stage 1: Load data ──
     print("[1/4] 加载全维度数据...")
     df = assemble_universe(engine, start_date, end_date)
     print(f"   {len(df)} 行, {df['code'].nunique()} 只股票")
 
-    # Train/backtest split THEN compute forward returns (避免边界泄漏)
+    # Split: 前3年训练IC + 后3年回测
     df = df.sort_values(["code", "trade_date"])
-    bt_start = (pd.Timestamp(end_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
+    bt_start = (pd.Timestamp(end_date) - pd.Timedelta(days=365 * 3)).strftime("%Y-%m-%d")
     train_df = df[df["trade_date"] < bt_start].copy()
     bt_df = df[df["trade_date"] >= bt_start].copy()
 
@@ -439,10 +444,20 @@ def main():
 
         # Evaluate all individuals
         results = []
-        for tokens in population:
+        t0_eval = time.time()
+        for i, tokens in enumerate(population):
             r = _evaluate_one(train_df, tokens, train_df["fwd_5d"])
             if r is not None:
                 results.append(r)
+            # 进度条（每5个或最后一个）
+            if (i + 1) % 5 == 0 or i == len(population) - 1:
+                pct = (i + 1) / len(population) * 100
+                bar = "█" * int(pct / 4) + "░" * (25 - int(pct / 4))
+                elapsed = time.time() - t0_eval
+                eta = elapsed / (i + 1) * (len(population) - i - 1) if i > 0 else 0
+                print(f"\r  [{bar}] {pct:.0f}% {len(results)}有效 {elapsed:.0f}s ETA:{eta:.0f}s",
+                      end="", flush=True, file=sys.stdout)
+        print(file=sys.stdout)  # newline
 
         if len(results) < 3:
             print(f"   [!] 仅有 {len(results)} 个有效个体，跳过 ML/回测")
@@ -469,9 +484,9 @@ def main():
                 population = _evolve_population(population, results, leaf_pool, analyst_max_depth, kill_patterns_list)
             continue
 
-        # Sort by |IC|, keep top-20 for ML
+        # Sort by |IC|, keep top-10 for ML (减少噪声因子干扰)
         results.sort(key=lambda x: abs(x["ic"]), reverse=True)
-        top_factors = results[:20]
+        top_factors = results[:10]
 
         # ── Stage 2: LightGBM LambdaRank ──
         # CRITICAL: 截面排名因子值 — 宏观列同一天所有股票值相同，不排名 qcut 会报错
@@ -710,8 +725,8 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
     old_mtime = os.path.getmtime(suggestions_path) if os.path.exists(suggestions_path) else None
     waited = 0
     while waited < 300:  # 5 min for Claude review
-        _time.sleep(10)
-        waited += 10
+        _time.sleep(3)
+        waited += 3
         if os.path.exists(suggestions_path):
             new_mtime = os.path.getmtime(suggestions_path)
             if old_mtime is None or new_mtime > old_mtime:
