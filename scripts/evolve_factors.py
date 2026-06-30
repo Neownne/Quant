@@ -549,6 +549,11 @@ def main():
                 bt_annual, bt_mdd, bt_sharpe, bt_wr, bt_trades,
                 db, round_num, leaf_pool,
             )
+            # 自动生成建议（在暂停之后，确保 mtime 是新于 old_mtime 的）
+            try:
+                write_auto_suggestions(db, round_num)
+            except Exception as e:
+                print(f"   [!] 自动建议生成失败: {e}")
             # Reload suggestions after pause and apply
             new_suggestions = load_suggestions()
             if new_suggestions:
@@ -600,12 +605,6 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
         )
         save_analysis_report(report, round_num)
         print(f"   [v] 分析报告已保存")
-
-        # 自动分析 → 生成建议 → 写入 suggestions.json
-        try:
-            write_auto_suggestions(db, round_num)
-        except Exception as e:
-            print(f"   [!] 自动建议生成失败: {e}")
     except Exception as e:
         print(f"   [!] 分析报告生成失败: {e}")
 
@@ -631,7 +630,7 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
     # Record initial state
     old_mtime = os.path.getmtime(suggestions_path) if os.path.exists(suggestions_path) else None
     waited = 0
-    while waited < 600:  # 10 min timeout
+    while waited < 30:  # 30s — auto-suggestions now happen after pause
         _time.sleep(10)
         waited += 10
         if os.path.exists(suggestions_path):
