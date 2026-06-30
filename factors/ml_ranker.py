@@ -9,8 +9,13 @@
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 import pandas as pd
+
+# 屏蔽 sklearn 列名警告 + LightGBM 训练日志
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+warnings.filterwarnings("ignore", message="No further splits with positive gain")
 
 import lightgbm as lgb
 
@@ -125,7 +130,7 @@ def train_lambdarank(
         group=groups_train,
         eval_set=[(X_val, y_val)],
         eval_group=[groups_val],
-        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+        callbacks=[lgb.early_stopping(50)],  # no log_evaluation to reduce noise
     )
 
     # 特征重要性
