@@ -152,12 +152,19 @@ def _evaluate_one(df, tokens, forward_ret):
         return None
 
 
-def _compute_fitness(ann, mdd):
-    """ACGR >= 40% & MDD <= 15% -> 高分，否则惩罚。"""
-    if ann >= 0.40 and mdd <= 0.15:
-        return ann * 2 - mdd
+def _compute_fitness(ann, mdd, sharpe=0.0):
+    """适应度：年化收益为主，回撤惩罚，夏普加成。
+
+    关键改动：正收益策略必须比"不交易"(0,0)分数高。
+    旧公式 ann-mdd*2 使 -10%/+10%(-0.3) 不如 0/0(0.0)，
+    导致进化偏向保守、不出信号。
+    """
+    if ann > 0:
+        # 正收益：年化主导 + 夏普加成 - 回撤惩罚
+        return ann * 2.0 + max(sharpe, 0) * 0.3 - mdd * 1.5
     else:
-        return ann - mdd * 2
+        # 负收益：重罚
+        return ann * 3.0 - mdd * 2.0
 
 
 def _evolve_population(population, results, leaf_pool, max_depth=None):
@@ -497,7 +504,7 @@ def main():
                 print(f"   [!] 回测失败: {e}")
 
         # Fitness
-        fitness = _compute_fitness(bt_annual, bt_mdd)
+        fitness = _compute_fitness(bt_annual, bt_mdd, bt_sharpe)
 
         # Display results
         best_ic = abs(results[0]["ic"]) if results else 0
