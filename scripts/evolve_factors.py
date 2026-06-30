@@ -604,7 +604,24 @@ def main():
         t_elapsed = time.time() - t_round_start
         print(f"   耗时: {t_elapsed:.0f}s")
 
-        # ── ANALYST PAUSE (Task 8) ──
+        # ── 每轮自动建议（代码做基础优化）──
+        try:
+            write_auto_suggestions(db, round_num)
+            new_suggestions = load_suggestions()
+            if new_suggestions:
+                leaf_pool, _ = apply_suggestions(new_suggestions, leaf_pool, {})
+                if "cap_max_depth" in new_suggestions:
+                    analyst_max_depth = new_suggestions["cap_max_depth"]
+                if "kill_patterns" in new_suggestions:
+                    kill_patterns_list = new_suggestions["kill_patterns"]
+                # Archive
+                sp = "data/suggestions.json"
+                if os.path.exists(sp):
+                    shutil.move(sp, f"data/suggestions_round_{round_num:04d}.json")
+        except Exception as e:
+            print(f"   [!] 自动建议失败: {e}")
+
+        # ── 每 N 轮 Claude 深度审查暂停 ──
         ANALYST_INTERVAL = args.analyst_interval
         if ANALYST_INTERVAL > 0 and round_num % ANALYST_INTERVAL == 0:
             _handle_analyst_pause(
@@ -612,15 +629,10 @@ def main():
                 bt_annual, bt_mdd, bt_sharpe, bt_wr, bt_trades,
                 db, round_num, leaf_pool,
             )
-            # 自动生成建议（在暂停之后，确保 mtime 是新于 old_mtime 的）
-            try:
-                write_auto_suggestions(db, round_num)
-            except Exception as e:
-                print(f"   [!] 自动建议生成失败: {e}")
-            # Reload suggestions after pause and apply
+            # 暂停后重新加载建议（Claude 可能覆盖了）
             new_suggestions = load_suggestions()
             if new_suggestions:
-                print(f"   [v] 已加载建议")
+                print(f"   [v] 已加载 Claude 建议")
                 leaf_pool, _ = apply_suggestions(new_suggestions, leaf_pool, {})
                 if "cap_max_depth" in new_suggestions:
                     analyst_max_depth = new_suggestions["cap_max_depth"]
@@ -687,16 +699,17 @@ def _handle_analyst_pause(train_df, population, results, ml_result,
     # (works in background/non-interactive mode)
     import time as _time
     print(f"\n{'~' * 60}")
-    print(f"  Paused at 第 {round_num} 轮。Waiting for analyst suggestions...")
-    print(f"  Edit data/suggestions.json, save it, and I'll detect the change.")
-    print(f"  Delete data/suggestions.json to skip (continue without suggestions).")
-    print(f"  Timeout in 10 minutes if no changes detected.")
+    print(f"  ⏸  Claude 审查点 — 第 {round_num} 轮")
+    print(f"  分析报告: data/analysis_round_{round_num:04d}.json")
+    print(f"  图表: data/charts/dashboard_round_{round_num:04d}.png")
+    print(f"  编辑 data/suggestions.json 写入建议，自动检测继续。")
+    print(f"  5 分钟超时后自动继续。")
     print(f"{'~' * 60}")
 
     # Record initial state
     old_mtime = os.path.getmtime(suggestions_path) if os.path.exists(suggestions_path) else None
     waited = 0
-    while waited < 30:  # 30s — auto-suggestions now happen after pause
+    while waited < 300:  # 5 min for Claude review
         _time.sleep(10)
         waited += 10
         if os.path.exists(suggestions_path):
