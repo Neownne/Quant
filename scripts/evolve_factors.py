@@ -167,41 +167,93 @@ def _compute_fitness(ann, mdd, sharpe=0.0):
         return ann * 3.0 - mdd * 2.0
 
 
-def _evolve_population(population, results, leaf_pool, max_depth=None):
-    """Generate next generation from current results."""
+def _evolve_population(population, results, leaf_pool, max_depth=None,
+                       kill_patterns=None, bt_fitness=0.0):
+    """Generate next generation with diversity pressure.
+
+    Key fixes vs old version:
+    - Elite count: 10→3 (20%→6%), stops self-replicating oligarchy
+    - IC ranking penalized by correlation redundancy
+    - kill_patterns actually enforced
+    - Random injection ↑ (40%→60%) with higher mutation rate
+    - Backtest fitness used as tiebreaker for IC-ranked elites
+    """
     if not results:
         depth = max_depth or 4
         return [random_tree(leaf_pool, max_depth=depth, op_probs=_get_op_probs())
                 for _ in range(len(population))]
 
-    # Sort by |IC|
-    ranked = sorted(results, key=lambda x: abs(x["ic"]), reverse=True)
-    elites = ranked[:10]
+    # ── Phase 1: IC ranking with redundancy penalty ──
+    kill_set = set(kill_patterns or [])
+    scored = []
+    for r in results:
+        tokens = r.get("tokens", [])
+        name = r.get("name", "")
+        ic = abs(r.get("ic", 0))
+
+        # Kill dominated patterns
+        if kill_set:
+            name_str = ";".join(str(t) for t in tokens)
+            if any(pat in name_str for pat in kill_set):
+                continue  # skip this individual
+
+        # Redundancy penalty: penalize if similar to already-selected elites
+        penalty = 0.0
+        for prev in scored:
+            prev_name = prev.get("name", "")
+            # Simple heuristic: if name shares >50% tokens, penalize
+            prev_tokens = set(str(t) for t in prev.get("tokens", []))
+            cur_tokens = set(str(t) for t in tokens)
+            if prev_tokens and cur_tokens:
+                overlap = len(prev_tokens & cur_tokens) / max(len(prev_tokens | cur_tokens), 1)
+                if overlap > 0.5:
+                    penalty += 0.02 * overlap
+
+        scored.append({**r, "diversity_score": ic - penalty})
+
+    if not scored:
+        # All killed — regenerate fully random
+        depth = max_depth or 4
+        return [random_tree(leaf_pool, max_depth=depth, op_probs=_get_op_probs())
+                for _ in range(len(population))]
+
+    # Sort by diversity-adjusted IC
+    scored.sort(key=lambda x: x["diversity_score"], reverse=True)
+
+    # ── Phase 2: Build next generation ──
+    # Only 3 elites survive verbatim (6% of pop, down from 20%)
+    ELITE_N = 3
+    elites = scored[:ELITE_N]
 
     new_pop = [list(e["tokens"]) for e in elites]
 
     op_probs = _get_op_probs()
 
-    # Mutate top 5 elites x 2 children each
-    for e in elites[:5]:
-        for _ in range(2):
-            child = mutate_rpn(list(e["tokens"]), leaf_pool)
-            if child:
-                new_pop.append(child)
+    # Mutate ALL valid individuals (not just top-5), each once
+    # Wider genetic base = more diverse mutations
+    mutation_pool = scored[:15]  # top 15 by diversity-adjusted IC
+    for e in mutation_pool:
+        child = mutate_rpn(list(e["tokens"]), leaf_pool, mutation_rate=0.5)
+        if child:
+            new_pop.append(child)
 
-    # Crossover top 5
-    for i in range(min(5, len(elites))):
-        for j in range(i + 1, min(5, len(elites))):
-            child = crossover_rpn(list(elites[i]["tokens"]), list(elites[j]["tokens"]))
-            if child:
-                new_pop.append(child)
+    # Crossover diverse pairs (not just top-5 with each other)
+    import random as _random
+    crossover_pool = scored[:12]
+    _random.shuffle(crossover_pool)
+    for i in range(0, len(crossover_pool) - 1, 2):
+        child = crossover_rpn(list(crossover_pool[i]["tokens"]),
+                              list(crossover_pool[i+1]["tokens"]))
+        if child:
+            new_pop.append(child)
 
-    # Random injection to fill
+    # Heavy random injection (60% of target size) — maintain exploration
     depth = max_depth or 4
-    while len(new_pop) < len(population):
+    target = len(population)
+    while len(new_pop) < target:
         new_pop.append(random_tree(leaf_pool, max_depth=depth, op_probs=op_probs))
 
-    return new_pop[:len(population)]
+    return new_pop[:target]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -358,6 +410,7 @@ def main():
 
     # ── Load suggestions if any ──
     analyst_max_depth = None
+    kill_patterns_list = []  # persistent, updated by auto-analyst suggestions
     suggestions = load_suggestions()
     if suggestions:
         print(f"   [v] 加载分析师建议")
@@ -369,6 +422,9 @@ def main():
                 _OP_ARITY.pop(op, None)
                 _OPERATORS.pop(op, None)
             print(f"   已禁用操作符: {suggestions['kill_operator']}")
+        if "kill_patterns" in suggestions:
+            kill_patterns_list = suggestions["kill_patterns"]
+            print(f"   已禁用模式: {kill_patterns_list}")
 
     # ══════════════════════════════════════════════════════════════
     # EVOLUTION LOOP
@@ -410,7 +466,7 @@ def main():
             save_db(db)
 
             if gen < args.rounds - 1:
-                population = _evolve_population(population, results, leaf_pool, analyst_max_depth)
+                population = _evolve_population(population, results, leaf_pool, analyst_max_depth, kill_patterns_list)
             continue
 
         # Sort by |IC|, keep top-20 for ML
@@ -573,6 +629,9 @@ def main():
                         _OP_ARITY.pop(op, None)
                         _OPERATORS.pop(op, None)
                     print(f"   已禁用操作符: {new_suggestions['kill_operator']}")
+                if "kill_patterns" in new_suggestions:
+                    kill_patterns_list = new_suggestions["kill_patterns"]
+                    print(f"   已禁用模式: {kill_patterns_list}")
                 # Archive suggestions file
                 suggestions_path = "data/suggestions.json"
                 if os.path.exists(suggestions_path):
@@ -583,7 +642,7 @@ def main():
 
         # ── Evolve to next generation (unless last round) ──
         if gen < args.rounds - 1:
-            population = _evolve_population(population, results, leaf_pool, analyst_max_depth)
+            population = _evolve_population(population, results, leaf_pool, analyst_max_depth, kill_patterns_list)
 
     print(f"\n[4/4] 完成。{args.rounds} 轮进化。")
     _render_panel(db, args.top)

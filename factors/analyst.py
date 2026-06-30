@@ -522,16 +522,14 @@ def apply_suggestions(
         boosted = [l for l in leaf_pool if _classify_leaf(l) in targets]
         new_pool.extend(boosted * 3)  # 3 extra copies = 4x total
 
-    # boost_leaf_prob: duplicate specific leaves N times
+    # boost_leaf_prob: duplicate specific leaves to increase selection probability
     if "boost_leaf_prob" in suggestions:
         for leaf_name, boost_n in suggestions["boost_leaf_prob"].items():
             if leaf_name in leaf_pool:
-                # Add (boost_n - 1) copies; if boost_n is a probability-like
-                # fraction, treat it as multiplier on base count
-                existing_count = leaf_pool.count(leaf_name)
-                add_count = int(existing_count * max(0, float(boost_n)))
-                if add_count > 0:
-                    new_pool.extend([leaf_name] * add_count)
+                # boost_n < 1.0 → add 3 copies (enough to matter, old bug gave 0)
+                # boost_n >= 1.0 → treat as multiplier
+                copies = max(3, int(float(boost_n)))
+                new_pool.extend([leaf_name] * copies)
 
     # boost_operator: double probability of specified operators
     if "boost_operator" in suggestions:

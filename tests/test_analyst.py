@@ -393,8 +393,8 @@ class TestSuggestions:
         suggestions = {"boost_leaf_prob": {"close": 2.0}}
         new_pool, new_probs = apply_suggestions(suggestions, pool, probs)
 
-        # close appears 2x in original -> 2 * 2 = 4 extra copies, total 6
-        assert new_pool.count("close") == 6
+        # new logic: max(3, int(2.0)) = 3 copies added → 2 + 3 = 5 total
+        assert new_pool.count("close") == 5
 
     def test_apply_suggestions_all_combined(self):
         pool = ["close", "volume", "roe", "mcap"]
