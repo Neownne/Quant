@@ -570,46 +570,52 @@ def save_analysis_report(report: dict, round_num: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 def auto_analyze(db: dict, round_num: int) -> dict:
-    """自动分析当前进化状态并生成建议。
+    """多阶段自适应分析师。根据进化状态选择策略。
 
-    规则：
-    1. 同一因子模式霸榜 >=3 轮 → kill_patterns
-    2. 数据源覆盖率 <10% → 强制探索
-    3. 冗余对 >30 → 提高 penalty + 加大算子多样性
-    4. IC 连续 5 轮停滞 → 加大算子多样性
-    5. 回测 MDD 趋势上升 → 限制树深度
-    6. 正收益时保守，不做激进改变
+    阶段判断（按优先级）：
+    - CRISIS:  近3轮全负且恶化 → 激进重组
+    - ESCAPE:  连续5轮无改善 → 跳出局部最优
+    - EXPLOIT: 发现正收益且趋势向好 → 精细调优
+    - EXPLORE: 默认 → 广撒网，保多样性
+
+    策略维度：
+    1. 因子族谱追踪  — 哪些家族在改善/衰退
+    2. 算子ROI分析   — 哪些算子产出存活因子
+    3. 趋势判断       — 看斜率，不只看单点
+    4. 组合浓度       — ML特征重要性是否过于集中
+    5. 历史记忆       — 过去什么建议有效
     """
     history = db.get("history", [])
     if len(history) < 2:
         return {}
 
-    suggestions = {
-        "force_data_source": [],
-        "boost_leaf_prob": {},
-        "boost_operator": [],
-        "kill_operator": [],
-        "cap_max_depth": 5,
-        "penalty_redundancy": 0.7,
-        "kill_patterns": [],
-    }
+    # ── 数据提取 ──
+    ann_vals = [h.get("bt_annual", 0) or 0 for h in history[-8:]]
+    mdd_vals = [h.get("bt_mdd", 0) or 1.0 for h in history[-8:]]
+    trade_vals = [h.get("bt_trades", 0) or 0 for h in history[-8:]]
+    ic_vals = [abs(h.get("best_ic", 0)) for h in history[-8:]]
 
-    # 1. 检测霸榜因子模式
-    recent_best = {}
-    for h in history[-10:]:
-        tf = h.get("top_factors", [])
-        if tf:
-            name = tf[0].get("name", "")
-            tokens = name.split(";")
-            pattern = ";".join(tokens[:3]) if len(tokens) >= 3 else tokens[0] if tokens else ""
-            if pattern:
-                recent_best[pattern] = recent_best.get(pattern, 0) + 1
+    # ── 阶段判定 ──
+    phase = "EXPLORE"
+    if len(ann_vals) >= 3:
+        recent3 = ann_vals[-3:]
+        if all(a < -0.20 for a in recent3):
+            if len(recent3) >= 3 and recent3[-1] < recent3[-2] < recent3[-3]:
+                phase = "CRISIS"   # 负收益且持续恶化
+            elif max(recent3) - min(recent3) < 0.05:
+                phase = "ESCAPE"   # 负收益但不再恶化 — 被困住了
+        elif any(a > 0.05 for a in recent3):
+            # 有正收益 — 看趋势
+            if len(ann_vals) >= 4:
+                slope = _trend_slope(ann_vals[-4:])
+                if slope > 0.02:
+                    phase = "EXPLOIT"  # 正收益且改善中
+                elif slope < -0.05:
+                    phase = "ESCAPE"   # 正收益但快速恶化
+                else:
+                    phase = "EXPLOIT"  # 正收益稳定
 
-    for pattern, count in recent_best.items():
-        if count >= 3:
-            suggestions["kill_patterns"].append(pattern)
-
-    # 2. 数据源覆盖率
+    # ── 读取分析报告 ──
     report_path = f"data/analysis_round_{round_num:04d}.json"
     report = {}
     if os.path.exists(report_path):
@@ -622,49 +628,209 @@ def auto_analyze(db: dict, round_num: int) -> dict:
     coverage = report.get("data_source_coverage", {})
     source_pct = coverage.get("source_pct", {})
     unused = coverage.get("unused_leaves", [])
-
-    low_sources = [s for s, p in source_pct.items() if p < 10 and s not in ("other",)]
-    if low_sources:
-        suggestions["force_data_source"] = low_sources
-
-    for leaf in unused[:15]:
-        if leaf in LEAF_DATA_SOURCE:
-            suggestions["boost_leaf_prob"][leaf] = 0.4
-
-    # 3. 冗余度
     redundancy = report.get("factor_redundancy", {})
     high_corr = redundancy.get("high_corr_count", 0)
-    if high_corr > 30:
-        suggestions["penalty_redundancy"] = 0.9
-        suggestions["boost_operator"] = ["ts_corr", "mul", "ts_delta", "ts_pct", "log"]
-    elif high_corr > 15:
-        suggestions["penalty_redundancy"] = 0.7
+    op_usage = report.get("factor_structure", {}).get("operator_usage", {})
+    ml_imp = report.get("ml_feature_importance", {}).get("importances", {})
 
-    # 4. IC 停滞检测
-    ic_trend = report.get("ic_decay", {}).get("trend", [])
-    if len(ic_trend) >= 5:
-        recent_ics = [abs(t.get("avg_abs_ic", 0)) for t in ic_trend[-5:]]
-        if max(recent_ics) - min(recent_ics) < 0.005:
-            suggestions["boost_operator"] = list(set(
-                suggestions.get("boost_operator", []) +
-                ["ts_delta", "ts_pct", "ts_corr", "log", "mul", "div", "sub", "zscore"]
-            ))
+    # ── 策略生成（按阶段） ──
+    suggestions = _phase_strategies(phase, history, round_num, report,
+                                     ann_vals, mdd_vals, ic_vals, trade_vals,
+                                     source_pct, unused, high_corr, op_usage, ml_imp)
 
-    # 5. MDD 趋势上升 → 限深
-    recent_mdd = [h.get("bt_mdd", 0) or 0 for h in history[-5:]]
-    if len(recent_mdd) >= 3 and sum(recent_mdd[-3:]) / 3 > 0.3:
-        suggestions["cap_max_depth"] = 3
-
-    # 6. 正收益时保守
-    recent_ann = [h.get("bt_annual", 0) or 0 for h in history[-3:]]
-    if any(a > 0.10 for a in recent_ann):
-        suggestions["cap_max_depth"] = max(suggestions.get("cap_max_depth", 5), 4)
-        suggestions["penalty_redundancy"] = min(suggestions.get("penalty_redundancy", 0.7), 0.5)
-        suggestions.pop("force_data_source", None)
-        suggestions.pop("kill_patterns", None)
-
-    # 清理空值
     return {k: v for k, v in suggestions.items() if v and v != []}
+
+
+def _trend_slope(vals: list[float]) -> float:
+    """简单线性趋势斜率。"""
+    if len(vals) < 2:
+        return 0.0
+    n = len(vals)
+    x_mean = (n - 1) / 2
+    y_mean = sum(vals) / n
+    num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(vals))
+    den = sum((i - x_mean) ** 2 for i in range(n))
+    return num / den if den > 0 else 0.0
+
+
+def _phase_strategies(phase, history, round_num, report,
+                      ann_vals, mdd_vals, ic_vals, trade_vals,
+                      source_pct, unused, high_corr, op_usage, ml_imp) -> dict:
+    """根据阶段返回不同的策略组合。"""
+
+    base = {
+        "force_data_source": [],
+        "boost_leaf_prob": {},
+        "boost_operator": [],
+        "kill_operator": [],
+        "cap_max_depth": 5,
+        "penalty_redundancy": 0.7,
+        "kill_patterns": [],
+    }
+
+    # ═══════════════════════════════════════════════
+    # 通用分析（所有阶段都做）
+    # ═══════════════════════════════════════════════
+
+    # 1. 因子族谱：追踪 TOP 因子在各轮的出现频率
+    dominant = _detect_dominant_lineages(history)
+    if dominant:
+        base["kill_patterns"] = dominant
+
+    # 2. 数据源缺口
+    low_sources = [s for s, p in source_pct.items() if p < 10 and s not in ("other",)]
+    if low_sources:
+        base["force_data_source"] = low_sources
+
+    # 3. 未用叶子 boost
+    for leaf in unused[:10]:
+        if leaf in LEAF_DATA_SOURCE:
+            base["boost_leaf_prob"][leaf] = 0.5
+
+    # 4. 算子 ROI：哪些算子在有效因子里出现多
+    effective_ops = _analyze_operator_roi(history, op_usage)
+    if effective_ops:
+        base["boost_operator"] = effective_ops
+
+    # 5. 组合浓度：ML 特征重要性是否过度集中
+    if len(ml_imp) >= 3:
+        imp_vals = list(ml_imp.values())
+        if max(imp_vals) / (sum(imp_vals) + 0.001) > 0.6:
+            # 一个因子占了 60%+ 重要性 → 脆弱
+            base["penalty_redundancy"] = 0.9
+            base["boost_operator"] = list(set(base.get("boost_operator", []) +
+                                              ["ts_corr", "mul", "div", "ts_delta"]))
+
+    # ═══════════════════════════════════════════════
+    # 阶段特定策略
+    # ═══════════════════════════════════════════════
+
+    if phase == "CRISIS":
+        # 激进重组：杀主导模式、强制新数据源、限深防过拟合、高冗余惩罚
+        base["cap_max_depth"] = 3
+        base["penalty_redundancy"] = 0.95
+        base["boost_operator"] = ["ts_corr", "ts_delta", "ts_pct", "mul", "div",
+                                   "log", "sub", "zscore", "sector_rank", "ts_std"]
+        # 强制探索所有低覆盖数据源
+        all_sources = {"price_volume", "valuation", "financial", "macro", "intraday"}
+        used = set(source_pct.keys())
+        base["force_data_source"] = list(all_sources - used - {"other", "prebuilt_factor"})
+        # 大幅 boost 未用叶子
+        for leaf in unused[:20]:
+            if leaf in LEAF_DATA_SOURCE:
+                base["boost_leaf_prob"][leaf] = 0.6
+        print(f"   [phase] CRISIS — 激进重组：杀模式、强制探索、限深3")
+
+    elif phase == "ESCAPE":
+        # 跳出局部最优：中度杀模式、加大算子多样性、扩展搜索空间
+        base["cap_max_depth"] = 4
+        base["penalty_redundancy"] = 0.85
+        base["boost_operator"] = ["ts_corr", "mul", "div", "ts_delta", "ts_pct",
+                                   "log", "sub", "ts_std", "sector_rank"]
+        # 不只 boost 未用叶子，还 boost 低频使用的
+        top_leaves = report.get("data_source_coverage", {}).get("top_leaves", {})
+        if top_leaves:
+            all_leaf_names = set(LEAF_DATA_SOURCE.keys())
+            used_set = set(top_leaves.keys())
+            low_use = all_leaf_names - used_set
+            for leaf in list(low_use)[:10]:
+                if leaf in LEAF_DATA_SOURCE:
+                    base["boost_leaf_prob"][leaf] = 0.5
+        print(f"   [phase] ESCAPE — 跳出局部最优：拓宽搜索、提升算子多样性")
+
+    elif phase == "EXPLOIT":
+        # 精细调优：保留好因子、小幅调整、深度可以稍高
+        base["cap_max_depth"] = 5
+        base["penalty_redundancy"] = 0.4  # 允许精炼
+        # 不杀模式、不强制数据源
+        base.pop("kill_patterns", None)
+        base.pop("force_data_source", None)
+        # 少量 boost 已证明有效的算子
+        base["boost_operator"] = _analyze_operator_roi(history, op_usage)[:5]
+        # 提升树深度允许更复杂组合
+        print(f"   [phase] EXPLOIT — 精细调优：保留核心、允许复杂化")
+
+    else:  # EXPLORE
+        # 广撒网：保持高多样性、中等深度
+        base["cap_max_depth"] = 4
+        base["penalty_redundancy"] = 0.7
+        # boost 低频算子
+        all_ops = {"ts_delta", "ts_pct", "ts_mean", "ts_std", "ts_rank",
+                    "ts_min", "ts_max", "ts_corr", "add", "sub", "mul", "div",
+                    "log", "rank", "zscore", "sector_rank"}
+        used_ops = set(op_usage.keys()) if op_usage else set()
+        unused_ops = all_ops - used_ops
+        base["boost_operator"] = list(unused_ops)[:8] if unused_ops else ["ts_corr", "mul", "div"]
+        print(f"   [phase] EXPLORE — 广撒网：保持多样性、boost {len(base['boost_operator'])} 个未用算子")
+
+    return base
+
+
+def _detect_dominant_lineages(history: list) -> list[str]:
+    """因子族谱分析：检测霸榜≥3轮的模式，且趋势恶化时才杀。"""
+    if len(history) < 4:
+        return []
+
+    # 统计每个模式的出现
+    pattern_rounds = {}
+    for h in history[-10:]:
+        tf = h.get("top_factors", [])
+        if tf:
+            name = tf[0].get("name", "")
+            tokens = name.split(";")
+            pattern = ";".join(tokens[:3]) if len(tokens) >= 3 else tokens[0] if tokens else ""
+            if pattern:
+                if pattern not in pattern_rounds:
+                    pattern_rounds[pattern] = []
+                pattern_rounds[pattern].append(h["round"])
+
+    kills = []
+    for pattern, rounds in pattern_rounds.items():
+        if len(rounds) >= 3:
+            # 检查这个模式下的回测趋势
+            pattern_ann = []
+            for h in history[-8:]:
+                tf = h.get("top_factors", [])
+                if tf:
+                    name = tf[0].get("name", "")
+                    if pattern in name:
+                        pattern_ann.append(h.get("bt_annual", 0) or 0)
+
+            # 趋势恶化才杀；如果趋势改善则保留
+            if len(pattern_ann) >= 3:
+                slope = _trend_slope(pattern_ann)
+                if slope < 0:  # 恶化
+                    kills.append(pattern)
+            elif len(rounds) >= 5:
+                # 霸榜5轮还没改善 → 杀
+                kills.append(pattern)
+
+    return kills
+
+
+def _analyze_operator_roi(history: list, op_usage: dict) -> list[str]:
+    """算子ROI分析：哪些算子在存活>1轮的因子中出现频率高。"""
+    if len(history) < 3 or not op_usage:
+        return []
+
+    # 统计每轮 top-5 因子中的算子使用
+    op_survival = {}
+    for h in history[-6:]:
+        tf = h.get("top_factors", [])
+        for f in tf[:5]:
+            name = f.get("name", "")
+            for op in op_usage:
+                if op in name:
+                    op_survival[op] = op_survival.get(op, 0) + 1
+
+    # 存活率高的算子 → boost
+    if op_survival:
+        total = sum(op_survival.values()) or 1
+        # 取存活率前 6 的
+        ranked = sorted(op_survival.items(), key=lambda x: x[1], reverse=True)
+        return [op for op, _ in ranked[:6] if op_survival.get(op, 0) / total > 0.05]
+
+    return []
 
 
 def write_auto_suggestions(db: dict, round_num: int):
