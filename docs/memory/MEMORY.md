@@ -1,0 +1,4 @@
+- [User Style - 回复结尾加"咕咕嘎嘎"](user-style.md)
+- [写代码前必看 CLAUDE.md 铁律](check-claude-md-before-coding.md)
+- [AmazingData — 银河证券数据源（7月接入）](amazingdata-datasource.md)
+- [v4.0 因子进化关键发现 — IC与回测脱节、收敛模式、有效结构](v4-evolution-findings.md)
