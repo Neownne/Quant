@@ -221,16 +221,67 @@ Quant/
 │   ├── scan_intraday.py        午盘扫描（腾讯实时行情）
 │   ├── bt_yaogu.py             妖股回测
 │   ├── bt_small_cap.py         小市值反转回测
+│   ├── evolve_factors.py       ★ 因子进化 v4.0（GP+ML）
 │   ├── run_arsenal.py          武器库面板
 │   ├── validate_factors.py     因子IC验证
 │   └── screen_bull.py          牛股筛选器
-├── factors/                    因子库（123个因子）
+├── factors/                    因子库（123个因子 + v4.0引擎）
+│   ├── data_assembler.py       全维度数据装配器
+│   ├── expression_tree.py      RPN表达式树 + 15运算符
+│   ├── ml_ranker.py            LightGBM LambdaRank
+│   ├── analyst.py              自动分析师（4阶段策略）
+│   └── viz.py                  终端仪表盘 + 图表
 ├── strategies/limit_up/        涨停策略（执行引擎+净值计算）
 ├── data/                       数据库+数据同步
 ├── config/settings.py          全局配置
 ├── lab/                        实验室（变体回测框架）
 ├── web/                        FastAPI Web面板
+├── docs/
+│   └── memory/                  ★ Claude 记忆文件（跨机器同步）
+│       ├── v4-evolution-findings.md   v4.0关键结论
+│       ├── check-claude-md-before-coding.md
+│       └── MEMORY.md            记忆索引
 ├── .env                        你的配置（不提交git）
 ├── CLAUDE.md                   给Claude Code的铁律和速查
+├── DEPLOY_WINDOWS.md           本文件
 └── requirements.txt            Python依赖
 ```
+
+---
+
+## 11. Claude 记忆同步
+
+项目记忆文件存在 `docs/memory/` 下，已通过 Git 同步。Windows 上拉下来后，**拷贝到 Claude 的记忆目录**：
+
+```powershell
+# 找到 Claude 记忆目录（通常在用户目录下）
+$claudeMemory = "$env:USERPROFILE\.claude\projects\-Users-你的用户名-Documents-Quant\memory\"
+
+# 创建目录（如果不存在）
+New-Item -ItemType Directory -Force -Path $claudeMemory
+
+# 拷贝记忆文件
+Copy-Item docs\memory\*.md -Destination $claudeMemory -Force
+```
+
+> 路径里的 `-Users-你的用户名-Documents-Quant` 要替换成你 Windows 上的实际路径。macOS 上是 `-Users-chenwan-Documents-quant`。
+
+以后 `git pull` 后再拷一次，或者写个脚本自动同步。
+
+---
+
+## 12. 当前分支说明
+
+| 分支 | 用途 | 状态 |
+|------|------|------|
+| `main` | 日常信号 + 回测 | 稳定 |
+| `feature/evolve-v4-gp-ml` | **因子进化 v4.0** | 30轮验证完成，待合并 |
+
+想跑因子进化的话：
+
+```powershell
+git checkout feature/evolve-v4-gp-ml
+.venv\Scripts\python scripts\evolve_factors.py --rounds 30 --analyst-interval 3
+```
+
+> 进化跑一次约 8 小时（30轮），建议后台跑。每 3 轮 Claude 会自动审查。管线参数见 [CLAUDE.md 底部](CLAUDE.md#因子进化-v402026-07-01-状态)。
