@@ -266,3 +266,68 @@ pg_ctl -D /opt/homebrew/var/postgresql@18 start
 | 小市值反转交割单 111 天总资产≠现金+市值 | sell 条目未统一到手工跟踪口径 |
 | gen_signals `--lu-lookback` vs `--limit-up-lookback` 不一致 | 已在 `lab/variant.py` key_map 映射 |
 | 妖股规则在非投机市中不出信号 | 市场风格依赖，非 bug |
+
+## 因子进化 v4.0（2026-07-01 状态）
+
+> 分支: `feature/evolve-v4-gp-ml` | 30轮验证 | 待合并
+
+### 架构
+
+```
+表达式树 GP（15 运算符 × 50 叶子） → LightGBM LambdaRank（10因子） → 扣费回测（3年）
+                    ↑ 每轮自动建议  ←  Claude 每3轮深度审查
+```
+
+### 核心结论
+
+| 发现 | 详情 |
+|------|------|
+| IC ≠ 回测收益 | Spearman -0.020，训练集 IC 不预测实盘 |
+| 纯多头天花板 | ~17% 年化，无市场择时下达不到 40% |
+| 核心 Alpha 结构 | `mul(amount, volatility_or_price)` — 成交额乘积交互 |
+| 最佳结果 | R27: +16.7% 年化, 31.5% MDD, 0.68 夏普, 247 笔（3 年回测） |
+
+### 管线参数
+
+| 参数 | 值 |
+|------|-----|
+| 数据 | 6 年（2019-2025），3 年训练 IC + 3 年回测 |
+| 叶子池 | 30 原始 DB 列 + 20 预计算 @因子 |
+| 运算符 | rank, zscore, sector_rank, ts_delta/pct/mean/std/rank/min/max/corr, add/sub/mul/div/log |
+| ML | LightGBM LambdaRank, NDCG@5, 10 因子, 80/20 时序验证 |
+| 回测 | 每日调仓, Top-5, 佣金万 0.9+印花税万 5+滑点 0.1%, 一字板过滤 |
+| 进化 | 种群 50, 精英 3, 冗余惩罚, 随机注入 52%, 突变率 0.5 |
+| 分析师 | 4 阶段（CRISIS/ESCAPE/EXPLOIT/EXPLORE）, 每轮自动 + 每 3 轮 Claude |
+| 调仓优化 | 每 5 轮网格搜索 12 组 (top_n, rebalance, hold, stop) |
+
+### 新增/修改文件
+
+| 文件 | 说明 |
+|------|------|
+| `factors/data_assembler.py` | 7 张 DB 表 → 统一宽表 |
+| `factors/expression_tree.py` | RPN 解析 + 15 运算符 + 遗传算子 |
+| `factors/ml_ranker.py` | LightGBM LambdaRank 训练/预测 |
+| `factors/analyst.py` | 7 维度诊断 + 自动建议 + 多阶段策略 |
+| `factors/viz.py` | 终端仪表盘 + matplotlib 图表 |
+| `scripts/evolve_factors.py` | v4.0 主循环（重写） |
+| `scripts/bt_yaogu.py` | 一字板可买性 + loguru 静音 |
+
+### 快速命令
+
+```bash
+# 因子进化
+python scripts/evolve_factors.py --rounds 30 --analyst-interval 3
+
+# 查看状态
+python scripts/evolve_factors.py --status --top 20
+
+# 运行测试
+python -m pytest tests/test_data_assembler.py tests/test_expression_tree.py tests/test_ml_ranker.py tests/test_analyst.py tests/test_viz.py -v
+```
+
+### 下一步
+
+- [ ] 接入 AmazingData 数据源
+- [ ] 市场择时（恐惧贪婪 / 北向资金仓位管理）
+- [ ] 多空对冲（long top-5 + short bottom-5）
+- [ ] 板块轮动叠加
