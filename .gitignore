@@ -21,3 +21,14 @@ data/data_integrity_report.json
 data/models/
 data/signals/bt_signals_*.csv
 *.pkl
+data/analysis_round_*
+data/charts/
+data/suggestions.json
+/tmp/evolve_v4*.log
+
+# 每日运行输出
+data/arsenal/hotpoint/anomalies_*.csv
+data/arsenal/hotpoint/chart_*.png
+data/arsenal/hotpoint/leaders_*.csv
+data/arsenal/hotpoint/report_*.html
+data/arsenal/hotpoint/strategy_*.csv
