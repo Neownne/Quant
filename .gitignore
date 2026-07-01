@@ -32,3 +32,25 @@ data/arsenal/hotpoint/chart_*.png
 data/arsenal/hotpoint/leaders_*.csv
 data/arsenal/hotpoint/report_*.html
 data/arsenal/hotpoint/strategy_*.csv
+
+# 进化运行时输出
+data/analysis_round_*.json
+data/charts/
+data/suggestions*.json
+data/factor_db*.json
+data/strategy_db.json
+data/strategy_rules.md
+
+# 三池每日输出
+data/arsenal/pools/
+data/arsenal/reports/
+data/arsenal/ths_import/
+
+# hotpoint OCR 缓存
+hotpoint/
+
+# 子agent报告
+tests/task*-report.md
+
+# 实现计划（超大文件）
+docs/superpowers/
