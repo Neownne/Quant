@@ -1,0 +1,568 @@
+{
+  "data_source_coverage": {
+    "source_pct": {
+      "other": 29.76,
+      "valuation": 26.19,
+      "macro": 15.48,
+      "financial": 13.1,
+      "price_volume": 10.71,
+      "prebuilt_factor": 4.76
+    },
+    "unused_leaves": [
+      "adjusted_profit",
+      "bar0_ret",
+      "bar3_ret",
+      "bps",
+      "close",
+      "goodwill_ratio",
+      "high",
+      "intra_vol",
+      "low",
+      "net_margin",
+      "north_sell",
+      "open",
+      "usd_cny",
+      "volume"
+    ],
+    "unused_from_df": [
+      "adjusted_profit",
+      "bps",
+      "close",
+      "goodwill_ratio",
+      "high",
+      "low",
+      "net_margin",
+      "north_sell",
+      "open",
+      "usd_cny",
+      "volume"
+    ],
+    "top_leaves": {
+      "amount": 8,
+      "pe": 6,
+      "pb": 6,
+      "north_net": 6,
+      "mcap": 5,
+      "@atr_14": 4,
+      "90": 4,
+      "roe": 4,
+      "20": 3,
+      "total_share": 3,
+      "spread_cn_us": 2,
+      "cn_10y": 2,
+      "debt_ratio": 2,
+      "north_buy": 2,
+      "40": 2,
+      "60": 2,
+      "eps": 2,
+      "120": 2,
+      "65": 2,
+      "us_10y": 1
+    }
+  },
+  "factor_structure": {
+    "depth_distribution": {
+      "0": 20,
+      "1": 15,
+      "2": 12,
+      "3": 3
+    },
+    "operator_usage": {
+      "ts_mean": 7,
+      "mul": 5,
+      "rank": 5,
+      "ts_std": 4,
+      "ts_max": 4,
+      "zscore": 4,
+      "ts_rank": 4,
+      "ts_delta": 4,
+      "log": 3,
+      "add": 2,
+      "sub": 2,
+      "sector_rank": 2,
+      "ts_pct": 2
+    },
+    "avg_depth": 0.96,
+    "avg_nodes": 1.68,
+    "depth_vs_ic": [
+      {
+        "name": "amount;@atr_14;mul",
+        "depth": 1,
+        "ic": -0.086629
+      },
+      {
+        "name": "amount;@atr_14;mul",
+        "depth": 1,
+        "ic": -0.086629
+      },
+      {
+        "name": "turnover;zscore",
+        "depth": 1,
+        "ic": -0.078628
+      },
+      {
+        "name": "amount;@atr_14;add",
+        "depth": 1,
+        "ic": -0.078446
+      },
+      {
+        "name": "amount",
+        "depth": 0,
+        "ic": -0.078446
+      },
+      {
+        "name": "amount",
+        "depth": 0,
+        "ic": -0.078446
+      },
+      {
+        "name": "amount",
+        "depth": 0,
+        "ic": -0.078446
+      },
+      {
+        "name": "amount;cn_10y;mul;37;ts_max",
+        "depth": 2,
+        "ic": -0.06533
+      },
+      {
+        "name": "mcap;20;ts_std",
+        "depth": 1,
+        "ic": -0.049857
+      },
+      {
+        "name": "mcap",
+        "depth": 0,
+        "ic": -0.031676
+      },
+      {
+        "name": "mcap",
+        "depth": 0,
+        "ic": -0.031676
+      },
+      {
+        "name": "mcap",
+        "depth": 0,
+        "ic": -0.031676
+      },
+      {
+        "name": "mcap",
+        "depth": 0,
+        "ic": -0.031676
+      },
+      {
+        "name": "amount;cn_10y;mul;40;ts_rank",
+        "depth": 2,
+        "ic": -0.027858
+      },
+      {
+        "name": "spread_cn_us;@atr_14;mul",
+        "depth": 1,
+        "ic": -0.024353
+      },
+      {
+        "name": "roe;120;ts_mean;65;ts_std",
+        "depth": 2,
+        "ic": -0.013452
+      },
+      {
+        "name": "eps;20;ts_delta;40;ts_delta",
+        "depth": 2,
+        "ic": 0.010989
+      },
+      {
+        "name": "roe",
+        "depth": 0,
+        "ic": 0.010557
+      },
+      {
+        "name": "roe",
+        "depth": 0,
+        "ic": 0.010557
+      },
+      {
+        "name": "debt_ratio;log",
+        "depth": 1,
+        "ic": 0.009923
+      }
+    ]
+  },
+  "ic_decay": {
+    "trend": [
+      {
+        "round": 1,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 2,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 3,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 4,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 5,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 6,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 7,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 8,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 9,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 10,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 11,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 12,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 13,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 14,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 15,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 16,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 17,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 18,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 19,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 20,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 21,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 22,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 23,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 24,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 25,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 26,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 27,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 28,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 29,
+        "avg_abs_ic": 0.0
+      },
+      {
+        "round": 30,
+        "avg_abs_ic": 0.0
+      }
+    ],
+    "current_avg_ic": 0.031936
+  },
+  "regime_sensitivity": {
+    "industry_ic": {
+      "P 教育": -0.033796,
+      "J 金融业": -0.033085,
+      "I 信息技术": -0.027147,
+      "M 科研服务": -0.027041,
+      "G 运输仓储": -0.020907,
+      "Q 卫生": -0.017684,
+      "F 批发零售": -0.016646,
+      "C 制造业": -0.016037,
+      "H 住宿餐饮": 0.015223,
+      "B 采矿业": -0.014024,
+      "L 商务服务": -0.013054,
+      "O 居民服务": -0.012958,
+      "N 公共环保": -0.010935,
+      "S 综合": 0.010169,
+      "A 农林牧渔": -0.008988,
+      "E 建筑业": -0.006595,
+      "D 水电煤气": -0.005153,
+      "R 文化传播": -0.002464,
+      "K 房地产": -0.00167
+    },
+    "market_cap_ic": {
+      "Q1": -0.003579,
+      "Q2": -0.0148,
+      "Q3": -0.013044,
+      "Q4": -0.013548,
+      "Q5": -0.016696
+    }
+  },
+  "factor_redundancy": {
+    "redundant_pairs": [
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount;@atr_14;mul",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount;@atr_14;add",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount;@atr_14;add",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount;@atr_14;add",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount",
+        "f2": "amount",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "mcap",
+        "f2": "mcap",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "roe",
+        "f2": "roe",
+        "spearman_corr": 1.0
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount;@atr_14;add",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount;@atr_14;add",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount",
+        "spearman_corr": 0.972
+      },
+      {
+        "f1": "mcap;20;ts_std",
+        "f2": "mcap",
+        "spearman_corr": 0.8681
+      },
+      {
+        "f1": "mcap;20;ts_std",
+        "f2": "mcap",
+        "spearman_corr": 0.8681
+      },
+      {
+        "f1": "mcap;20;ts_std",
+        "f2": "mcap",
+        "spearman_corr": 0.8681
+      },
+      {
+        "f1": "mcap;20;ts_std",
+        "f2": "mcap",
+        "spearman_corr": 0.8681
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8568
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8568
+      },
+      {
+        "f1": "amount;@atr_14;add",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8512
+      },
+      {
+        "f1": "amount",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8512
+      },
+      {
+        "f1": "amount",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8512
+      },
+      {
+        "f1": "amount",
+        "f2": "amount;cn_10y;mul;37;ts_max",
+        "spearman_corr": 0.8512
+      },
+      {
+        "f1": "amount;cn_10y;mul;37;ts_max",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.747
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7421
+      },
+      {
+        "f1": "amount;@atr_14;mul",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7421
+      },
+      {
+        "f1": "amount;@atr_14;add",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7364
+      },
+      {
+        "f1": "amount",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7364
+      },
+      {
+        "f1": "amount",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7364
+      },
+      {
+        "f1": "amount",
+        "f2": "mcap;20;ts_std",
+        "spearman_corr": 0.7364
+      }
+    ],
+    "high_corr_count": 39
+  },
+  "ml_feature_importance": {
+    "importances": {
+      "f_9": "34",
+      "f_2": "25",
+      "f_3": "25",
+      "f_7": "23",
+      "f_0": "21",
+      "f_8": "16",
+      "f_1": "0",
+      "f_4": "0",
+      "f_5": "0",
+      "f_6": "0"
+    },
+    "ndcg_score": 0.497005
+  },
+  "backtest_diagnostics": {
+    "annual_return": 0.0,
+    "max_drawdown": 0.0,
+    "sharpe": 0.0,
+    "win_rate": 0.0,
+    "n_trades": 0,
+    "fitness_score": 0.0
+  }
+}
